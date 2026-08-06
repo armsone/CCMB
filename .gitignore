@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+Products/
+PROJECT_CONTEXT.md
+.DS_Store
+*.log
+*.dmg
+*.zip
