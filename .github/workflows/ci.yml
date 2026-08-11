@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: swift test
+      - name: arm64 release build
+        run: swift build --scratch-path .build/ci-arm64 --triple arm64-apple-macosx11.0 -c release
+      - name: x86_64 Catalina release build
+        run: swift build --scratch-path .build/ci-x86_64 --triple x86_64-apple-macosx10.15 -c release
+      - name: Script syntax
+        run: |
+          bash -n Scripts/package-macos.sh
+          sh -n Scripts/codex-usage
+      - name: Whitespace check
+        run: git diff --check

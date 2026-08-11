@@ -2,22 +2,290 @@ import AppKit
 import Darwin
 import Foundation
 import Network
+import os.log
 
-private struct RateLimitSnapshot {
-    let accountID: String?
-    let usedPercent: Double?
-    let windowDurationMinutes: Int?
-    let resetsAt: Date?
-    let sparkLimitName: String?
-    let sparkUsedPercent: Double?
-    let sparkResetsAt: Date?
-    let resetCredits: Int?
-    let creditBalance: Double?
-    let detailedCreditsReturned: Bool
-    let updatedAt: Date
+private let ccmbLog = OSLog(subsystem: "com.codex.creditmenubar", category: "CCMB")
+
+private func writePrivateLog(_ message: String) {
+    os_log("%{private}@", log: ccmbLog, type: .debug, message)
 }
 
-private final class CodexAppServerClient {
+private enum SharedUsageStore {
+    static let directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library")
+        .appendingPathComponent("Application Support")
+        .appendingPathComponent("CCMB")
+    static let snapshotURL = directoryURL.appendingPathComponent("usage-v1.json")
+    static let helperURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".codex")
+        .appendingPathComponent("bin")
+        .appendingPathComponent("ccmb-usage")
+
+    static func publish(_ snapshot: RateLimitSnapshot, refreshInterval: TimeInterval) throws {
+        let remainingPercent = snapshot.usedPercent.map(UsageCore.remainingPercent)
+        let freshForSeconds = max(45, Int(refreshInterval) + 15)
+        let sequence = Int64((snapshot.updatedAt.timeIntervalSince1970 * 1_000).rounded())
+
+        var payload: [String: Any] = [
+            "schemaVersion": 1,
+            "status": "ok",
+            "source": "codex app-server",
+            "method": "account/rateLimits/read",
+            "weeklyRemainingPercent": remainingPercent ?? NSNull(),
+            "creditBalance": snapshot.creditBalance ?? NSNull(),
+            "usedPercent": snapshot.usedPercent ?? NSNull(),
+            "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
+            "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "fetchedAt": iso8601Formatter.string(from: snapshot.updatedAt),
+            "publishedAt": iso8601Formatter.string(from: Date()),
+            "sequence": sequence,
+            "refreshIntervalSeconds": Int(refreshInterval),
+            "freshForSeconds": freshForSeconds,
+            "ccmbProcessID": ProcessInfo.processInfo.processIdentifier,
+            "ccmbBundleIdentifier": Bundle.main.bundleIdentifier ?? "",
+            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        ]
+
+        if let sparkUsedPercent = snapshot.sparkUsedPercent {
+            payload["sparkRemainingPercent"] = min(max(100 - sparkUsedPercent, 0), 100)
+        }
+
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directoryURL.path)
+
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: snapshotURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: snapshotURL.path)
+    }
+
+    static func installHelper() throws {
+        guard let executableURL = Bundle.main.executableURL else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let helperDirectory = helperURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: helperDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let escapedExecutablePath = executableURL.path.replacingOccurrences(of: "'", with: "'\\''")
+        let script = """
+        #!/bin/sh
+        # CCMB_USAGE_HELPER_VERSION=1
+        exec '\(escapedExecutablePath)' --ccmb-usage "$@"
+        """ + "\n"
+        guard let data = script.data(using: .utf8) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+        try data.write(to: helperURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helperURL.path)
+    }
+
+    static func readPayload() throws -> [String: Any]? {
+        guard FileManager.default.fileExists(atPath: snapshotURL.path) else { return nil }
+        let data = try Data(contentsOf: snapshotURL)
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              payload["schemaVersion"] as? Int == 1 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return payload
+    }
+
+    private static var iso8601Formatter: ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+}
+
+private enum UsageCommand {
+    static func runIfRequested() -> Bool {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        guard arguments.contains("--ccmb-usage") else { return false }
+
+        do {
+            let cached = try SharedUsageStore.readPayload().map(decorateCache)
+            if arguments.contains("--verify-live") {
+                let direct = try readDirect()
+                var output = direct
+                output["verification"] = verification(cached: cached, direct: direct)
+                printJSON(output)
+            } else if arguments.contains("--cache-only") {
+                guard let cached else {
+                    throw UsageCommandError.message("CCMB 공유 파일이 없습니다: \(SharedUsageStore.snapshotURL.path)")
+                }
+                printJSON(cached)
+            } else if let cached, cached["fresh"] as? Bool == true {
+                printJSON(cached)
+            } else {
+                var direct = try readDirect()
+                direct["cacheFallbackReason"] = cached == nil ? "missing" : "stale-or-ccmb-not-running"
+                if let cached {
+                    direct["ccmbCache"] = cached
+                }
+                printJSON(direct)
+            }
+        } catch {
+            FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
+            Darwin.exit(EXIT_FAILURE)
+        }
+
+        return true
+    }
+
+    private static func decorateCache(_ payload: [String: Any]) -> [String: Any] {
+        var output: [String: Any] = [
+            "weeklyRemainingPercent": payload["weeklyRemainingPercent"] ?? NSNull(),
+            "creditBalance": payload["creditBalance"] ?? NSNull(),
+            "usedPercent": payload["usedPercent"] ?? NSNull(),
+            "windowDurationMins": payload["windowDurationMins"] ?? NSNull(),
+            "resetsAt": payload["resetsAt"] ?? NSNull(),
+            "origin": "ccmb-cache",
+            "fetchedAt": payload["fetchedAt"] ?? NSNull()
+        ]
+
+        let fetchedAt = (payload["fetchedAt"] as? String).flatMap(iso8601Formatter.date(from:))
+        let ageSeconds = UsageCore.cacheAgeSeconds(fetchedAt: fetchedAt, now: Date())
+        let freshForSeconds = payload["freshForSeconds"] as? Int ?? 45
+        let ccmbRunning = processMatches(
+            payload["ccmbProcessID"],
+            bundleIdentifier: payload["ccmbBundleIdentifier"] as? String
+        )
+        let statusOK = payload["status"] as? String == "ok"
+        output["ageSeconds"] = ageSeconds
+        output["freshForSeconds"] = freshForSeconds
+        output["fresh"] = UsageCore.cacheIsFresh(
+            statusOK: statusOK,
+            processMatches: ccmbRunning,
+            ageSeconds: ageSeconds,
+            freshForSeconds: freshForSeconds
+        )
+        output["evidence"] = [
+            "status": payload["status"] ?? NSNull(),
+            "source": payload["source"] ?? NSNull(),
+            "method": payload["method"] ?? NSNull(),
+            "sequence": payload["sequence"] ?? NSNull(),
+            "publishedAt": payload["publishedAt"] ?? NSNull(),
+            "ccmbRunning": ccmbRunning,
+            "cachePath": SharedUsageStore.snapshotURL.path
+        ]
+        return output
+    }
+
+    private static func readDirect() throws -> [String: Any] {
+        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var capturedSnapshot: RateLimitSnapshot?
+        var capturedError: String?
+        let client = CodexAppServerClient(callbackQueue: nil)
+
+        client.onRateLimitsUpdated = { snapshot in
+            lock.lock()
+            capturedSnapshot = snapshot
+            lock.unlock()
+            semaphore.signal()
+        }
+        client.onError = { message in
+            lock.lock()
+            capturedError = message
+            lock.unlock()
+            semaphore.signal()
+        }
+        client.start()
+        let waitResult = semaphore.wait(timeout: .now() + 15)
+        client.stop()
+
+        guard waitResult == .success else {
+            throw UsageCommandError.message("codex app-server가 15초 안에 응답하지 않았습니다.")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if let capturedError {
+            throw UsageCommandError.message(capturedError)
+        }
+        guard let snapshot = capturedSnapshot, let usedPercent = snapshot.usedPercent else {
+            throw UsageCommandError.message("Codex 사용량 응답을 읽지 못했습니다.")
+        }
+
+        let fetchedAt = iso8601Formatter.string(from: snapshot.updatedAt)
+        return [
+            "weeklyRemainingPercent": min(max(100 - usedPercent, 0), 100),
+            "creditBalance": snapshot.creditBalance ?? NSNull(),
+            "usedPercent": usedPercent,
+            "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
+            "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "origin": "direct-app-server",
+            "fetchedAt": fetchedAt,
+            "ageSeconds": 0,
+            "freshForSeconds": 15,
+            "fresh": true,
+            "evidence": [
+                "status": "ok",
+                "source": "codex app-server",
+                "method": "account/rateLimits/read",
+                "verifiedAt": fetchedAt
+            ]
+        ]
+    }
+
+    private static func verification(cached: [String: Any]?, direct: [String: Any]) -> [String: Any] {
+        let weeklyMatches = numbersMatch(cached?["weeklyRemainingPercent"], direct["weeklyRemainingPercent"])
+        let creditMatches = numbersMatch(cached?["creditBalance"], direct["creditBalance"])
+        return [
+            "mode": "independent-app-server-read",
+            "matches": cached != nil && weeklyMatches && creditMatches,
+            "weeklyRemainingMatches": cached != nil && weeklyMatches,
+            "creditBalanceMatches": cached != nil && creditMatches,
+            "ccmb": cached ?? NSNull()
+        ]
+    }
+
+    private static func numbersMatch(_ left: Any?, _ right: Any?) -> Bool {
+        if left is NSNull || right is NSNull {
+            return left is NSNull && right is NSNull
+        }
+        guard let left = (left as? NSNumber)?.doubleValue,
+              let right = (right as? NSNumber)?.doubleValue else { return false }
+        return abs(left - right) <= 0.000001
+    }
+
+    private static func processMatches(_ value: Any?, bundleIdentifier: String?) -> Bool {
+        guard let pid = (value as? NSNumber)?.int32Value, pid > 1 else { return false }
+        guard Darwin.kill(pid, 0) == 0 || errno == EPERM else { return false }
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return true }
+        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == bundleIdentifier
+    }
+
+    private static func printJSON(_ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line.append("\n")
+        FileHandle.standardOutput.write(Data(line.utf8))
+    }
+
+    private static var iso8601Formatter: ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+}
+
+private enum UsageCommandError: LocalizedError {
+    case message(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .message(let message): message
+        }
+    }
+}
+
+private final class CodexAppServerClient: @unchecked Sendable {
     private struct LaunchCommand {
         let executable: URL
         let arguments: [String]
@@ -31,6 +299,7 @@ private final class CodexAppServerClient {
 
     private let processQueue = DispatchQueue(label: "CodexCreditMenuBar.CodexAppServerClient")
     private let processQueueKey = DispatchSpecificKey<UInt8>()
+    private let callbackQueue: DispatchQueue?
     private var process: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
@@ -40,7 +309,6 @@ private final class CodexAppServerClient {
     private var nextID = 1
     private var isInitialized = false
     private var pending: [Int: (Result<Any, Error>) -> Void] = [:]
-    private let logURL = URL(fileURLWithPath: "/tmp/CodexCreditMenuBar.debug.log")
     private var accountID: String?
     private var isRefreshing = false
     private var refreshStartedAt: Date?
@@ -52,7 +320,8 @@ private final class CodexAppServerClient {
     var onError: ((String) -> Void)?
     var onRestartRequired: ((String) -> Void)?
 
-    init() {
+    init(callbackQueue: DispatchQueue? = .main) {
+        self.callbackQueue = callbackQueue
         processQueue.setSpecific(key: processQueueKey, value: 1)
     }
 
@@ -70,7 +339,10 @@ private final class CodexAppServerClient {
                 return
             }
 
-            guard self.isInitialized else { return }
+            guard self.isInitialized else {
+                self.log("refresh skipped: initialization in progress")
+                return
+            }
             if self.isRefreshing {
                 let elapsed = abs(self.refreshStartedAt?.timeIntervalSinceNow ?? 0)
                 guard elapsed > 15 else {
@@ -208,7 +480,7 @@ private final class CodexAppServerClient {
         }
 
         currentProcess.terminationHandler = nil
-        try? stdinPipe?.fileHandleForWriting.close()
+        stdinPipe?.fileHandleForWriting.ccmbClose()
 
         if currentProcess.isRunning {
             log("stopping app-server pid \(currentProcess.processIdentifier) with SIGTERM")
@@ -301,7 +573,7 @@ private final class CodexAppServerClient {
             stderrPipe?.fileHandleForWriting
         ]
         for case let handle? in handles {
-            try? handle.close()
+            handle.ccmbClose()
         }
 
         stdinPipe = nil
@@ -312,13 +584,15 @@ private final class CodexAppServerClient {
     }
 
     private func initialize() {
+        let clientVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "development"
         sendRequest(
             method: "initialize",
             params: [
                 "clientInfo": [
                     "name": "codex_credit_menubar",
                     "title": "Codex Credit Menu Bar",
-                    "version": "0.3.20"
+                    "version": clientVersion
                 ]
             ]
         ) { result in
@@ -337,6 +611,7 @@ private final class CodexAppServerClient {
                 }
             case .failure(let error):
                 self.emitError(error.localizedDescription)
+                self.stopCurrentProcess()
             }
         }
     }
@@ -370,7 +645,7 @@ private final class CodexAppServerClient {
             self.refreshGeneration += 1
             self.stopCurrentProcess()
 
-            DispatchQueue.main.async {
+            self.deliverCallback {
                 self.onRestartRequired?("정보 가져오기가 응답하지 않아 앱을 재시작합니다.")
             }
         }
@@ -388,7 +663,7 @@ private final class CodexAppServerClient {
             switch result {
             case .success(let value):
                 guard let object = value as? [String: Any] else {
-                    self.emitError("Codex usage response could not be read.")
+                    self.emitError("Codex 사용량 응답을 읽지 못했습니다.")
                     return
                 }
                 self.onRateLimitsUpdated?(Self.parseRateLimits(object, accountID: self.accountID))
@@ -450,8 +725,8 @@ private final class CodexAppServerClient {
         }
 
         do {
-            try inputHandle.write(contentsOf: data)
-            try inputHandle.write(contentsOf: newline)
+            try inputHandle.ccmbWrite(data)
+            try inputHandle.ccmbWrite(newline)
             return .success(())
         } catch {
             let transportError = transportError("stdin 쓰기 실패: \(error.localizedDescription)")
@@ -548,8 +823,16 @@ private final class CodexAppServerClient {
     private func emitError(_ message: String) {
         guard !message.isEmpty else { return }
         log("error \(message)")
-        DispatchQueue.main.async {
+        deliverCallback {
             self.onError?(message)
+        }
+    }
+
+    private func deliverCallback(_ callback: @escaping () -> Void) {
+        if let callbackQueue {
+            callbackQueue.async(execute: callback)
+        } else {
+            callback()
         }
     }
 
@@ -664,18 +947,7 @@ private final class CodexAppServerClient {
     }
 
     private func log(_ message: String) {
-        let line = "[\(Date())] \(message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-
-        if FileManager.default.fileExists(atPath: logURL.path) {
-            if let handle = try? FileHandle(forWritingTo: logURL) {
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-                try? handle.close()
-            }
-        } else {
-            try? data.write(to: logURL)
-        }
+        writePrivateLog(message)
     }
 
     private static func parseRateLimits(_ object: [String: Any], accountID: String?) -> RateLimitSnapshot {
@@ -754,319 +1026,6 @@ private enum CodexClientError: LocalizedError {
     }
 }
 
-private final class WhiteMenuRowView: NSView {
-    static let backgroundColor = NSColor.black.withAlphaComponent(0.1)
-    static let textColor = NSColor.white.withAlphaComponent(0.8)
-    static let rowHeight: CGFloat = 22
-
-    private let hoverLayer = CALayer()
-    private let stateLabel = NSTextField(labelWithString: "")
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let arrowLabel = NSTextField(labelWithString: "")
-    private weak var item: NSMenuItem?
-    private var trackingArea: NSTrackingArea?
-    private var isHovered = false {
-        didSet {
-            updateHoverAppearance()
-        }
-    }
-
-    init(item: NSMenuItem) {
-        self.item = item
-        super.init(frame: NSRect(x: 0, y: 0, width: 260, height: Self.rowHeight))
-
-        wantsLayer = true
-        refreshAppearance()
-        hoverLayer.opacity = 0
-        hoverLayer.cornerRadius = 6
-        hoverLayer.backgroundColor = NSColor.white.withAlphaComponent(0.16).cgColor
-        hoverLayer.borderColor = NSColor.white.withAlphaComponent(0.28).cgColor
-        hoverLayer.borderWidth = 0.5
-        hoverLayer.shadowColor = NSColor.white.cgColor
-        hoverLayer.shadowOpacity = 0.12
-        hoverLayer.shadowRadius = 5
-        hoverLayer.shadowOffset = .zero
-        layer?.addSublayer(hoverLayer)
-        setup(label: stateLabel, alignment: .center)
-        setup(label: titleLabel, alignment: .left)
-        setup(label: arrowLabel, alignment: .center)
-        arrowLabel.stringValue = item.submenu == nil ? "" : "›"
-
-        addSubview(stateLabel)
-        addSubview(titleLabel)
-        addSubview(arrowLabel)
-        update(title: item.title, state: item.state)
-    }
-
-    func refreshAppearance() {
-        layer?.backgroundColor = Self.backgroundColor.cgColor
-        stateLabel.textColor = Self.textColor
-        titleLabel.textColor = Self.textColor
-        arrowLabel.textColor = Self.textColor
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func layout() {
-        super.layout()
-        refreshAppearance()
-        hoverLayer.frame = bounds.insetBy(dx: 5, dy: 1)
-        stateLabel.frame = NSRect(x: 10, y: -4, width: 22, height: Self.rowHeight)
-        arrowLabel.frame = NSRect(x: bounds.width - 34, y: -4, width: 22, height: Self.rowHeight)
-        titleLabel.frame = NSRect(x: 40, y: -4, width: bounds.width - 80, height: Self.rowHeight)
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-
-        let trackingArea = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(trackingArea)
-        self.trackingArea = trackingArea
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        guard isInteractive else { return }
-        isHovered = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard let item else { return }
-
-        if let submenu = item.submenu {
-            submenu.popUp(positioning: nil, at: NSPoint(x: bounds.maxX - 8, y: bounds.maxY), in: self)
-            return
-        }
-
-        item.menu?.cancelTracking()
-        if let action = item.action {
-            NSApp.sendAction(action, to: item.target, from: item)
-        }
-    }
-
-    func update(title: String, state: NSControl.StateValue) {
-        titleLabel.stringValue = title
-        stateLabel.stringValue = state == .on ? "✓" : ""
-        arrowLabel.stringValue = item?.submenu == nil ? "" : "›"
-        needsLayout = true
-        needsDisplay = true
-    }
-
-    func setRowWidth(_ width: CGFloat) {
-        frame.size.width = width
-        needsLayout = true
-    }
-
-    private func setup(label: NSTextField, alignment: NSTextAlignment) {
-        label.textColor = Self.textColor
-        label.font = .menuFont(ofSize: 0)
-        label.alignment = alignment
-        label.lineBreakMode = .byTruncatingTail
-        label.backgroundColor = .clear
-        label.isBordered = false
-        label.isEditable = false
-        label.isSelectable = false
-    }
-
-    private var isInteractive: Bool {
-        item?.action != nil || item?.submenu != nil
-    }
-
-    private func updateHoverAppearance() {
-        let targetOpacity: Float = isHovered && isInteractive ? 1 : 0
-        let animation = CABasicAnimation(keyPath: "opacity")
-        animation.fromValue = hoverLayer.presentation()?.opacity ?? hoverLayer.opacity
-        animation.toValue = targetOpacity
-        animation.duration = 0.08
-        hoverLayer.opacity = targetOpacity
-        hoverLayer.add(animation, forKey: "opacity")
-    }
-}
-
-private final class BlackMenuSeparatorView: NSView {
-    private let lineLayer = CALayer()
-
-    init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 260, height: 7))
-        wantsLayer = true
-        layer?.backgroundColor = WhiteMenuRowView.backgroundColor.cgColor
-        lineLayer.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
-        layer?.addSublayer(lineLayer)
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func refreshAppearance() {
-        layer?.backgroundColor = WhiteMenuRowView.backgroundColor.cgColor
-        lineLayer.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
-    }
-
-    override func layout() {
-        super.layout()
-        refreshAppearance()
-        lineLayer.frame = NSRect(x: 10, y: floor(bounds.height / 2), width: bounds.width - 20, height: 1)
-    }
-
-    func setRowWidth(_ width: CGFloat) {
-        frame.size.width = width
-        needsLayout = true
-    }
-}
-
-private final class FooterGlassButton: NSButton {
-    var isCircle = false {
-        didSet {
-            needsLayout = true
-        }
-    }
-
-    private var trackingArea: NSTrackingArea?
-    private var isHovered = false {
-        didSet {
-            updateGlassAppearance()
-        }
-    }
-
-    override func layout() {
-        super.layout()
-        layer?.cornerRadius = isCircle ? min(bounds.width, bounds.height) / 2 : 8
-        updateGlassAppearance()
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-
-        let trackingArea = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(trackingArea)
-        self.trackingArea = trackingArea
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovered = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-    }
-
-    private func updateGlassAppearance() {
-        wantsLayer = true
-        layer?.masksToBounds = false
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(isHovered ? 0.22 : 0).cgColor
-        layer?.borderColor = NSColor.white.withAlphaComponent(isHovered ? 0.42 : 0).cgColor
-        layer?.borderWidth = isHovered ? 0.7 : 0
-        layer?.shadowColor = NSColor.white.cgColor
-        layer?.shadowOpacity = isHovered ? 0.16 : 0
-        layer?.shadowRadius = isHovered ? 7 : 4
-        layer?.shadowOffset = .zero
-    }
-}
-
-private final class FooterControlsView: NSView {
-    private let restartButton = FooterGlassButton(title: "다시 시작", target: nil, action: nil)
-    private let linkButton = FooterGlassButton(title: "!", target: nil, action: nil)
-    private let quitButton = FooterGlassButton(title: "종료", target: nil, action: nil)
-    private weak var parentMenu: NSMenu?
-    var onRestart: (() -> Void)?
-    var onOpenLink: (() -> Void)?
-    var onQuit: (() -> Void)?
-
-    init(menu: NSMenu?) {
-        self.parentMenu = menu
-        super.init(frame: NSRect(x: 0, y: 0, width: 260, height: 27))
-        wantsLayer = true
-        refreshAppearance()
-        setupButton(restartButton, action: #selector(restartClicked))
-        setupButton(linkButton, action: #selector(linkClicked))
-        setupButton(quitButton, action: #selector(quitClicked))
-        linkButton.isCircle = true
-        linkButton.toolTip = "Instagram"
-        addSubview(restartButton)
-        addSubview(linkButton)
-        addSubview(quitButton)
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func refreshAppearance() {
-        layer?.backgroundColor = WhiteMenuRowView.backgroundColor.cgColor
-    }
-
-    override func layout() {
-        super.layout()
-        layer?.backgroundColor = WhiteMenuRowView.backgroundColor.cgColor
-        let inset: CGFloat = 8
-        let gap: CGFloat = 6
-        let centerWidth: CGFloat = 28
-        let sideWidth = floor((bounds.width - (inset * 2) - (gap * 2) - centerWidth) / 2)
-        restartButton.frame = NSRect(x: inset, y: 3, width: sideWidth, height: 21)
-        linkButton.frame = NSRect(x: restartButton.frame.maxX + gap, y: 3, width: centerWidth, height: 21)
-        quitButton.frame = NSRect(x: linkButton.frame.maxX + gap, y: 3, width: sideWidth, height: 21)
-    }
-
-    func setRowWidth(_ width: CGFloat) {
-        frame.size.width = width
-        needsLayout = true
-    }
-
-    private func setupButton(_ button: NSButton, action: Selector) {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .foregroundColor: WhiteMenuRowView.textColor,
-            .font: NSFont.menuFont(ofSize: 0)
-        ]
-        button.target = self
-        button.action = action
-        button.isBordered = false
-        button.bezelStyle = .regularSquare
-        button.font = .menuFont(ofSize: 0)
-        button.contentTintColor = WhiteMenuRowView.textColor
-        button.attributedTitle = NSAttributedString(string: button.title, attributes: attributes)
-        button.attributedAlternateTitle = NSAttributedString(string: button.title, attributes: attributes)
-        button.alignment = .center
-        button.setButtonType(.momentaryChange)
-    }
-
-    @objc private func restartClicked() {
-        parentMenu?.cancelTracking()
-        onRestart?()
-    }
-
-    @objc private func linkClicked() {
-        parentMenu?.cancelTracking()
-        onOpenLink?()
-    }
-
-    @objc private func quitClicked() {
-        parentMenu?.cancelTracking()
-        onQuit?()
-    }
-}
-
 private extension Dictionary where Key == String, Value == Any {
     func value(at path: [String]) -> Any? {
         guard let first = path.first else { return self }
@@ -1090,17 +1049,36 @@ private extension Dictionary where Key == String, Value == Any {
     }
 }
 
+private extension FileHandle {
+    func ccmbWrite(_ data: Data) throws {
+        if #available(macOS 10.15.4, *) {
+            try write(contentsOf: data)
+        } else {
+            write(data)
+        }
+    }
+
+    func ccmbClose() {
+        if #available(macOS 10.15.4, *) {
+            try? close()
+        } else {
+            closeFile()
+        }
+    }
+}
+
+@MainActor
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let client = CodexAppServerClient()
     private let networkMonitor = NWPathMonitor()
     private let networkQueue = DispatchQueue(label: "CodexCreditMenuBar.NetworkMonitor")
     private var countdownTimer: DispatchSourceTimer?
-    private let autoRefreshLock = NSLock()
-    private var autoRefreshGeneration = 0
-    private var refreshInterval: TimeInterval = 30
-    private var nextAutoRefreshAt = Date().addingTimeInterval(30)
+    private var autoRefreshTimer: DispatchSourceTimer?
+    private var refreshInterval: TimeInterval = AppDelegate.savedRefreshInterval()
+    private var nextAutoRefreshAt = Date()
     private var activity: NSObjectProtocol?
+    private var instanceLockFileDescriptor: Int32 = -1
 
     private let accountItem = NSMenuItem(title: "계정 확인 중...", action: nil, keyEquivalent: "")
     private let usageItem = NSMenuItem(title: "Codex 사용량 확인 중...", action: nil, keyEquivalent: "")
@@ -1111,23 +1089,40 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let updatedItem = NSMenuItem(title: "가져온 시간 없음", action: nil, keyEquivalent: "")
     private let refreshItem = NSMenuItem(title: "새로고침(30초 남음)", action: #selector(refresh), keyEquivalent: "")
     private let intervalItem = NSMenuItem(title: "자동 갱신 간격 30초", action: nil, keyEquivalent: "")
-    private let refreshOffItem = NSMenuItem(title: "Off", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
+    private let refreshOffItem = NSMenuItem(title: "끔", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
     private let refresh30Item = NSMenuItem(title: "30초", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
     private let refresh60Item = NSMenuItem(title: "1분", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
     private let refresh300Item = NSMenuItem(title: "5분", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
     private let launchAtLoginItem = NSMenuItem(title: "자동시작", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+    private let shareItem = NSMenuItem(title: "다른 채팅과 공유", action: nil, keyEquivalent: "")
+    private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중...", action: nil, keyEquivalent: "")
+    private let shareFolderItem = NSMenuItem(title: "저장 위치 열기", action: #selector(openSharedUsageFolder), keyEquivalent: "")
+    private let copySharePromptItem = NSMenuItem(title: "채팅 요청문 복사", action: #selector(copySharePrompt), keyEquivalent: "")
+    private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
+    private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
+    private let restartItem = NSMenuItem(title: "CCMB 다시 시작", action: #selector(restartApp), keyEquivalent: "")
+    private let footerLinkItem = NSMenuItem(title: "Instagram 열기", action: #selector(openFooterLink), keyEquivalent: "")
+    private let quitItem = NSMenuItem(title: "CCMB 종료", action: #selector(quit), keyEquivalent: "q")
     private var lastRateLimitUpdatedAt: Date?
+    private var lastSnapshot: RateLimitSnapshot?
+    private var lastSharedUsageAt: Date?
+    private var lastShareError: String?
+    private var shareFeedback: (message: String, expiresAt: Date)?
+    private var lastErrorMessage: String?
     private var wakeRecoveryToken = 0
     private let wakeRestartDelay: TimeInterval = 14
     private var isOffline = false
     deinit {
-        appLog("delegate deinit")
+        writePrivateLog("app delegate deinit")
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         appLog("delegate did finish launching")
         NSApp.setActivationPolicy(.accessory)
-        terminateOtherInstances()
+        guard acquireSingleInstanceLock() else {
+            NSApp.terminate(nil)
+            return
+        }
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
             reason: "Keep Codex credit auto-refresh running"
@@ -1139,6 +1134,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         configureStatusItem()
+        installUsageHelper()
         configureClient()
         startNetworkMonitor()
         refreshLaunchAgentPathIfNeeded()
@@ -1157,20 +1153,37 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             ProcessInfo.processInfo.endActivity(activity)
         }
         client.stop()
+        if instanceLockFileDescriptor >= 0 {
+            Darwin.close(instanceLockFileDescriptor)
+            instanceLockFileDescriptor = -1
+        }
     }
 
-    private func terminateOtherInstances() {
-        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) where app.processIdentifier != currentPID {
-            app.terminate()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                if !app.isTerminated {
-                    app.forceTerminate()
-                }
-            }
+    private func acquireSingleInstanceLock() -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                at: SharedUsageStore.directoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            appLog("single instance directory failed: \(error.localizedDescription)")
+            return false
         }
+
+        let lockURL = SharedUsageStore.directoryURL.appendingPathComponent("instance.lock")
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else {
+            appLog("single instance lock open failed: errno \(errno)")
+            return false
+        }
+        guard Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
+            Darwin.close(descriptor)
+            appLog("another CCMB instance is already running")
+            return false
+        }
+        instanceLockFileDescriptor = descriptor
+        return true
     }
 
     @objc private func handleWakeFromSleep() {
@@ -1258,63 +1271,49 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func restartAutoRefreshTimer() {
-        autoRefreshLock.lock()
-        autoRefreshGeneration += 1
-        let generation = autoRefreshGeneration
-        let interval = refreshInterval
-        autoRefreshLock.unlock()
+        autoRefreshTimer?.cancel()
+        autoRefreshTimer = nil
 
-        guard interval > 0 else {
-            appLog("auto refresh loop off")
+        guard refreshInterval > 0 else {
+            appLog("auto refresh timer off")
+            nextAutoRefreshAt = Date()
+            updateCountdown()
             return
         }
 
-        appLog("auto refresh loop start \(Int(interval))s generation \(generation)")
-        Thread.detachNewThread { [weak self] in
-            while true {
-                Thread.sleep(forTimeInterval: interval)
-                guard let self else {
-                    AppDelegate.appLog("auto refresh loop stopped: delegate missing")
-                    return
-                }
-                guard self.isAutoRefreshGenerationActive(generation) else {
-                    self.appLog("auto refresh loop stopped: stale generation \(generation)")
-                    return
-                }
-                self.appLog("auto refresh loop wake generation \(generation)")
-                self.performAutoRefresh()
-            }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + refreshInterval,
+            repeating: refreshInterval,
+            leeway: .milliseconds(250)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.performAutoRefresh()
         }
+        autoRefreshTimer = timer
+        nextAutoRefreshAt = Date().addingTimeInterval(refreshInterval)
+        timer.resume()
+        appLog("auto refresh timer start \(Int(refreshInterval))s")
+        updateCountdown()
     }
 
     private func stopAutoRefreshLoop() {
-        autoRefreshLock.lock()
-        autoRefreshGeneration += 1
-        autoRefreshLock.unlock()
-        appLog("auto refresh loop stop")
-    }
-
-    private func isAutoRefreshGenerationActive(_ generation: Int) -> Bool {
-        autoRefreshLock.lock()
-        defer { autoRefreshLock.unlock() }
-        return autoRefreshGeneration == generation && refreshInterval > 0
+        autoRefreshTimer?.cancel()
+        autoRefreshTimer = nil
+        appLog("auto refresh timer stop")
     }
 
     private func performAutoRefresh() {
         appLog("auto refresh perform")
+        nextAutoRefreshAt = Date().addingTimeInterval(refreshInterval)
         guard !isOffline else {
-            DispatchQueue.main.async {
-                self.showOfflineStatus()
-            }
+            showOfflineStatus()
             return
         }
 
-        DispatchQueue.main.async {
-            self.nextAutoRefreshAt = Date().addingTimeInterval(self.refreshInterval)
-            self.setDetailTitle("자동 갱신 중...", for: self.usageItem)
-            self.setDetailTitle("자동 가져오기 중...", for: self.updatedItem)
-            self.updateCountdown()
-        }
+        setDetailTitle("자동 갱신 중...", for: usageItem)
+        setDetailTitle("자동 가져오기 중...", for: updatedItem)
+        updateCountdown()
         client.refreshRateLimits()
     }
 
@@ -1328,6 +1327,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateCountdown() {
+        updateShareStatus()
         guard refreshInterval > 0 else {
             setDetailTitle("새로고침(자동 갱신 꺼짐)", for: refreshItem)
             return
@@ -1348,90 +1348,36 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         setDetailTitle(refresh300Item.title, for: refresh300Item)
         setDetailTitle(refreshInterval > 0
             ? "자동 갱신 간격 \(Self.durationTitle(seconds: Int(refreshInterval)))"
-            : "자동 갱신 간격 Off", for: intervalItem)
+            : "자동 갱신 꺼짐", for: intervalItem)
     }
 
     private func setDetailTitle(_ title: String, for item: NSMenuItem) {
         item.title = title
-        item.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [
-                .foregroundColor: WhiteMenuRowView.textColor,
-                .font: NSFont.menuFont(ofSize: 0)
-            ]
-        )
-        if let menu = item.menu {
-            resizeWhiteMenuRows(in: menu)
-        }
-        if let rowView = item.view as? WhiteMenuRowView {
-            rowView.update(title: title, state: item.state)
-            rowView.refreshAppearance()
-        }
     }
 
-    private func forceWhiteMenuTitles(in menu: NSMenu) {
+    private func prepareNativeMenu(_ menu: NSMenu) {
         menu.autoenablesItems = false
         for item in menu.items {
             guard !item.isSeparatorItem else { continue }
             item.isEnabled = true
-            item.keyEquivalent = ""
-            setDetailTitle(item.title, for: item)
-            if item.view == nil {
-                item.view = WhiteMenuRowView(item: item)
-            }
             if let submenu = item.submenu {
-                forceWhiteMenuTitles(in: submenu)
-            }
-            if let rowView = item.view as? WhiteMenuRowView {
-                rowView.refreshAppearance()
-            }
-            if let separatorView = item.view as? BlackMenuSeparatorView {
-                separatorView.refreshAppearance()
-            }
-            if let footerView = item.view as? FooterControlsView {
-                footerView.refreshAppearance()
+                prepareNativeMenu(submenu)
             }
         }
-        resizeWhiteMenuRows(in: menu)
-    }
-
-    private func resizeWhiteMenuRows(in menu: NSMenu) {
-        let font = NSFont.menuFont(ofSize: 0)
-        let maxTextWidth = menu.items
-            .filter { !$0.isSeparatorItem }
-            .map { ($0.title as NSString).size(withAttributes: [.font: font]).width }
-            .max() ?? 160
-        let hasState = menu.items.contains { $0.state == .on }
-        let hasSubmenu = menu.items.contains { $0.submenu != nil }
-        let stateWidth: CGFloat = hasState ? 34 : 18
-        let arrowWidth: CGFloat = hasSubmenu ? 36 : 14
-        let width = min(max(ceil(maxTextWidth + stateWidth + arrowWidth + 32), 190), 340)
-
-        for item in menu.items {
-            (item.view as? WhiteMenuRowView)?.setRowWidth(width)
-            (item.view as? BlackMenuSeparatorView)?.setRowWidth(width)
-            (item.view as? FooterControlsView)?.setRowWidth(width)
-            if let submenu = item.submenu {
-                resizeWhiteMenuRows(in: submenu)
-            }
-        }
-    }
-
-    private func makeBlackSeparatorItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        item.view = BlackMenuSeparatorView()
-        return item
     }
 
     private func configureStatusItem() {
         statusItem.button?.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        statusItem.button?.toolTip = "Codex credit usage"
+        statusItem.button?.toolTip = "Codex 남은 사용량과 크레딧"
         statusItem.button?.imageHugsTitle = true
+        statusItem.button?.setAccessibilityLabel("Codex 사용량")
 
-        if let image = NSImage(systemSymbolName: "bolt.circle", accessibilityDescription: "Codex") {
-            image.isTemplate = true
-            statusItem.button?.image = image
-            statusItem.button?.imagePosition = .imageLeading
+        if #available(macOS 11.0, *) {
+            if let image = NSImage(systemSymbolName: "bolt.circle", accessibilityDescription: "Codex") {
+                image.isTemplate = true
+                statusItem.button?.image = image
+                statusItem.button?.imagePosition = .imageLeading
+            }
         }
         setStatusTitle("...")
 
@@ -1464,14 +1410,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         makeDashboardLink(accountItem)
 
         menu.addItem(accountItem)
-        menu.addItem(makeBlackSeparatorItem())
+        menu.addItem(.separator())
         menu.addItem(usageItem)
         menu.addItem(sparkUsageItem)
         menu.addItem(creditBalanceItem)
         menu.addItem(resetCreditsItem)
         menu.addItem(resetItem)
-        menu.addItem(makeBlackSeparatorItem())
+        menu.addItem(.separator())
         menu.addItem(updatedItem)
+        copyErrorItem.isHidden = true
+        menu.addItem(copyErrorItem)
         menu.addItem(refreshItem)
 
         let intervalMenu = NSMenu()
@@ -1486,22 +1434,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         intervalItem.submenu = intervalMenu
         menu.addItem(intervalItem)
-        menu.addItem(makeBlackSeparatorItem())
+        menu.addItem(.separator())
+        configureShareMenu()
+        menu.addItem(shareItem)
+        menu.addItem(.separator())
         menu.addItem(launchAtLoginItem)
-        menu.addItem(makeBlackSeparatorItem())
-        let footerItem = NSMenuItem(title: "다시 시작 ! 종료", action: nil, keyEquivalent: "")
-        let footerView = FooterControlsView(menu: menu)
-        footerView.onRestart = { [weak self] in
-            self?.restartApp()
-        }
-        footerView.onOpenLink = { [weak self] in
-            self?.openFooterLink()
-        }
-        footerView.onQuit = {
-            NSApp.terminate(nil)
-        }
-        footerItem.view = footerView
-        menu.addItem(footerItem)
+        menu.addItem(.separator())
+        menu.addItem(restartItem)
+        menu.addItem(footerLinkItem)
+        menu.addItem(quitItem)
 
         for item in menu.items {
             item.target = self
@@ -1512,9 +1453,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh60Item.target = self
         refresh300Item.target = self
         launchAtLoginItem.target = self
+        shareFolderItem.target = self
+        copySharePromptItem.target = self
+        copyShareCommandItem.target = self
+        copyErrorItem.target = self
+        restartItem.target = self
+        footerLinkItem.target = self
+        quitItem.target = self
         updateRefreshIntervalMenu()
         updateLaunchAtLoginMenu()
-        forceWhiteMenuTitles(in: menu)
+        prepareNativeMenu(menu)
 
         statusItem.menu = menu
     }
@@ -1536,8 +1484,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         client.onError = { [weak self] message in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.lastErrorMessage = message
                 self.setStatusTitle("!")
                 self.setDetailTitle("오류: \(message)", for: self.usageItem)
+                self.usageItem.toolTip = message
+                self.copyErrorItem.isHidden = false
                 self.setDetailTitle("가져오기 실패 \(Self.timeFormatter.string(from: Date()))", for: self.updatedItem)
             }
         }
@@ -1572,7 +1523,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.appLog("network online")
                     self.setDetailTitle("연결 복구, 다시 가져오는 중...", for: self.updatedItem)
                     self.client.recoverFromSleep()
-                    self.resetCountdown()
+                    self.restartAutoRefreshTimer()
                 }
             }
         }
@@ -1587,7 +1538,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func apply(_ snapshot: RateLimitSnapshot) {
+        lastSnapshot = snapshot
         setStatusTitle(Self.statusTitle(from: snapshot))
+        statusItem.button?.setAccessibilityValue(Self.accessibilityStatus(from: snapshot))
+        lastErrorMessage = nil
+        usageItem.toolTip = nil
+        copyErrorItem.isHidden = true
 
         if let usedPercent = snapshot.usedPercent {
             let remainingPercent = Self.remainingUsagePercent(from: usedPercent)
@@ -1597,10 +1553,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let sparkUsedPercent = snapshot.sparkUsedPercent {
+            sparkUsageItem.isHidden = false
             let sparkRemainingPercent = Self.remainingUsagePercent(from: sparkUsedPercent)
             setDetailTitle("남은 Spark 사용량 \(Self.percentTitle(from: sparkRemainingPercent))", for: sparkUsageItem)
         } else {
-            setDetailTitle("Spark 사용량 정보 없음", for: sparkUsageItem)
+            sparkUsageItem.isHidden = true
         }
 
         if let accountID = snapshot.accountID {
@@ -1620,9 +1577,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let resetCredits = snapshot.resetCredits {
+            resetCreditsItem.isHidden = false
             setDetailTitle("리셋 크레딧 \(resetCredits)개", for: resetCreditsItem)
         } else {
-            setDetailTitle("리셋 크레딧 정보 없음", for: resetCreditsItem)
+            resetCreditsItem.isHidden = true
         }
 
         if let creditBalance = snapshot.creditBalance {
@@ -1634,6 +1592,97 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         setDetailTitle("최근 가져옴 \(Self.timeFormatter.string(from: snapshot.updatedAt))", for: updatedItem)
+        do {
+            try SharedUsageStore.publish(snapshot, refreshInterval: refreshInterval)
+            lastSharedUsageAt = snapshot.updatedAt
+            lastShareError = nil
+            updateShareStatus()
+        } catch {
+            lastShareError = error.localizedDescription
+            updateShareStatus()
+            appLog("shared usage publish failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func configureShareMenu() {
+        let menu = NSMenu()
+        let pathItem = NSMenuItem(title: "저장: ~/Library/Application Support/CCMB", action: nil, keyEquivalent: "")
+        let fileItem = NSMenuItem(title: "파일: usage-v1.json", action: nil, keyEquivalent: "")
+        let guideItem = NSMenuItem(title: "채팅에 “CCMB 사용량 알려줘” 입력", action: nil, keyEquivalent: "")
+
+        menu.addItem(shareStatusItem)
+        menu.addItem(.separator())
+        menu.addItem(pathItem)
+        menu.addItem(fileItem)
+        menu.addItem(shareFolderItem)
+        menu.addItem(.separator())
+        menu.addItem(guideItem)
+        menu.addItem(copySharePromptItem)
+        menu.addItem(copyShareCommandItem)
+        shareItem.submenu = menu
+    }
+
+    private func installUsageHelper() {
+        do {
+            try SharedUsageStore.installHelper()
+            appLog("usage helper installed at \(SharedUsageStore.helperURL.path)")
+        } catch {
+            appLog("usage helper install failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func updateShareStatus() {
+        if let lastShareError {
+            setDetailTitle("공유 저장 실패", for: shareStatusItem)
+            shareStatusItem.toolTip = lastShareError
+            return
+        }
+        shareStatusItem.toolTip = nil
+
+        if let feedback = shareFeedback {
+            if Date() <= feedback.expiresAt {
+                setDetailTitle(feedback.message, for: shareStatusItem)
+                return
+            }
+            shareFeedback = nil
+        }
+
+        guard let lastSharedUsageAt else {
+            setDetailTitle("공유 데이터 저장 대기 중...", for: shareStatusItem)
+            return
+        }
+
+        let age = max(0, Int(Date().timeIntervalSince(lastSharedUsageAt)))
+        let freshnessLimit = max(45, Int(refreshInterval) + 15)
+        let state = age <= freshnessLimit ? "실시간" : "오래됨"
+        setDetailTitle("공유 상태 \(state) · \(Self.durationTitle(seconds: age)) 전", for: shareStatusItem)
+    }
+
+    @objc private func openSharedUsageFolder() {
+        try? FileManager.default.createDirectory(at: SharedUsageStore.directoryURL, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(SharedUsageStore.directoryURL)
+    }
+
+    @objc private func copySharePrompt() {
+        let prompt = "~/.codex/bin/ccmb-usage를 실행해서 CCMB의 남은 주간 사용량과 크레딧을 알려줘. fresh가 false면 오래된 데이터라고 말해줘."
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(prompt, forType: .string)
+        shareFeedback = ("채팅 요청문을 복사했습니다", Date().addingTimeInterval(3))
+        updateShareStatus()
+    }
+
+    @objc private func copyShareCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(SharedUsageStore.helperURL.path, forType: .string)
+        shareFeedback = ("공유 명령을 복사했습니다", Date().addingTimeInterval(3))
+        updateShareStatus()
+    }
+
+    @objc private func copyLastError() {
+        guard let lastErrorMessage else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lastErrorMessage, forType: .string)
+        setDetailTitle("오류 내용을 복사했습니다", for: updatedItem)
     }
 
     @objc private func refresh() {
@@ -1642,6 +1691,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        restartAutoRefreshTimer()
         resetCountdown()
         setDetailTitle("Codex 사용량 새로고침 중...", for: usageItem)
         setDetailTitle("수동 가져오기 중...", for: updatedItem)
@@ -1651,6 +1701,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func setRefreshInterval(_ sender: NSMenuItem) {
         guard let seconds = sender.representedObject as? Int else { return }
         refreshInterval = TimeInterval(seconds)
+        UserDefaults.standard.set(seconds, forKey: Self.refreshIntervalDefaultsKey)
+        if let lastSnapshot {
+            do {
+                try SharedUsageStore.publish(lastSnapshot, refreshInterval: refreshInterval)
+                lastShareError = nil
+            } catch {
+                lastShareError = error.localizedDescription
+            }
+        }
         updateRefreshIntervalMenu()
         client.setAutoRefreshInterval(refreshInterval)
         restartAutoRefreshTimer()
@@ -1753,9 +1812,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return formatter
     }()
 
-    private static func creditTitle(from balance: Double?) -> String {
-        guard let balance else { return "..." }
-        return "\(Int(balance.rounded()))"
+    private static func creditTitle(from balance: Double?) -> String? {
+        UsageCore.creditTitle(from: balance)
     }
 
     private static func creditDetailTitle(from balance: Double) -> String {
@@ -1767,27 +1825,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let usedPercent = snapshot.usedPercent {
             let remainingPercent = remainingUsagePercent(from: usedPercent)
-            if remainingPercent > 0 {
-                parts.append(percentTitle(from: remainingPercent))
-            }
+            parts.append(percentTitle(from: remainingPercent))
         }
 
-        if let sparkUsedPercent = snapshot.sparkUsedPercent {
-            let sparkRemainingPercent = remainingUsagePercent(from: sparkUsedPercent)
-            if sparkRemainingPercent > 0 {
-                parts.append("S\(percentTitle(from: sparkRemainingPercent))")
-            }
+        if let creditTitle = creditTitle(from: snapshot.creditBalance) {
+            parts.append(creditTitle)
         }
 
-        if parts.count < 2 {
-            parts.append(creditTitle(from: snapshot.creditBalance))
-        }
-
-        return parts.joined(separator: ",")
+        return parts.isEmpty ? "—" : parts.joined(separator: ",")
     }
 
     private static func remainingUsagePercent(from usedPercent: Double) -> Double {
-        min(max(100 - usedPercent, 0), 100)
+        UsageCore.remainingPercent(from: usedPercent)
+    }
+
+    private static func accessibilityStatus(from snapshot: RateLimitSnapshot) -> String {
+        var parts: [String] = []
+        if let usedPercent = snapshot.usedPercent {
+            parts.append("남은 주간 사용량 \(percentTitle(from: remainingUsagePercent(from: usedPercent)))")
+        }
+        if let balance = snapshot.creditBalance, balance > 0 {
+            parts.append("크레딧 \(creditDetailTitle(from: balance))")
+        }
+        return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
     }
 
     private static func percentTitle(from percent: Double) -> String {
@@ -1827,7 +1887,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
 
     private static let launchAgentLabel = "com.codex.creditmenubar"
+    private static let refreshIntervalDefaultsKey = "automaticRefreshIntervalSeconds"
     private static let footerLinkURLString = "https://www.instagram.com/armsone/"
+
+    private static func savedRefreshInterval() -> TimeInterval {
+        let saved = UserDefaults.standard.object(forKey: refreshIntervalDefaultsKey) == nil
+            ? nil
+            : UserDefaults.standard.integer(forKey: refreshIntervalDefaultsKey)
+        return UsageCore.normalizedRefreshInterval(saved)
+    }
 
     private static let launchAgentURL: URL = {
         FileManager.default.homeDirectoryForCurrentUser
@@ -1841,26 +1909,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func appLog(_ message: String) {
-        let line = "[\(Date())] app \(message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-        let url = URL(fileURLWithPath: "/tmp/CodexCreditMenuBar.debug.log")
-
-        if FileManager.default.fileExists(atPath: url.path) {
-            if let handle = try? FileHandle(forWritingTo: url) {
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-                try? handle.close()
-            }
-        } else {
-            try? data.write(to: url)
-        }
+        writePrivateLog("app \(message)")
     }
 }
 
+@MainActor
 private enum AppRuntime {
     static let app = NSApplication.shared
     static let delegate = AppDelegate()
 }
 
-AppRuntime.app.delegate = AppRuntime.delegate
-AppRuntime.app.run()
+if !UsageCommand.runIfRequested() {
+    MainActor.assumeIsolated {
+        AppRuntime.app.delegate = AppRuntime.delegate
+        AppRuntime.app.run()
+    }
+}

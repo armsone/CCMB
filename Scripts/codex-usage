@@ -1,0 +1,10 @@
+#!/bin/sh
+# CCMB_CODEX_USAGE_WRAPPER_VERSION=1
+
+helper_path="$HOME/.codex/bin/ccmb-usage"
+if [ ! -x "$helper_path" ]; then
+  printf 'CCMB 공유 명령이 없습니다. CCMB 앱을 한 번 실행해 주세요: %s\n' "$helper_path" >&2
+  exit 1
+fi
+
+exec "$helper_path" "$@"

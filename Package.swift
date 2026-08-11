@@ -5,12 +5,16 @@ import PackageDescription
 let package = Package(
     name: "CodexCreditMenuBar",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v10_15)
     ],
     products: [
         .executable(name: "CodexCreditMenuBar", targets: ["CodexCreditMenuBar"])
     ],
     targets: [
-        .executableTarget(name: "CodexCreditMenuBar")
+        .executableTarget(name: "CodexCreditMenuBar"),
+        .testTarget(
+            name: "CodexCreditMenuBarTests",
+            dependencies: ["CodexCreditMenuBar"]
+        )
     ]
 )

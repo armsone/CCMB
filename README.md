@@ -6,19 +6,36 @@ CCMB is an unofficial macOS menu bar app that displays Codex usage and credit in
 
 ## Features
 
-- Weekly Codex and Spark usage remaining in the menu bar
-- Credit balance and reset information when the signed-in account provides it
+- Weekly Codex usage remaining and positive credit balance, including values below one, in the menu bar
+- Spark usage, credit balance, and reset information in the detail menu when the signed-in account provides it
 - Manual and configurable automatic refresh
+- Local JSON sharing for other apps and Codex chats, with freshness evidence
 - Offline and sleep/wake recovery
 - Optional launch at login
 
 ## Requirements
 
-- macOS 13 or later
+- macOS 10.15 Catalina or later
 - Swift 5.9 or later when building from source
 - Codex CLI installed and signed in for the current macOS user
 
 CCMB starts the local `codex app-server` process and uses the current user's existing Codex session. It does not bundle an API key or login credential.
+
+## Share usage with other apps and chats
+
+After every successful refresh, CCMB writes an owner-readable JSON snapshot to:
+
+```text
+~/Library/Application Support/CCMB/usage-v1.json
+```
+
+CCMB also installs a small local command at `~/.codex/bin/ccmb-usage`. In another Codex chat, ask:
+
+```text
+Run ~/.codex/bin/ccmb-usage and tell me the remaining weekly usage and credit balance. If fresh is false, say that the data is old.
+```
+
+Use `~/.codex/bin/ccmb-usage --verify-live` when an independent `codex app-server` read should be compared with the saved CCMB value. The JSON includes its source, fetch time, age, running-process check, and verification result. It never includes login tokens.
 
 ## Run from source
 
@@ -60,17 +77,16 @@ NOTARY_PROFILE="ccmb-notary" \
 You can create the notarization profile with:
 
 ```sh
-xcrun notarytool store-credentials "ccmb-notary" \
-  --apple-id "you@example.com" \
-  --team-id "TEAMID" \
-  --password "app-specific-password"
+xcrun notarytool store-credentials "ccmb-notary"
 ```
+
+Enter the Apple ID, team ID, and app-specific password at the secure prompts. Do not place the password in command arguments or shell history.
 
 Never commit signing credentials, notarization profiles, or generated app/DMG files. Generated files under `Products/` are ignored by Git.
 
 ## Privacy and diagnostics
 
-CCMB reads account usage data from the locally installed Codex CLI and displays it on the Mac where it runs. It does not add its own analytics or telemetry. Diagnostic messages are written to `/tmp/CodexCreditMenuBar.debug.log`; raw app-server request and response bodies are not logged.
+CCMB reads account usage data from the locally installed Codex CLI and displays it on the Mac where it runs. It does not add its own analytics or telemetry. Diagnostic messages use macOS unified logging with private string fields; raw app-server request and response bodies are not logged.
 
 ## Contributing
 

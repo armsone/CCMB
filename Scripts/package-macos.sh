@@ -4,10 +4,11 @@ set -euo pipefail
 APP_NAME="CCMB"
 EXECUTABLE_NAME="CodexCreditMenuBar"
 BUNDLE_ID="com.codex.creditmenubar"
-APP_VERSION="0.3.20"
-APP_BUILD="37"
-DEPLOYMENT_TARGET="13.0"
-ARM64_TRIPLE="arm64-apple-macosx$DEPLOYMENT_TARGET"
+APP_VERSION="0.3.24"
+APP_BUILD="41"
+DEPLOYMENT_TARGET="10.15"
+ARM64_DEPLOYMENT_TARGET="11.0"
+ARM64_TRIPLE="arm64-apple-macosx$ARM64_DEPLOYMENT_TARGET"
 X86_64_TRIPLE="x86_64-apple-macosx$DEPLOYMENT_TARGET"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PRODUCTS_DIR="$ROOT_DIR/Products"
@@ -48,8 +49,6 @@ usage() {
   printf 'Environment:\n'
   printf '  CODESIGN_IDENTITY               Developer ID Application identity. Defaults to ad-hoc "-".\n'
   printf '  NOTARY_PROFILE                  xcrun notarytool keychain profile name.\n'
-  printf '  APPLE_ID, APPLE_TEAM_ID,\n'
-  printf '  APPLE_APP_SPECIFIC_PASSWORD     Alternative notarytool credentials.\n'
 }
 
 while (($#)); do
@@ -113,18 +112,11 @@ if [[ "$NOTARIZE" == true ]]; then
     exit 69
   fi
 
-  if [[ -n "$NOTARY_PROFILE" ]]; then
-    notary_args=(--keychain-profile "$NOTARY_PROFILE")
-  elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]]; then
-    if [[ ! "$APPLE_TEAM_ID" =~ ^[[:alnum:]]{10}$ ]]; then
-      printf 'error: APPLE_TEAM_ID must contain exactly 10 alphanumeric characters.\n' >&2
-      exit 64
-    fi
-    notary_args=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
-  else
-    printf 'error: notarization needs NOTARY_PROFILE or APPLE_ID/APPLE_TEAM_ID/APPLE_APP_SPECIFIC_PASSWORD.\n' >&2
+  if [[ -z "$NOTARY_PROFILE" ]]; then
+    printf 'error: notarization requires NOTARY_PROFILE so credentials never appear in process arguments.\n' >&2
     exit 64
   fi
+  notary_args=(--keychain-profile "$NOTARY_PROFILE")
 fi
 
 require_products_path() {
