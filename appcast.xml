@@ -1,0 +1,19 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>CCMB</title>
+        <item>
+            <title>0.3.25</title>
+            <pubDate>Thu, 13 Aug 2026 18:54:08 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.25</link>
+            <sparkle:version>42</sparkle:version>
+            <sparkle:shortVersionString>0.3.25</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.25
+
+자동 업데이트와 안정성 개선을 포함합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.25/CCMB-0.3.25.dmg" length="2106176" type="application/octet-stream" sparkle:edSignature="iYMybkqNPwvm7ZK4jl2KX5CR1yarhiTFp4tYJBFHW9pURsCVTNXLibB9B/lWZN3qZXGV//zxGDJzP4dlB+cLAg=="/>
+        </item>
+    </channel>
+</rss>

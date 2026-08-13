@@ -82,7 +82,7 @@ fi
   --maximum-deltas 0 \
   --maximum-versions 3 \
   --embed-release-notes \
-  -o appcast.xml \
+  -o "$WORK_DIR/appcast.xml" \
   "$WORK_DIR"
 
 cp "$WORK_DIR/CCMB-$APP_VERSION.dmg" "$VERSIONED_DMG_PATH"
