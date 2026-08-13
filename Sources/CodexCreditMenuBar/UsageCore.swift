@@ -15,6 +15,8 @@ struct RateLimitSnapshot {
 }
 
 enum UsageCore {
+    static let usageHelperMarker = "# CCMB_USAGE_HELPER_VERSION="
+
     static func remainingPercent(from usedPercent: Double) -> Double {
         min(max(100 - usedPercent, 0), 100)
     }
@@ -30,6 +32,18 @@ enum UsageCore {
         }
 
         return "\(Int(balance.rounded()))"
+    }
+
+    static func creditDetailTitle(from balance: Double) -> String {
+        let value = String(format: "%.2f", balance)
+        return value
+            .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
+    }
+
+    static func canReplaceUsageHelper(existingContents: String?) -> Bool {
+        guard let existingContents else { return true }
+        return existingContents.contains(usageHelperMarker)
     }
 
     static func cacheAgeSeconds(fetchedAt: Date?, now: Date) -> Int {

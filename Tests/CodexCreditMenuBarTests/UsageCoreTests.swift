@@ -16,6 +16,18 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertEqual(UsageCore.creditTitle(from: 10.6), "11")
     }
 
+    func testCreditDetailUsesAtMostTwoFractionDigits() {
+        XCTAssertEqual(UsageCore.creditDetailTitle(from: 0.1234), "0.12")
+        XCTAssertEqual(UsageCore.creditDetailTitle(from: 10.6), "10.6")
+        XCTAssertEqual(UsageCore.creditDetailTitle(from: 10), "10")
+    }
+
+    func testUsageHelperOnlyReplacesCCMBOwnedFile() {
+        XCTAssertTrue(UsageCore.canReplaceUsageHelper(existingContents: nil))
+        XCTAssertTrue(UsageCore.canReplaceUsageHelper(existingContents: "#!/bin/sh\n# CCMB_USAGE_HELPER_VERSION=1\n"))
+        XCTAssertFalse(UsageCore.canReplaceUsageHelper(existingContents: "#!/bin/sh\necho custom\n"))
+    }
+
     func testCacheAgeNeverBecomesNegative() {
         let now = Date(timeIntervalSince1970: 100)
         XCTAssertEqual(UsageCore.cacheAgeSeconds(fetchedAt: Date(timeIntervalSince1970: 90), now: now), 10)

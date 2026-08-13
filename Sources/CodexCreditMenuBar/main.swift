@@ -73,10 +73,16 @@ private enum SharedUsageStore {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        if FileManager.default.fileExists(atPath: helperURL.path) {
+            let existingContents = try String(contentsOf: helperURL, encoding: .utf8)
+            guard UsageCore.canReplaceUsageHelper(existingContents: existingContents) else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+        }
         let escapedExecutablePath = executableURL.path.replacingOccurrences(of: "'", with: "'\\''")
         let script = """
         #!/bin/sh
-        # CCMB_USAGE_HELPER_VERSION=1
+        \(UsageCore.usageHelperMarker)1
         exec '\(escapedExecutablePath)' --ccmb-usage "$@"
         """ + "\n"
         guard let data = script.data(using: .utf8) else {
@@ -1080,33 +1086,35 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activity: NSObjectProtocol?
     private var instanceLockFileDescriptor: Int32 = -1
 
-    private let accountItem = NSMenuItem(title: "계정 확인 중...", action: nil, keyEquivalent: "")
-    private let usageItem = NSMenuItem(title: "Codex 사용량 확인 중...", action: nil, keyEquivalent: "")
-    private let sparkUsageItem = NSMenuItem(title: "Spark 사용량 확인 중...", action: nil, keyEquivalent: "")
-    private let resetItem = NSMenuItem(title: "초기화 시간 확인 중...", action: nil, keyEquivalent: "")
-    private let resetCreditsItem = NSMenuItem(title: "리셋 크레딧 확인 중...", action: nil, keyEquivalent: "")
-    private let creditBalanceItem = NSMenuItem(title: "크레딧 확인 중...", action: nil, keyEquivalent: "")
+    private let accountItem = NSMenuItem(title: "계정 확인 중…", action: nil, keyEquivalent: "")
+    private let usageItem = NSMenuItem(title: "Codex 사용량 확인 중…", action: nil, keyEquivalent: "")
+    private let sparkUsageItem = NSMenuItem(title: "Spark 사용량 확인 중…", action: nil, keyEquivalent: "")
+    private let resetItem = NSMenuItem(title: "초기화 시간 확인 중…", action: nil, keyEquivalent: "")
+    private let resetCreditsItem = NSMenuItem(title: "초기화 크레딧 확인 중…", action: nil, keyEquivalent: "")
+    private let creditBalanceItem = NSMenuItem(title: "크레딧 확인 중…", action: nil, keyEquivalent: "")
     private let updatedItem = NSMenuItem(title: "가져온 시간 없음", action: nil, keyEquivalent: "")
-    private let refreshItem = NSMenuItem(title: "새로고침(30초 남음)", action: #selector(refresh), keyEquivalent: "")
-    private let intervalItem = NSMenuItem(title: "자동 갱신 간격 30초", action: nil, keyEquivalent: "")
+    private let refreshItem = NSMenuItem(title: "새로 고침 · 30초 후", action: #selector(refresh), keyEquivalent: "")
+    private let intervalItem = NSMenuItem(title: "자동 새로 고침 · 30초", action: nil, keyEquivalent: "")
     private let refreshOffItem = NSMenuItem(title: "끔", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
     private let refresh30Item = NSMenuItem(title: "30초", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
     private let refresh60Item = NSMenuItem(title: "1분", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
     private let refresh300Item = NSMenuItem(title: "5분", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
-    private let launchAtLoginItem = NSMenuItem(title: "자동시작", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-    private let shareItem = NSMenuItem(title: "다른 채팅과 공유", action: nil, keyEquivalent: "")
-    private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중...", action: nil, keyEquivalent: "")
+    private let launchAtLoginItem = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+    private let shareItem = NSMenuItem(title: "사용량 공유", action: nil, keyEquivalent: "")
+    private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중…", action: nil, keyEquivalent: "")
     private let shareFolderItem = NSMenuItem(title: "저장 위치 열기", action: #selector(openSharedUsageFolder), keyEquivalent: "")
     private let copySharePromptItem = NSMenuItem(title: "채팅 요청문 복사", action: #selector(copySharePrompt), keyEquivalent: "")
     private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
     private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
+    private let dashboardItem = NSMenuItem(title: "Codex 사용량 페이지 열기…", action: #selector(openDashboard), keyEquivalent: "")
     private let restartItem = NSMenuItem(title: "CCMB 다시 시작", action: #selector(restartApp), keyEquivalent: "")
-    private let footerLinkItem = NSMenuItem(title: "Instagram 열기", action: #selector(openFooterLink), keyEquivalent: "")
+    private let footerLinkItem = NSMenuItem(title: "GitHub에서 armsone 보기…", action: #selector(openFooterLink), keyEquivalent: "")
     private let quitItem = NSMenuItem(title: "CCMB 종료", action: #selector(quit), keyEquivalent: "q")
     private var lastRateLimitUpdatedAt: Date?
     private var lastSnapshot: RateLimitSnapshot?
     private var lastSharedUsageAt: Date?
     private var lastShareError: String?
+    private var helperInstallError: String?
     private var shareFeedback: (message: String, expiresAt: Date)?
     private var lastErrorMessage: String?
     private var wakeRecoveryToken = 0
@@ -1203,6 +1211,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setDetailTitle("잠자기 복귀: 복구 중...", for: usageItem)
         setDetailTitle("잠자기 복귀: 복구 중...", for: updatedItem)
+        statusItem.button?.setAccessibilityValue("사용량 복구 중")
 
         stopAutoRefreshLoop()
         countdownTimer?.cancel()
@@ -1313,6 +1322,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setDetailTitle("자동 갱신 중...", for: usageItem)
         setDetailTitle("자동 가져오기 중...", for: updatedItem)
+        statusItem.button?.setAccessibilityValue("사용량 업데이트 중")
         updateCountdown()
         client.refreshRateLimits()
     }
@@ -1329,12 +1339,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateCountdown() {
         updateShareStatus()
         guard refreshInterval > 0 else {
-            setDetailTitle("새로고침(자동 갱신 꺼짐)", for: refreshItem)
+            setDetailTitle("새로 고침", for: refreshItem)
             return
         }
 
         let seconds = max(0, Int(ceil(nextAutoRefreshAt.timeIntervalSinceNow)))
-        setDetailTitle("새로고침(\(Self.durationTitle(seconds: seconds)) 남음)", for: refreshItem)
+        setDetailTitle("새로 고침 · \(Self.durationTitle(seconds: seconds)) 후", for: refreshItem)
     }
 
     private func updateRefreshIntervalMenu() {
@@ -1347,8 +1357,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         setDetailTitle(refresh60Item.title, for: refresh60Item)
         setDetailTitle(refresh300Item.title, for: refresh300Item)
         setDetailTitle(refreshInterval > 0
-            ? "자동 갱신 간격 \(Self.durationTitle(seconds: Int(refreshInterval)))"
-            : "자동 갱신 꺼짐", for: intervalItem)
+            ? "자동 새로 고침 · \(Self.durationTitle(seconds: Int(refreshInterval)))"
+            : "자동 새로 고침 · 끔", for: intervalItem)
     }
 
     private func setDetailTitle(_ title: String, for item: NSMenuItem) {
@@ -1359,10 +1369,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         for item in menu.items {
             guard !item.isSeparatorItem else { continue }
-            item.isEnabled = true
             if let submenu = item.submenu {
                 prepareNativeMenu(submenu)
             }
+            item.isEnabled = item.action != nil || item.submenu != nil
         }
     }
 
@@ -1379,7 +1389,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 statusItem.button?.imagePosition = .imageLeading
             }
         }
-        setStatusTitle("...")
+        setStatusTitle("…")
+        statusItem.button?.setAccessibilityValue("사용량 확인 중")
 
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -1401,16 +1412,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         setDetailTitle(updatedItem.title, for: updatedItem)
         setDetailTitle(refreshItem.title, for: refreshItem)
         setDetailTitle(intervalItem.title, for: intervalItem)
-        makeDashboardLink(creditBalanceItem)
-        makeDashboardLink(usageItem)
-        makeDashboardLink(sparkUsageItem)
-        makeDashboardLink(resetCreditsItem)
-        makeDashboardLink(resetItem)
-        makeDashboardLink(updatedItem)
-        makeDashboardLink(accountItem)
+        sparkUsageItem.isHidden = true
+        resetCreditsItem.isHidden = true
 
-        menu.addItem(accountItem)
-        menu.addItem(.separator())
         menu.addItem(usageItem)
         menu.addItem(sparkUsageItem)
         menu.addItem(creditBalanceItem)
@@ -1434,6 +1438,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         intervalItem.submenu = intervalMenu
         menu.addItem(intervalItem)
+        menu.addItem(dashboardItem)
+        menu.addItem(accountItem)
         menu.addItem(.separator())
         configureShareMenu()
         menu.addItem(shareItem)
@@ -1457,6 +1463,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         copySharePromptItem.target = self
         copyShareCommandItem.target = self
         copyErrorItem.target = self
+        dashboardItem.target = self
         restartItem.target = self
         footerLinkItem.target = self
         quitItem.target = self
@@ -1465,11 +1472,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         prepareNativeMenu(menu)
 
         statusItem.menu = menu
-    }
-
-    private func makeDashboardLink(_ item: NSMenuItem) {
-        item.action = #selector(openDashboard)
-        item.target = self
     }
 
     private func configureClient() {
@@ -1486,7 +1488,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.lastErrorMessage = message
                 self.setStatusTitle("!")
-                self.setDetailTitle("오류: \(message)", for: self.usageItem)
+                self.statusItem.button?.setAccessibilityValue("사용량 가져오기 실패")
+                self.setDetailTitle("사용량을 가져오지 못했습니다", for: self.usageItem)
                 self.usageItem.toolTip = message
                 self.copyErrorItem.isHidden = false
                 self.setDetailTitle("가져오기 실패 \(Self.timeFormatter.string(from: Date()))", for: self.updatedItem)
@@ -1522,6 +1525,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else if wasOffline {
                     self.appLog("network online")
                     self.setDetailTitle("연결 복구, 다시 가져오는 중...", for: self.updatedItem)
+                    self.statusItem.button?.setAccessibilityValue("연결 복구 중")
                     self.client.recoverFromSleep()
                     self.restartAutoRefreshTimer()
                 }
@@ -1532,6 +1536,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showOfflineStatus() {
         setStatusTitle("OFF")
+        statusItem.button?.setAccessibilityValue("오프라인")
         setDetailTitle("오프라인", for: usageItem)
         setDetailTitle("인터넷 연결 대기 중...", for: updatedItem)
         updateCountdown()
@@ -1549,15 +1554,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             let remainingPercent = Self.remainingUsagePercent(from: usedPercent)
             setDetailTitle("남은 주간 사용량 \(Self.percentTitle(from: remainingPercent))", for: usageItem)
         } else {
-            setDetailTitle("주간 사용량을 받지 못했습니다.", for: usageItem)
+            setDetailTitle("주간 사용량 정보 없음", for: usageItem)
         }
 
         if let sparkUsedPercent = snapshot.sparkUsedPercent {
             sparkUsageItem.isHidden = false
             let sparkRemainingPercent = Self.remainingUsagePercent(from: sparkUsedPercent)
-            setDetailTitle("남은 Spark 사용량 \(Self.percentTitle(from: sparkRemainingPercent))", for: sparkUsageItem)
+            var sparkTitle = "남은 Spark 사용량 \(Self.percentTitle(from: sparkRemainingPercent))"
+            if let sparkResetsAt = snapshot.sparkResetsAt {
+                let relativeReset = Self.relativeFormatter.localizedString(for: sparkResetsAt, relativeTo: Date())
+                sparkTitle += " · \(relativeReset) 초기화"
+                sparkUsageItem.toolTip = Self.resetDateTimeFormatter.string(from: sparkResetsAt)
+            } else {
+                sparkUsageItem.toolTip = nil
+            }
+            setDetailTitle(sparkTitle, for: sparkUsageItem)
         } else {
             sparkUsageItem.isHidden = true
+            sparkUsageItem.toolTip = nil
         }
 
         if let accountID = snapshot.accountID {
@@ -1569,16 +1583,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         if let resetsAt = snapshot.resetsAt {
             let relativeReset = Self.relativeFormatter.localizedString(for: resetsAt, relativeTo: Date())
             let exactReset = Self.resetDateTimeFormatter.string(from: resetsAt)
-            setDetailTitle("\(relativeReset) 초기화 (\(exactReset))", for: resetItem)
+            setDetailTitle("\(relativeReset) 초기화", for: resetItem)
+            resetItem.toolTip = exactReset
         } else if let minutes = snapshot.windowDurationMinutes {
             setDetailTitle("사용량 창 \(minutes)분", for: resetItem)
+            resetItem.toolTip = nil
         } else {
             setDetailTitle("초기화 시간 없음", for: resetItem)
+            resetItem.toolTip = nil
         }
 
         if let resetCredits = snapshot.resetCredits {
             resetCreditsItem.isHidden = false
-            setDetailTitle("리셋 크레딧 \(resetCredits)개", for: resetCreditsItem)
+            setDetailTitle("초기화 크레딧 \(resetCredits)개", for: resetCreditsItem)
         } else {
             resetCreditsItem.isHidden = true
         }
@@ -1591,7 +1608,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 for: creditBalanceItem
             )
         }
-        setDetailTitle("최근 가져옴 \(Self.timeFormatter.string(from: snapshot.updatedAt))", for: updatedItem)
+        setDetailTitle("최근 업데이트 \(Self.timeFormatter.string(from: snapshot.updatedAt))", for: updatedItem)
         do {
             try SharedUsageStore.publish(snapshot, refreshInterval: refreshInterval)
             lastSharedUsageAt = snapshot.updatedAt
@@ -1625,13 +1642,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installUsageHelper() {
         do {
             try SharedUsageStore.installHelper()
+            helperInstallError = nil
+            copyShareCommandItem.isEnabled = true
             appLog("usage helper installed at \(SharedUsageStore.helperURL.path)")
         } catch {
+            helperInstallError = error.localizedDescription
+            copyShareCommandItem.isEnabled = false
+            updateShareStatus()
             appLog("usage helper install failed: \(error.localizedDescription)")
         }
     }
 
     private func updateShareStatus() {
+        if let helperInstallError {
+            setDetailTitle("공유 명령 설치 실패", for: shareStatusItem)
+            shareStatusItem.toolTip = helperInstallError
+            return
+        }
         if let lastShareError {
             setDetailTitle("공유 저장 실패", for: shareStatusItem)
             shareStatusItem.toolTip = lastShareError
@@ -1648,13 +1675,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let lastSharedUsageAt else {
-            setDetailTitle("공유 데이터 저장 대기 중...", for: shareStatusItem)
+            setDetailTitle("공유 데이터 저장 대기 중…", for: shareStatusItem)
             return
         }
 
         let age = max(0, Int(Date().timeIntervalSince(lastSharedUsageAt)))
         let freshnessLimit = max(45, Int(refreshInterval) + 15)
-        let state = age <= freshnessLimit ? "실시간" : "오래됨"
+        let state = age <= freshnessLimit ? "최신" : "오래됨"
         setDetailTitle("공유 상태 \(state) · \(Self.durationTitle(seconds: age)) 전", for: shareStatusItem)
     }
 
@@ -1695,6 +1722,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         resetCountdown()
         setDetailTitle("Codex 사용량 새로고침 중...", for: usageItem)
         setDetailTitle("수동 가져오기 중...", for: updatedItem)
+        statusItem.button?.setAccessibilityValue("사용량 새로 고침 중")
         client.refreshRateLimits()
     }
 
@@ -1715,14 +1743,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         restartAutoRefreshTimer()
         resetCountdown()
         if refreshInterval > 0 {
-            setDetailTitle("자동 갱신 \(sender.title)마다", for: updatedItem)
+            setDetailTitle("자동 새로 고침 · \(sender.title)", for: updatedItem)
             if isOffline {
                 showOfflineStatus()
             } else {
                 client.refreshRateLimits()
             }
         } else {
-            setDetailTitle("자동 갱신 꺼짐", for: updatedItem)
+            setDetailTitle("자동 새로 고침 꺼짐", for: updatedItem)
         }
     }
 
@@ -1817,7 +1845,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func creditDetailTitle(from balance: Double) -> String {
-        String(format: "%.4f", balance)
+        UsageCore.creditDetailTitle(from: balance)
     }
 
     private static func statusTitle(from snapshot: RateLimitSnapshot) -> String {
@@ -1829,10 +1857,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let creditTitle = creditTitle(from: snapshot.creditBalance) {
-            parts.append(creditTitle)
+            parts.append("C \(creditTitle)")
         }
 
-        return parts.isEmpty ? "—" : parts.joined(separator: ",")
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 
     private static func remainingUsagePercent(from usedPercent: Double) -> Double {
@@ -1888,7 +1916,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private static let launchAgentLabel = "com.codex.creditmenubar"
     private static let refreshIntervalDefaultsKey = "automaticRefreshIntervalSeconds"
-    private static let footerLinkURLString = "https://www.instagram.com/armsone/"
+    private static let footerLinkURLString = "https://github.com/armsone"
 
     private static func savedRefreshInterval() -> TimeInterval {
         let saved = UserDefaults.standard.object(forKey: refreshIntervalDefaultsKey) == nil
