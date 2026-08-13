@@ -4,19 +4,24 @@ set -euo pipefail
 APP_NAME="CCMB"
 EXECUTABLE_NAME="CodexCreditMenuBar"
 BUNDLE_ID="com.codex.creditmenubar"
-APP_VERSION="0.3.24"
-APP_BUILD="41"
+APP_VERSION="0.3.25"
+APP_BUILD="42"
 DEPLOYMENT_TARGET="10.15"
 ARM64_DEPLOYMENT_TARGET="11.0"
 ARM64_TRIPLE="arm64-apple-macosx$ARM64_DEPLOYMENT_TARGET"
 X86_64_TRIPLE="x86_64-apple-macosx$DEPLOYMENT_TARGET"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SWIFTPM="$ROOT_DIR/Scripts/swiftpm.sh"
 PRODUCTS_DIR="$ROOT_DIR/Products"
 RELEASE_DIR="$PRODUCTS_DIR/Release"
 FINAL_APP_PATH=""
 FINAL_DMG_PATH=""
 ICON_TOOL="$ROOT_DIR/Tools/MakeAppIcon.swift"
 SHARE_GUIDE="$ROOT_DIR/SHARE_README.md"
+SPARKLE_ARTIFACT_ROOT="$ROOT_DIR/.build/artifacts/sparkle/Sparkle"
+SPARKLE_FRAMEWORK_SOURCE="$SPARKLE_ARTIFACT_ROOT/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+SPARKLE_PUBLIC_KEY_FILE="$ROOT_DIR/Configuration/SparklePublicKey.txt"
+SPARKLE_FEED_URL="https://raw.githubusercontent.com/armsone/CCMB/main/appcast.xml"
 DMG_GUIDE_NAME="설치 및 사용 안내.md"
 BUILD_ROOT="$ROOT_DIR/.build/distribution"
 ARM64_SCRATCH="$BUILD_ROOT/arm64"
@@ -361,18 +366,46 @@ verify_developer_id_dmg_signature() {
   fi
 }
 
+sign_sparkle_framework() {
+  local framework="$1"
+  local sign_args=(--force --options runtime --sign "$CODESIGN_IDENTITY")
+
+  if [[ "$NOTARIZE" == true ]]; then
+    sign_args+=(--timestamp)
+  fi
+
+  codesign "${sign_args[@]}" "$framework/Versions/B/Autoupdate"
+  codesign "${sign_args[@]}" "$framework/Versions/B/Updater.app"
+  codesign "${sign_args[@]}" "$framework"
+}
+
 mkdir -p "$RELEASE_DIR"
 trap cleanup_package_workspace EXIT
 acquire_package_lock
 
+"$SWIFTPM" package --package-path "$ROOT_DIR" resolve
+if [[ ! -d "$SPARKLE_FRAMEWORK_SOURCE" ]]; then
+  printf 'error: Sparkle framework is missing after dependency resolution: %s\n' "$SPARKLE_FRAMEWORK_SOURCE" >&2
+  exit 66
+fi
+if [[ ! -f "$SPARKLE_PUBLIC_KEY_FILE" ]]; then
+  printf 'error: Sparkle public key is missing: %s\n' "$SPARKLE_PUBLIC_KEY_FILE" >&2
+  exit 66
+fi
+SPARKLE_PUBLIC_ED_KEY="$(tr -d '\r\n' < "$SPARKLE_PUBLIC_KEY_FILE")"
+if [[ ! "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+  printf 'error: Sparkle public key is not a valid base64 Ed25519 public key.\n' >&2
+  exit 65
+fi
+
 printf 'Building arm64 release binary (%s)...\n' "$ARM64_TRIPLE"
-swift build \
+"$SWIFTPM" build \
   --package-path "$ROOT_DIR" \
   --scratch-path "$ARM64_SCRATCH" \
   --triple "$ARM64_TRIPLE" \
   -c release \
   --product "$EXECUTABLE_NAME"
-ARM64_BIN_DIR="$(swift build \
+ARM64_BIN_DIR="$("$SWIFTPM" build \
   --package-path "$ROOT_DIR" \
   --scratch-path "$ARM64_SCRATCH" \
   --triple "$ARM64_TRIPLE" \
@@ -380,13 +413,13 @@ ARM64_BIN_DIR="$(swift build \
   --show-bin-path)"
 
 printf 'Building x86_64 release binary (%s)...\n' "$X86_64_TRIPLE"
-swift build \
+"$SWIFTPM" build \
   --package-path "$ROOT_DIR" \
   --scratch-path "$X86_64_SCRATCH" \
   --triple "$X86_64_TRIPLE" \
   -c release \
   --product "$EXECUTABLE_NAME"
-X86_64_BIN_DIR="$(swift build \
+X86_64_BIN_DIR="$("$SWIFTPM" build \
   --package-path "$ROOT_DIR" \
   --scratch-path "$X86_64_SCRATCH" \
   --triple "$X86_64_TRIPLE" \
@@ -404,7 +437,7 @@ APP_NOTARY_RESULT="$PACKAGE_WORK_DIR/$APP_NAME-app-notary-result.json"
 DMG_NOTARY_RESULT="$PACKAGE_WORK_DIR/$APP_NAME-dmg-notary-result.json"
 BACKUP_APP_PATH="$PACKAGE_WORK_DIR/previous-$APP_NAME.app"
 BACKUP_DMG_PATH="$PACKAGE_WORK_DIR/previous-$APP_NAME.dmg"
-mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
+mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources" "$APP_PATH/Contents/Frameworks"
 
 if [[ ! -f "$ICON_TOOL" ]]; then
   printf 'error: icon generator is missing: %s\n' "$ICON_TOOL" >&2
@@ -423,6 +456,11 @@ lipo -create \
   "$X86_64_BIN_DIR/$EXECUTABLE_NAME" \
   -output "$APP_EXECUTABLE"
 chmod 755 "$APP_EXECUTABLE"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_EXECUTABLE"
+
+SPARKLE_FRAMEWORK_DEST="$APP_PATH/Contents/Frameworks/Sparkle.framework"
+ditto "$SPARKLE_FRAMEWORK_SOURCE" "$SPARKLE_FRAMEWORK_DEST"
+rm -rf "$SPARKLE_FRAMEWORK_DEST/Versions/B/XPCServices" "$SPARKLE_FRAMEWORK_DEST/XPCServices"
 
 UNIVERSAL_ARCHS="$(lipo -archs "$APP_EXECUTABLE")"
 if [[ " $UNIVERSAL_ARCHS " != *" arm64 "* || " $UNIVERSAL_ARCHS " != *" x86_64 "* ]]; then
@@ -458,12 +496,23 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
   <string>$DEPLOYMENT_TARGET</string>
   <key>LSUIElement</key>
   <true/>
+  <key>SUFeedURL</key>
+  <string>$SPARKLE_FEED_URL</string>
+  <key>SUPublicEDKey</key>
+  <string>$SPARKLE_PUBLIC_ED_KEY</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <key>SUAutomaticallyUpdate</key>
+  <true/>
+  <key>SUScheduledCheckInterval</key>
+  <integer>21600</integer>
 </dict>
 </plist>
 PLIST
 plutil -lint "$APP_PATH/Contents/Info.plist"
 
 printf 'Signing app with identity: %s\n' "$CODESIGN_IDENTITY"
+sign_sparkle_framework "$SPARKLE_FRAMEWORK_DEST"
 if [[ "$NOTARIZE" == true ]]; then
   codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_PATH"
   verify_developer_id_app_signature "$APP_PATH"

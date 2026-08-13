@@ -9,6 +9,7 @@ CCMB is an unofficial macOS menu bar app that displays Codex usage and credit in
 - Weekly Codex usage remaining and positive credit balance, including values below one, in the menu bar
 - Spark usage, credit balance, and reset information in the detail menu when the signed-in account provides it
 - Manual and configurable automatic refresh
+- Signed automatic updates through Sparkle and GitHub Releases
 - Local JSON sharing for other apps and Codex chats, with freshness evidence
 - Offline and sleep/wake recovery
 - Optional launch at login
@@ -83,6 +84,16 @@ xcrun notarytool store-credentials "ccmb-notary"
 Enter the Apple ID, team ID, and app-specific password at the secure prompts. Do not place the password in command arguments or shell history.
 
 Never commit signing credentials, notarization profiles, or generated app/DMG files. Generated files under `Products/` are ignored by Git.
+
+## Publish a release
+
+Release publishing requires the Developer ID Application certificate, the `ccmb-notary` notarization profile, the Sparkle signing key stored in the login Keychain under the `CCMB` account, and an authenticated GitHub CLI. Then run:
+
+```sh
+./Scripts/publish-release.sh
+```
+
+The script creates and verifies a notarized Universal app and DMG, signs the update metadata, publishes the versioned DMG to GitHub Releases, and commits the updated `appcast.xml`. Installed builds check that feed every six hours and install signed updates automatically. Keep the Sparkle private key in Keychain and back it up securely; losing it prevents existing installations from trusting future updates.
 
 ## Privacy and diagnostics
 

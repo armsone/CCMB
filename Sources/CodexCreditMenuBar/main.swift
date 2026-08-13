@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import Foundation
 import Network
+import Sparkle
 import os.log
 
 private let ccmbLog = OSLog(subsystem: "com.codex.creditmenubar", category: "CCMB")
@@ -1079,6 +1080,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let client = CodexAppServerClient()
     private let networkMonitor = NWPathMonitor()
     private let networkQueue = DispatchQueue(label: "CodexCreditMenuBar.NetworkMonitor")
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     private var countdownTimer: DispatchSourceTimer?
     private var autoRefreshTimer: DispatchSourceTimer?
     private var refreshInterval: TimeInterval = AppDelegate.savedRefreshInterval()
@@ -1107,6 +1113,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
     private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
     private let dashboardItem = NSMenuItem(title: "Codex 사용량 페이지 열기…", action: #selector(openDashboard), keyEquivalent: "")
+    private let checkForUpdatesItem = NSMenuItem(
+        title: "업데이트 확인…",
+        action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+        keyEquivalent: ""
+    )
     private let restartItem = NSMenuItem(title: "CCMB 다시 시작", action: #selector(restartApp), keyEquivalent: "")
     private let footerLinkItem = NSMenuItem(title: "GitHub에서 armsone 보기…", action: #selector(openFooterLink), keyEquivalent: "")
     private let quitItem = NSMenuItem(title: "CCMB 종료", action: #selector(quit), keyEquivalent: "q")
@@ -1446,6 +1457,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(launchAtLoginItem)
         menu.addItem(.separator())
+        menu.addItem(checkForUpdatesItem)
         menu.addItem(restartItem)
         menu.addItem(footerLinkItem)
         menu.addItem(quitItem)
@@ -1453,6 +1465,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         for item in menu.items {
             item.target = self
         }
+        checkForUpdatesItem.target = updaterController
         refreshItem.target = self
         refreshOffItem.target = self
         refresh30Item.target = self
