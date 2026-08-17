@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.3.27</title>
+            <pubDate>Mon, 17 Aug 2026 23:46:33 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.27</link>
+            <sparkle:version>44</sparkle:version>
+            <sparkle:shortVersionString>0.3.27</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.27
+
+- Claude 사용량 라이브 조회 실패 원인을 구분해 오래된 값이 최신 정보처럼 보이지 않도록 개선했습니다.
+- 최신 라이브 값과 Claude Code 상태 캐시를 안전하게 병합하고 자동 재시도 안정성을 높였습니다.
+- 손상된 공유 캐시가 있어도 `ccmb-usage`가 실시간 조회로 복구하도록 개선했습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.27/CCMB-0.3.27.dmg" length="2147001" type="application/octet-stream" sparkle:edSignature="dmBbOw10X7LObBJsGOsIKNlbRy/ldPfojqbDJgHlzvio0scRHkWuCTqYKBG9kecsCtpWyzEGFRQGSzkP40bwAg=="/>
+        </item>
+        <item>
             <title>0.3.26</title>
             <pubDate>Mon, 17 Aug 2026 22:36:56 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.3.26</link>
