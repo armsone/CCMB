@@ -112,7 +112,17 @@ private enum UsageCommand {
         guard arguments.contains("--ccmb-usage") else { return false }
 
         do {
-            let cached = try SharedUsageStore.readPayload().map(decorateCache)
+            var cacheIsCorrupt = false
+            let cached: [String: Any]?
+            do {
+                cached = try SharedUsageStore.readPayload().map(decorateCache)
+            } catch {
+                // A present-but-corrupt or unsupported-schema cache must not block
+                // the direct live query below; only --cache-only treats this as fatal.
+                cacheIsCorrupt = true
+                cached = nil
+            }
+
             if arguments.contains("--verify-live") {
                 let direct = try readDirect()
                 var output = direct
@@ -120,14 +130,16 @@ private enum UsageCommand {
                 printJSON(output)
             } else if arguments.contains("--cache-only") {
                 guard let cached else {
-                    throw UsageCommandError.message("CCMB 공유 파일이 없습니다: \(SharedUsageStore.snapshotURL.path)")
+                    throw UsageCommandError.message(
+                        UsageCore.cacheOnlyFailureMessage(cacheIsCorrupt: cacheIsCorrupt, path: SharedUsageStore.snapshotURL.path)
+                    )
                 }
                 printJSON(cached)
             } else if let cached, cached["fresh"] as? Bool == true {
                 printJSON(cached)
             } else {
                 var direct = try readDirect()
-                direct["cacheFallbackReason"] = cached == nil ? "missing" : "stale-or-ccmb-not-running"
+                direct["cacheFallbackReason"] = UsageCore.cacheFallbackReason(cacheExists: cached != nil, cacheIsCorrupt: cacheIsCorrupt)
                 if let cached {
                     direct["ccmbCache"] = cached
                 }
@@ -1107,6 +1119,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastRateLimitUpdatedAt: Date?
     private var lastSnapshot: RateLimitSnapshot?
     private var lastClaudeSnapshot: ClaudeUsageSnapshot?
+    private var lastClaudeFetchFailureLabel: String?
+    /// How long a Claude snapshot is shown as current without qualification
+    /// even while the live endpoint is failing — long enough to ride out a
+    /// transient 429/network blip without nagging, short enough that a
+    /// genuinely stale ("47분 전") value still gets flagged.
+    private static let claudeStaleGraceSeconds: TimeInterval = 300
     private var lastSharedUsageAt: Date?
     private var lastShareError: String?
     private var helperInstallError: String?
@@ -1613,13 +1631,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func refreshClaudeUsage() {
-        lastClaudeSnapshot = ClaudeUsageStore.read()
+        lastClaudeSnapshot = ClaudeUsageCore.mergingCacheSnapshot(
+            current: lastClaudeSnapshot,
+            cache: ClaudeUsageStore.read()
+        )
         refreshStatusTitle()
         updateSplitPanel()
 
-        ClaudeOAuthUsageClient.fetchIfDue { [weak self] snapshot in
-            guard let self, let snapshot else { return }
-            self.lastClaudeSnapshot = snapshot
+        ClaudeOAuthUsageClient.fetchIfDue { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case .success(let snapshot):
+                self.lastClaudeSnapshot = ClaudeUsageCore.merge(preferred: snapshot, fallback: self.lastClaudeSnapshot)
+                self.lastClaudeFetchFailureLabel = nil
+            case .skippedInFlight, .skippedThrottled:
+                break
+            case .noCredential, .keychainCredentialUnreadable, .httpFailure, .transportFailure, .decodeFailure:
+                self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("claude usage fetch failed: \(diagnostic)")
+                }
+            }
             self.refreshStatusTitle()
             self.updateSplitPanel()
         }
@@ -1645,7 +1677,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         leftLines.append(accountItem.title)
         leftLines.append(updatedItem.title)
 
-        splitPanelView.setLines(left: leftLines, right: Self.claudeDetailLines(from: lastClaudeSnapshot))
+        splitPanelView.setLines(
+            left: leftLines,
+            right: Self.claudeDetailLines(from: lastClaudeSnapshot, fetchFailureLabel: lastClaudeFetchFailureLabel)
+        )
 
         accountItem.isHidden = true
         usageItem.isHidden = true
@@ -1658,8 +1693,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         splitPanelItem.isHidden = false
     }
 
-    private static func claudeDetailLines(from snapshot: ClaudeUsageSnapshot?) -> [String] {
+    private static func claudeDetailLines(
+        from snapshot: ClaudeUsageSnapshot?,
+        fetchFailureLabel: String?
+    ) -> [String] {
         guard let snapshot else {
+            if let fetchFailureLabel {
+                return ["Claude 갱신 실패: \(fetchFailureLabel)", "터미널에서 Claude Code 실행 시", "자동으로 채워집니다"]
+            }
             return ["Claude 정보 없음", "터미널에서 Claude Code 실행 시", "자동으로 채워집니다"]
         }
 
@@ -1693,7 +1734,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         if let publishedAt = snapshot.publishedAt {
-            lines.append("업데이트 \(relativeFormatter.localizedString(for: publishedAt, relativeTo: Date()))")
+            var line = "업데이트 \(relativeFormatter.localizedString(for: publishedAt, relativeTo: Date()))"
+            if let fetchFailureLabel,
+               !ClaudeUsageCore.isFresh(publishedAt: publishedAt, now: Date(), freshForSeconds: claudeStaleGraceSeconds) {
+                line += " · 갱신 실패: \(fetchFailureLabel)"
+            }
+            lines.append(line)
+        } else if let fetchFailureLabel {
+            lines.append("Claude 갱신 실패: \(fetchFailureLabel)")
         }
 
         return lines.isEmpty

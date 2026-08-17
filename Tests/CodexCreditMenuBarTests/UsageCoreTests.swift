@@ -48,6 +48,18 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(60), 60)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), 30)
     }
+
+    func testCacheFallbackReasonTreatsCorruptCacheLikeMissing() {
+        XCTAssertEqual(UsageCore.cacheFallbackReason(cacheExists: true, cacheIsCorrupt: true), "corrupt")
+        XCTAssertEqual(UsageCore.cacheFallbackReason(cacheExists: false, cacheIsCorrupt: true), "corrupt")
+        XCTAssertEqual(UsageCore.cacheFallbackReason(cacheExists: false, cacheIsCorrupt: false), "missing")
+        XCTAssertEqual(UsageCore.cacheFallbackReason(cacheExists: true, cacheIsCorrupt: false), "stale-or-ccmb-not-running")
+    }
+
+    func testCacheOnlyFailureMessageDistinguishesCorruptFromMissing() {
+        XCTAssertTrue(UsageCore.cacheOnlyFailureMessage(cacheIsCorrupt: true, path: "/tmp/x").contains("손상"))
+        XCTAssertTrue(UsageCore.cacheOnlyFailureMessage(cacheIsCorrupt: false, path: "/tmp/x").contains("없습니다"))
+    }
 }
 
 final class ClaudeUsageCoreTests: XCTestCase {
@@ -70,5 +82,112 @@ final class ClaudeUsageCoreTests: XCTestCase {
         XCTAssertTrue(ClaudeUsageCore.isFresh(publishedAt: Date(timeIntervalSince1970: 800), now: now, freshForSeconds: 600))
         XCTAssertFalse(ClaudeUsageCore.isFresh(publishedAt: Date(timeIntervalSince1970: 300), now: now, freshForSeconds: 600))
         XCTAssertFalse(ClaudeUsageCore.isFresh(publishedAt: nil, now: now, freshForSeconds: 600))
+    }
+
+    private func makeSnapshot(
+        model: String? = nil,
+        weeklyUsedPercent: Double? = nil,
+        fiveHourUsedPercent: Double? = nil,
+        contextRemainingPercent: Double? = nil,
+        sessionCostUSD: Double? = nil,
+        publishedAt: Date? = nil
+    ) -> ClaudeUsageSnapshot {
+        ClaudeUsageSnapshot(
+            model: model,
+            weeklyUsedPercent: weeklyUsedPercent,
+            weeklyResetsAt: nil,
+            fiveHourUsedPercent: fiveHourUsedPercent,
+            fiveHourResetsAt: nil,
+            contextUsedPercent: nil,
+            contextRemainingPercent: contextRemainingPercent,
+            sessionCostUSD: sessionCostUSD,
+            publishedAt: publishedAt
+        )
+    }
+
+    func testMergePrefersPreferredFieldsAndBackfillsMissingOnes() {
+        let live = makeSnapshot(fiveHourUsedPercent: 40, publishedAt: Date(timeIntervalSince1970: 200))
+        let cache = makeSnapshot(
+            model: "claude-opus",
+            weeklyUsedPercent: 10,
+            contextRemainingPercent: 55,
+            sessionCostUSD: 1.2,
+            publishedAt: Date(timeIntervalSince1970: 100)
+        )
+
+        let merged = ClaudeUsageCore.merge(preferred: live, fallback: cache)
+
+        XCTAssertEqual(merged.fiveHourUsedPercent, 40)
+        XCTAssertEqual(merged.model, "claude-opus")
+        XCTAssertEqual(merged.contextRemainingPercent, 55)
+        XCTAssertEqual(merged.sessionCostUSD, 1.2)
+        XCTAssertEqual(merged.publishedAt, Date(timeIntervalSince1970: 200))
+    }
+
+    func testMergeWithNilFallbackReturnsPreferredUnchanged() {
+        let live = makeSnapshot(fiveHourUsedPercent: 40, publishedAt: Date(timeIntervalSince1970: 200))
+        let merged = ClaudeUsageCore.merge(preferred: live, fallback: nil)
+        XCTAssertEqual(merged.fiveHourUsedPercent, 40)
+        XCTAssertNil(merged.model)
+    }
+
+    func testMergingCacheSnapshotNeverRegressesToOlderCache() {
+        let newerLive = makeSnapshot(fiveHourUsedPercent: 40, publishedAt: Date(timeIntervalSince1970: 200))
+        let olderCache = makeSnapshot(model: "claude-opus", publishedAt: Date(timeIntervalSince1970: 100))
+
+        let result = ClaudeUsageCore.mergingCacheSnapshot(current: newerLive, cache: olderCache)
+
+        XCTAssertEqual(result?.fiveHourUsedPercent, 40, "must not be overwritten by an older cache read")
+        XCTAssertEqual(result?.publishedAt, Date(timeIntervalSince1970: 200))
+        XCTAssertEqual(result?.model, "claude-opus", "cache-only fields should still be backfilled")
+    }
+
+    func testMergingCacheSnapshotAdoptsNewerCache() {
+        let olderLive = makeSnapshot(fiveHourUsedPercent: 40, publishedAt: Date(timeIntervalSince1970: 100))
+        let newerCache = makeSnapshot(weeklyUsedPercent: 20, publishedAt: Date(timeIntervalSince1970: 200))
+
+        let result = ClaudeUsageCore.mergingCacheSnapshot(current: olderLive, cache: newerCache)
+
+        XCTAssertEqual(result?.weeklyUsedPercent, 20)
+        XCTAssertEqual(result?.publishedAt, Date(timeIntervalSince1970: 200))
+        XCTAssertEqual(result?.fiveHourUsedPercent, 40, "older snapshot's own fields still backfill what the newer one lacks")
+    }
+
+    func testMergingCacheSnapshotHandlesNilInputs() {
+        let live = makeSnapshot(fiveHourUsedPercent: 40, publishedAt: Date(timeIntervalSince1970: 100))
+        XCTAssertNil(ClaudeUsageCore.mergingCacheSnapshot(current: nil, cache: nil))
+        XCTAssertEqual(ClaudeUsageCore.mergingCacheSnapshot(current: live, cache: nil)?.fiveHourUsedPercent, 40)
+        XCTAssertEqual(ClaudeUsageCore.mergingCacheSnapshot(current: nil, cache: live)?.fiveHourUsedPercent, 40)
+    }
+}
+
+final class ClaudeUsageFetchOutcomeTests: XCTestCase {
+    func testSkippedOutcomesCarryNoDiagnosticOrLabel() {
+        for outcome: ClaudeUsageFetchOutcome in [.skippedInFlight, .skippedThrottled] {
+            XCTAssertNil(outcome.diagnosticDescription)
+            XCTAssertNil(outcome.staleReasonLabel)
+        }
+    }
+
+    func testFailureOutcomesAlwaysCarryADiagnosticAndLabel() {
+        let failures: [ClaudeUsageFetchOutcome] = [
+            .noCredential,
+            .keychainCredentialUnreadable,
+            .httpFailure(status: 401),
+            .httpFailure(status: 429),
+            .httpFailure(status: 500),
+            .transportFailure,
+            .decodeFailure
+        ]
+        for outcome in failures {
+            XCTAssertNotNil(outcome.diagnosticDescription, "\(outcome) must log a reason")
+            XCTAssertNotNil(outcome.staleReasonLabel, "\(outcome) must surface an actionable label")
+        }
+    }
+
+    func testDiagnosticsAndLabelsNeverIncludeSecretMaterial() throws {
+        let diagnostic = try XCTUnwrap(ClaudeUsageFetchOutcome.httpFailure(status: 401).diagnosticDescription)
+        XCTAssertFalse(diagnostic.lowercased().contains("bearer"))
+        XCTAssertFalse(diagnostic.lowercased().contains("token"))
     }
 }

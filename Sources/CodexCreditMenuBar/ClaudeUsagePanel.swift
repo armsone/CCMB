@@ -148,12 +148,70 @@ private let iso8601Formatter: ISO8601DateFormatter = {
     return formatter
 }()
 
+/// Outcome of a `ClaudeOAuthUsageClient.fetchIfDue` attempt. The two
+/// `skipped*` cases are routine scheduling decisions, not failures — every
+/// other case is an explicit, sanitized (no tokens/bodies/secrets) reason
+/// the caller can log and surface so stale data is never presented as
+/// healthy current data.
+enum ClaudeUsageFetchOutcome {
+    case success(ClaudeUsageSnapshot)
+    case skippedInFlight
+    case skippedThrottled
+    case noCredential
+    case keychainCredentialUnreadable
+    case httpFailure(status: Int)
+    case transportFailure
+    case decodeFailure
+
+    /// Sanitized, single-line reason safe for the app's private log.
+    var diagnosticDescription: String? {
+        switch self {
+        case .success, .skippedInFlight, .skippedThrottled:
+            return nil
+        case .noCredential:
+            return "no Claude credential found"
+        case .keychainCredentialUnreadable:
+            return "keychain credential unreadable"
+        case .httpFailure(let status):
+            return "http \(status)"
+        case .transportFailure:
+            return "network error"
+        case .decodeFailure:
+            return "response decode failed"
+        }
+    }
+
+    /// Short Korean label safe to show next to the stale Claude panel data.
+    var staleReasonLabel: String? {
+        switch self {
+        case .success, .skippedInFlight, .skippedThrottled:
+            return nil
+        case .noCredential:
+            return "인증 정보 없음"
+        case .keychainCredentialUnreadable:
+            return "키체인 인증 정보를 읽을 수 없음"
+        case .httpFailure(let status) where status == 401 || status == 403:
+            return "인증 만료"
+        case .httpFailure(let status) where status == 429:
+            return "요청 제한(429)"
+        case .httpFailure(let status):
+            return "서버 오류(\(status))"
+        case .transportFailure:
+            return "네트워크 오류"
+        case .decodeFailure:
+            return "응답 처리 실패"
+        }
+    }
+}
+
 /// Fetches Claude account rate-limit usage directly from Anthropic's
 /// undocumented OAuth usage endpoint, using the long-lived token from
 /// `claude setup-token` already stored locally. This endpoint is not
 /// officially documented for third-party use and may change or stop
-/// working without notice — failures are silently ignored and the UI
-/// falls back to the passive statusLine cache (`ClaudeUsageStore`).
+/// working without notice — the caller receives a `ClaudeUsageFetchOutcome`
+/// so it can fall back to the passive statusLine cache (`ClaudeUsageStore`)
+/// while making the failure visible instead of presenting stale data as
+/// healthy.
 enum ClaudeOAuthUsageClient {
     private static let tokenURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library")
@@ -167,16 +225,36 @@ enum ClaudeOAuthUsageClient {
     /// often the caller asks — this unofficial endpoint has been observed to
     /// rate-limit (429) well below Codex's own refresh cadence.
     private static let minimumFetchInterval: TimeInterval = 90
-    private static var lastFetchDate: Date?
-    private static var isFetchInFlight = false
+    // Mutated both when a fetch is kicked off (main actor caller) and when the
+    // background URLSession completion handler finishes; isolate to the main
+    // actor and hop back onto it in the completion handler instead of touching
+    // these from the URLSession callback's background queue directly.
+    @MainActor private static var lastFetchDate: Date?
+    @MainActor private static var isFetchInFlight = false
 
-    static func fetchIfDue(completion: @escaping (ClaudeUsageSnapshot?) -> Void) {
-        guard !isFetchInFlight else { return }
-        if let last = lastFetchDate, Date().timeIntervalSince(last) < minimumFetchInterval {
+    @MainActor
+    static func fetchIfDue(completion: @escaping (ClaudeUsageFetchOutcome) -> Void) {
+        guard !isFetchInFlight else {
+            completion(.skippedInFlight)
             return
         }
-        guard let token = readToken() else { return }
+        if let last = lastFetchDate, Date().timeIntervalSince(last) < minimumFetchInterval {
+            completion(.skippedThrottled)
+            return
+        }
 
+        switch resolveToken() {
+        case .token(let token):
+            performFetch(token: token, completion: completion)
+        case .keychainUnreadable:
+            completion(.keychainCredentialUnreadable)
+        case .none:
+            completion(.noCredential)
+        }
+    }
+
+    @MainActor
+    private static func performFetch(token: String, completion: @escaping (ClaudeUsageFetchOutcome) -> Void) {
         isFetchInFlight = true
         lastFetchDate = Date()
 
@@ -187,11 +265,40 @@ enum ClaudeOAuthUsageClient {
         request.timeoutInterval = 10
 
         URLSession.shared.dataTask(with: request) { data, response, _ in
-            isFetchInFlight = false
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200, let data else { return }
-            guard let snapshot = parse(data) else { return }
-            DispatchQueue.main.async { completion(snapshot) }
+            let outcome: ClaudeUsageFetchOutcome
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 200 {
+                    if let data, let snapshot = parse(data) {
+                        outcome = .success(snapshot)
+                    } else {
+                        outcome = .decodeFailure
+                    }
+                } else {
+                    outcome = .httpFailure(status: http.statusCode)
+                }
+            } else {
+                outcome = .transportFailure
+            }
+            DispatchQueue.main.async { @MainActor in
+                isFetchInFlight = false
+                completion(outcome)
+            }
         }.resume()
+    }
+
+    private enum KeychainTokenResult {
+        case token(String)
+        case notFound
+        /// Item exists but couldn't be read back or decoded — distinct from
+        /// `notFound` so the caller can surface that exact actionable state
+        /// instead of silently falling through as if no credential existed.
+        case unreadable
+    }
+
+    private enum TokenResolution {
+        case token(String)
+        case keychainUnreadable
+        case none
     }
 
     /// The interactive `claude` CLI session's own OAuth token, stored by Claude
@@ -199,7 +306,7 @@ enum ClaudeOAuthUsageClient {
     /// this one carries `user:profile` scope, which this usage endpoint
     /// requires. Read fresh on every call so a token Claude Code refreshes
     /// in the background is picked up automatically.
-    private static func readKeychainToken() -> String? {
+    private static func readKeychainToken() -> KeychainTokenResult {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -207,11 +314,14 @@ enum ClaudeOAuthUsageClient {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess else {
+            return status == errSecItemNotFound ? .notFound : .unreadable
+        }
+        guard let data = item as? Data,
               let credentials = try? JSONDecoder().decode(StoredCredentials.self, from: data)
-        else { return nil }
-        return credentials.claudeAiOauth.accessToken
+        else { return .unreadable }
+        return .token(credentials.claudeAiOauth.accessToken)
     }
 
     private struct StoredCredentials: Decodable {
@@ -221,13 +331,27 @@ enum ClaudeOAuthUsageClient {
         let claudeAiOauth: OAuth
     }
 
-    private static func readToken() -> String? {
-        if let keychainToken = readKeychainToken() {
-            return keychainToken
-        }
+    private static func readFileToken() -> String? {
         guard let data = try? Data(contentsOf: tokenURL) else { return nil }
         let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (token?.isEmpty ?? true) ? nil : token
+    }
+
+    /// Tries the keychain first, then falls back to the `claude setup-token`
+    /// file — preserving both existing credential sources. A keychain item
+    /// that exists but can't be decoded is only reported as `keychainUnreadable`
+    /// if the file fallback also has no usable token.
+    private static func resolveToken() -> TokenResolution {
+        switch readKeychainToken() {
+        case .token(let token):
+            return .token(token)
+        case .unreadable:
+            if let fileToken = readFileToken() { return .token(fileToken) }
+            return .keychainUnreadable
+        case .notFound:
+            if let fileToken = readFileToken() { return .token(fileToken) }
+            return .none
+        }
     }
 
     private struct UsageWindow: Decodable {
