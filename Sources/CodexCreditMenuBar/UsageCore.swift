@@ -5,9 +5,6 @@ struct RateLimitSnapshot {
     let usedPercent: Double?
     let windowDurationMinutes: Int?
     let resetsAt: Date?
-    let sparkLimitName: String?
-    let sparkUsedPercent: Double?
-    let sparkResetsAt: Date?
     let resetCredits: Int?
     let creditBalance: Double?
     let detailedCreditsReturned: Bool
@@ -63,5 +60,39 @@ enum UsageCore {
     static func normalizedRefreshInterval(_ seconds: Int?) -> TimeInterval {
         guard let seconds, [0, 30, 60, 300].contains(seconds) else { return 30 }
         return TimeInterval(seconds)
+    }
+}
+
+/// Mirrors the JSON that `claude-statusline.sh` writes from Claude Code's
+/// official statusLine payload (`rate_limits`, `context_window`, `cost`).
+struct ClaudeUsageSnapshot {
+    let model: String?
+    let weeklyUsedPercent: Double?
+    let weeklyResetsAt: Date?
+    let fiveHourUsedPercent: Double?
+    let fiveHourResetsAt: Date?
+    let contextUsedPercent: Double?
+    let contextRemainingPercent: Double?
+    let sessionCostUSD: Double?
+    let publishedAt: Date?
+}
+
+enum ClaudeUsageCore {
+    static func remainingPercent(from usedPercent: Double?) -> Double? {
+        guard let usedPercent else { return nil }
+        return min(max(100 - usedPercent, 0), 100)
+    }
+
+    static func costTitle(from cost: Double?) -> String? {
+        guard let cost, cost > 0 else { return nil }
+        if cost < 0.01 {
+            return String(format: "$%.4f", cost)
+        }
+        return String(format: "$%.2f", cost)
+    }
+
+    static func isFresh(publishedAt: Date?, now: Date, freshForSeconds: TimeInterval) -> Bool {
+        guard let publishedAt else { return false }
+        return now.timeIntervalSince(publishedAt) <= freshForSeconds
     }
 }

@@ -7,7 +7,6 @@ CCMB is an unofficial macOS menu bar app that displays Codex usage and credit in
 ## Features
 
 - Weekly Codex usage remaining and positive credit balance, including values below one, in the menu bar
-- Spark usage, credit balance, and reset information in the detail menu when the signed-in account provides it
 - Manual and configurable automatic refresh
 - Signed automatic updates through Sparkle and GitHub Releases
 - Local JSON sharing for other apps and Codex chats, with freshness evidence

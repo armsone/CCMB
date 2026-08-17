@@ -27,7 +27,7 @@ private enum SharedUsageStore {
         let freshForSeconds = max(45, Int(refreshInterval) + 15)
         let sequence = Int64((snapshot.updatedAt.timeIntervalSince1970 * 1_000).rounded())
 
-        var payload: [String: Any] = [
+        let payload: [String: Any] = [
             "schemaVersion": 1,
             "status": "ok",
             "source": "codex app-server",
@@ -46,10 +46,6 @@ private enum SharedUsageStore {
             "ccmbBundleIdentifier": Bundle.main.bundleIdentifier ?? "",
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         ]
-
-        if let sparkUsedPercent = snapshot.sparkUsedPercent {
-            payload["sparkRemainingPercent"] = min(max(100 - sparkUsedPercent, 0), 100)
-        }
 
         try FileManager.default.createDirectory(
             at: directoryURL,
@@ -960,14 +956,9 @@ private final class CodexAppServerClient: @unchecked Sendable {
     private static func parseRateLimits(_ object: [String: Any], accountID: String?) -> RateLimitSnapshot {
         let rateLimits = object["rateLimits"] as? [String: Any]
         let primary = rateLimits?["primary"] as? [String: Any]
-        let sparkLimit = sparkRateLimit(from: object)
-        let sparkPrimary = sparkLimit?["primary"] as? [String: Any]
 
         let resetCredits = object.value(at: ["rateLimitResetCredits", "availableCount"]).flatMap(numberAsInt)
         let resetsAt = primary?["resetsAt"].flatMap(numberAsDouble).map {
-            Date(timeIntervalSince1970: $0)
-        }
-        let sparkResetsAt = sparkPrimary?["resetsAt"].flatMap(numberAsDouble).map {
             Date(timeIntervalSince1970: $0)
         }
 
@@ -976,27 +967,11 @@ private final class CodexAppServerClient: @unchecked Sendable {
             usedPercent: primary?["usedPercent"].flatMap(numberAsDouble),
             windowDurationMinutes: primary?["windowDurationMins"].flatMap(numberAsInt),
             resetsAt: resetsAt,
-            sparkLimitName: sparkLimit?["limitName"] as? String,
-            sparkUsedPercent: sparkPrimary?["usedPercent"].flatMap(numberAsDouble),
-            sparkResetsAt: sparkResetsAt,
             resetCredits: resetCredits,
             creditBalance: object.value(at: ["rateLimits", "credits", "balance"]).flatMap(numberAsDouble),
             detailedCreditsReturned: object.containsKeyRecursively("credits"),
             updatedAt: Date()
         )
-    }
-
-    private static func sparkRateLimit(from object: [String: Any]) -> [String: Any]? {
-        let limits = object["rateLimitsByLimitId"] as? [String: Any]
-        if let sparkLimit = limits?["codex_bengalfox"] as? [String: Any] {
-            return sparkLimit
-        }
-
-        return limits?.values.compactMap { $0 as? [String: Any] }.first { limit in
-            let limitID = (limit["limitId"] as? String)?.lowercased() ?? ""
-            let limitName = (limit["limitName"] as? String)?.lowercased() ?? ""
-            return limitID.contains("spark") || limitName.contains("spark")
-        }
     }
 
     private static func numberAsDouble(_ value: Any) -> Double? {
@@ -1075,7 +1050,7 @@ private extension FileHandle {
 }
 
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let client = CodexAppServerClient()
     private let networkMonitor = NWPathMonitor()
@@ -1094,7 +1069,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let accountItem = NSMenuItem(title: "계정 확인 중…", action: nil, keyEquivalent: "")
     private let usageItem = NSMenuItem(title: "Codex 사용량 확인 중…", action: nil, keyEquivalent: "")
-    private let sparkUsageItem = NSMenuItem(title: "Spark 사용량 확인 중…", action: nil, keyEquivalent: "")
     private let resetItem = NSMenuItem(title: "초기화 시간 확인 중…", action: nil, keyEquivalent: "")
     private let resetCreditsItem = NSMenuItem(title: "초기화 크레딧 확인 중…", action: nil, keyEquivalent: "")
     private let creditBalanceItem = NSMenuItem(title: "크레딧 확인 중…", action: nil, keyEquivalent: "")
@@ -1113,6 +1087,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
     private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
     private let dashboardItem = NSMenuItem(title: "Codex 사용량 페이지 열기…", action: #selector(openDashboard), keyEquivalent: "")
+    private let claudeDashboardItem = NSMenuItem(
+        title: "Claude 사용량 페이지 열기…",
+        action: #selector(openClaudeDashboard),
+        keyEquivalent: ""
+    )
     private let checkForUpdatesItem = NSMenuItem(
         title: "업데이트 확인…",
         action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
@@ -1121,8 +1100,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let restartItem = NSMenuItem(title: "CCMB 다시 시작", action: #selector(restartApp), keyEquivalent: "")
     private let footerLinkItem = NSMenuItem(title: "GitHub에서 armsone 보기…", action: #selector(openFooterLink), keyEquivalent: "")
     private let quitItem = NSMenuItem(title: "CCMB 종료", action: #selector(quit), keyEquivalent: "q")
+    private let splitPanelView = SplitUsagePanelView()
+    private let splitPanelItem = NSMenuItem()
+    private let usageSeparatorItem = NSMenuItem.separator()
+    private let accountSeparatorItem = NSMenuItem.separator()
     private var lastRateLimitUpdatedAt: Date?
     private var lastSnapshot: RateLimitSnapshot?
+    private var lastClaudeSnapshot: ClaudeUsageSnapshot?
     private var lastSharedUsageAt: Date?
     private var lastShareError: String?
     private var helperInstallError: String?
@@ -1161,6 +1145,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         client.start()
         startCountdownTimer()
         restartAutoRefreshTimer()
+        refreshClaudeUsage()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshClaudeUsage()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1336,6 +1325,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.setAccessibilityValue("사용량 업데이트 중")
         updateCountdown()
         client.refreshRateLimits()
+        refreshClaudeUsage()
     }
 
     private func resetCountdown() {
@@ -1367,9 +1357,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         setDetailTitle(refresh30Item.title, for: refresh30Item)
         setDetailTitle(refresh60Item.title, for: refresh60Item)
         setDetailTitle(refresh300Item.title, for: refresh300Item)
-        setDetailTitle(refreshInterval > 0
-            ? "자동 새로 고침 · \(Self.durationTitle(seconds: Int(refreshInterval)))"
-            : "자동 새로 고침 · 끔", for: intervalItem)
+        if refreshInterval > 0 {
+            setDetailTitle("자동 새로 고침 · \(Self.durationTitle(seconds: Int(refreshInterval)))", for: intervalItem)
+        } else {
+            setDetailTitle("자동 새로 고침 · 끔", for: intervalItem)
+        }
     }
 
     private func setDetailTitle(_ title: String, for item: NSMenuItem) {
@@ -1407,7 +1399,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         accountItem.isEnabled = true
         usageItem.isEnabled = true
-        sparkUsageItem.isEnabled = true
         resetItem.isEnabled = true
         resetCreditsItem.isEnabled = true
         creditBalanceItem.isEnabled = true
@@ -1416,22 +1407,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         intervalItem.isEnabled = true
         setDetailTitle(accountItem.title, for: accountItem)
         setDetailTitle(usageItem.title, for: usageItem)
-        setDetailTitle(sparkUsageItem.title, for: sparkUsageItem)
         setDetailTitle(resetItem.title, for: resetItem)
         setDetailTitle(resetCreditsItem.title, for: resetCreditsItem)
         setDetailTitle(creditBalanceItem.title, for: creditBalanceItem)
         setDetailTitle(updatedItem.title, for: updatedItem)
         setDetailTitle(refreshItem.title, for: refreshItem)
         setDetailTitle(intervalItem.title, for: intervalItem)
-        sparkUsageItem.isHidden = true
         resetCreditsItem.isHidden = true
 
+        splitPanelItem.view = splitPanelView
+        splitPanelItem.isHidden = true
+        menu.addItem(splitPanelItem)
+
         menu.addItem(usageItem)
-        menu.addItem(sparkUsageItem)
         menu.addItem(creditBalanceItem)
         menu.addItem(resetCreditsItem)
         menu.addItem(resetItem)
-        menu.addItem(.separator())
+        menu.addItem(usageSeparatorItem)
         menu.addItem(updatedItem)
         copyErrorItem.isHidden = true
         menu.addItem(copyErrorItem)
@@ -1450,8 +1442,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         intervalItem.submenu = intervalMenu
         menu.addItem(intervalItem)
         menu.addItem(dashboardItem)
+        menu.addItem(claudeDashboardItem)
         menu.addItem(accountItem)
-        menu.addItem(.separator())
+        menu.addItem(accountSeparatorItem)
         configureShareMenu()
         menu.addItem(shareItem)
         menu.addItem(.separator())
@@ -1477,6 +1470,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         copyShareCommandItem.target = self
         copyErrorItem.target = self
         dashboardItem.target = self
+        claudeDashboardItem.target = self
         restartItem.target = self
         footerLinkItem.target = self
         quitItem.target = self
@@ -1484,6 +1478,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         updateLaunchAtLoginMenu()
         prepareNativeMenu(menu)
 
+        menu.delegate = self
         statusItem.menu = menu
     }
 
@@ -1557,8 +1552,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func apply(_ snapshot: RateLimitSnapshot) {
         lastSnapshot = snapshot
-        setStatusTitle(Self.statusTitle(from: snapshot))
-        statusItem.button?.setAccessibilityValue(Self.accessibilityStatus(from: snapshot))
+        refreshStatusTitle()
         lastErrorMessage = nil
         usageItem.toolTip = nil
         copyErrorItem.isHidden = true
@@ -1568,23 +1562,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             setDetailTitle("남은 주간 사용량 \(Self.percentTitle(from: remainingPercent))", for: usageItem)
         } else {
             setDetailTitle("주간 사용량 정보 없음", for: usageItem)
-        }
-
-        if let sparkUsedPercent = snapshot.sparkUsedPercent {
-            sparkUsageItem.isHidden = false
-            let sparkRemainingPercent = Self.remainingUsagePercent(from: sparkUsedPercent)
-            var sparkTitle = "남은 Spark 사용량 \(Self.percentTitle(from: sparkRemainingPercent))"
-            if let sparkResetsAt = snapshot.sparkResetsAt {
-                let relativeReset = Self.relativeFormatter.localizedString(for: sparkResetsAt, relativeTo: Date())
-                sparkTitle += " · \(relativeReset) 초기화"
-                sparkUsageItem.toolTip = Self.resetDateTimeFormatter.string(from: sparkResetsAt)
-            } else {
-                sparkUsageItem.toolTip = nil
-            }
-            setDetailTitle(sparkTitle, for: sparkUsageItem)
-        } else {
-            sparkUsageItem.isHidden = true
-            sparkUsageItem.toolTip = nil
         }
 
         if let accountID = snapshot.accountID {
@@ -1632,6 +1609,96 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             updateShareStatus()
             appLog("shared usage publish failed: \(error.localizedDescription)")
         }
+        updateSplitPanel()
+    }
+
+    private func refreshClaudeUsage() {
+        lastClaudeSnapshot = ClaudeUsageStore.read()
+        refreshStatusTitle()
+        updateSplitPanel()
+
+        ClaudeOAuthUsageClient.fetchIfDue { [weak self] snapshot in
+            guard let self, let snapshot else { return }
+            self.lastClaudeSnapshot = snapshot
+            self.refreshStatusTitle()
+            self.updateSplitPanel()
+        }
+    }
+
+    private func refreshStatusTitle() {
+        guard let snapshot = lastSnapshot else { return }
+        setStatusTitle(Self.statusTitle(from: snapshot, claude: lastClaudeSnapshot))
+        statusItem.button?.setAccessibilityValue(Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot))
+    }
+
+    private func updateSplitPanel() {
+        guard lastSnapshot != nil else {
+            splitPanelItem.isHidden = true
+            return
+        }
+
+        var leftLines = [usageItem.title, creditBalanceItem.title]
+        if !resetCreditsItem.isHidden {
+            leftLines.append(resetCreditsItem.title)
+        }
+        leftLines.append(resetItem.title)
+        leftLines.append(accountItem.title)
+        leftLines.append(updatedItem.title)
+
+        splitPanelView.setLines(left: leftLines, right: Self.claudeDetailLines(from: lastClaudeSnapshot))
+
+        accountItem.isHidden = true
+        usageItem.isHidden = true
+        resetItem.isHidden = true
+        resetCreditsItem.isHidden = true
+        creditBalanceItem.isHidden = true
+        updatedItem.isHidden = true
+        usageSeparatorItem.isHidden = true
+        accountSeparatorItem.isHidden = true
+        splitPanelItem.isHidden = false
+    }
+
+    private static func claudeDetailLines(from snapshot: ClaudeUsageSnapshot?) -> [String] {
+        guard let snapshot else {
+            return ["Claude 정보 없음", "터미널에서 Claude Code 실행 시", "자동으로 채워집니다"]
+        }
+
+        var lines: [String] = []
+        if let model = snapshot.model {
+            lines.append("모델 \(model)")
+        }
+
+        if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent) {
+            var line = "세션 남음 \(percentTitle(from: remaining))"
+            if let resetsAt = snapshot.fiveHourResetsAt {
+                line += " · \(relativeFormatter.localizedString(for: resetsAt, relativeTo: Date()))"
+            }
+            lines.append(line)
+        }
+
+        if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
+            var line = "주간 남음 \(percentTitle(from: remaining))"
+            if let resetsAt = snapshot.weeklyResetsAt {
+                line += " · \(relativeFormatter.localizedString(for: resetsAt, relativeTo: Date()))"
+            }
+            lines.append(line)
+        }
+
+        if let contextRemaining = snapshot.contextRemainingPercent {
+            lines.append("컨텍스트 남음 \(percentTitle(from: contextRemaining))")
+        }
+
+        if let costTitle = ClaudeUsageCore.costTitle(from: snapshot.sessionCostUSD) {
+            lines.append("이번 세션 비용 \(costTitle)")
+        }
+
+        if let publishedAt = snapshot.publishedAt {
+            lines.append("업데이트 \(relativeFormatter.localizedString(for: publishedAt, relativeTo: Date()))")
+        }
+
+        return lines.isEmpty
+            ? ["Claude 사용량 정보 대기 중"]
+            : lines
     }
 
     private func configureShareMenu() {
@@ -1737,6 +1804,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         setDetailTitle("수동 가져오기 중...", for: updatedItem)
         statusItem.button?.setAccessibilityValue("사용량 새로 고침 중")
         client.refreshRateLimits()
+        refreshClaudeUsage()
     }
 
     @objc private func setRefreshInterval(_ sender: NSMenuItem) {
@@ -1769,6 +1837,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openDashboard() {
         guard let url = URL(string: "https://chatgpt.com/codex/settings/usage") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func openClaudeDashboard() {
+        guard let url = URL(string: "https://claude.ai/settings/usage") else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -1853,15 +1926,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return formatter
     }()
 
-    private static func creditTitle(from balance: Double?) -> String? {
-        UsageCore.creditTitle(from: balance)
-    }
-
     private static func creditDetailTitle(from balance: Double) -> String {
         UsageCore.creditDetailTitle(from: balance)
     }
 
-    private static func statusTitle(from snapshot: RateLimitSnapshot) -> String {
+    private static func statusTitle(from snapshot: RateLimitSnapshot, claude: ClaudeUsageSnapshot?) -> String {
         var parts: [String] = []
 
         if let usedPercent = snapshot.usedPercent {
@@ -1869,24 +1938,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             parts.append(percentTitle(from: remainingPercent))
         }
 
-        if let creditTitle = creditTitle(from: snapshot.creditBalance) {
-            parts.append("C \(creditTitle)")
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
+            parts.append(percentTitle(from: claudeRemaining))
         }
 
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+        return parts.isEmpty ? "—" : parts.joined(separator: "·")
     }
 
     private static func remainingUsagePercent(from usedPercent: Double) -> Double {
         UsageCore.remainingPercent(from: usedPercent)
     }
 
-    private static func accessibilityStatus(from snapshot: RateLimitSnapshot) -> String {
+    private static func accessibilityStatus(from snapshot: RateLimitSnapshot, claude: ClaudeUsageSnapshot?) -> String {
         var parts: [String] = []
         if let usedPercent = snapshot.usedPercent {
-            parts.append("남은 주간 사용량 \(percentTitle(from: remainingUsagePercent(from: usedPercent)))")
+            parts.append("남은 Codex 주간 사용량 \(percentTitle(from: remainingUsagePercent(from: usedPercent)))")
         }
-        if let balance = snapshot.creditBalance, balance > 0 {
-            parts.append("크레딧 \(creditDetailTitle(from: balance))")
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
+            parts.append("남은 Claude 세션 \(percentTitle(from: claudeRemaining))")
         }
         return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
     }

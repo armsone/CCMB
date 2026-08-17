@@ -49,3 +49,26 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), 30)
     }
 }
+
+final class ClaudeUsageCoreTests: XCTestCase {
+    func testRemainingPercentIsClampedAndNilSafe() {
+        XCTAssertEqual(ClaudeUsageCore.remainingPercent(from: 28), 72)
+        XCTAssertEqual(ClaudeUsageCore.remainingPercent(from: -5), 100)
+        XCTAssertEqual(ClaudeUsageCore.remainingPercent(from: 150), 0)
+        XCTAssertNil(ClaudeUsageCore.remainingPercent(from: nil))
+    }
+
+    func testCostTitleFormatsSmallAndLargeValues() {
+        XCTAssertEqual(ClaudeUsageCore.costTitle(from: 0.0042), "$0.0042")
+        XCTAssertEqual(ClaudeUsageCore.costTitle(from: 1.2345), "$1.23")
+        XCTAssertNil(ClaudeUsageCore.costTitle(from: 0))
+        XCTAssertNil(ClaudeUsageCore.costTitle(from: nil))
+    }
+
+    func testFreshnessRequiresRecentPublishedAt() {
+        let now = Date(timeIntervalSince1970: 1000)
+        XCTAssertTrue(ClaudeUsageCore.isFresh(publishedAt: Date(timeIntervalSince1970: 800), now: now, freshForSeconds: 600))
+        XCTAssertFalse(ClaudeUsageCore.isFresh(publishedAt: Date(timeIntervalSince1970: 300), now: now, freshForSeconds: 600))
+        XCTAssertFalse(ClaudeUsageCore.isFresh(publishedAt: nil, now: now, freshForSeconds: 600))
+    }
+}
