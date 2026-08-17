@@ -11,13 +11,22 @@ jobs:
   test:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          git init .
+          git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" \
+            fetch --no-tags --depth=1 "https://github.com/$REPOSITORY.git" "$COMMIT_SHA"
+          git checkout --detach FETCH_HEAD
       - name: Unit tests
-        run: swift test
+        run: ./Scripts/swiftpm.sh test
       - name: arm64 release build
-        run: swift build --scratch-path .build/ci-arm64 --triple arm64-apple-macosx11.0 -c release
+        run: ./Scripts/swiftpm.sh build --scratch-path .build/ci-arm64 --triple arm64-apple-macosx11.0 -c release
       - name: x86_64 Catalina release build
-        run: swift build --scratch-path .build/ci-x86_64 --triple x86_64-apple-macosx10.15 -c release
+        run: ./Scripts/swiftpm.sh build --scratch-path .build/ci-x86_64 --triple x86_64-apple-macosx10.15 -c release
       - name: Script syntax
         run: |
           bash -n Scripts/package-macos.sh
