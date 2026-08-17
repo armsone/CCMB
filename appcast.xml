@@ -3,6 +3,20 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.3.26</title>
+            <pubDate>Mon, 17 Aug 2026 22:36:56 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.26</link>
+            <sparkle:version>43</sparkle:version>
+            <sparkle:shortVersionString>0.3.26</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.26
+
+- 메뉴바에서 Claude Code 세션/주간 남은 사용량을 터미널을 열어두지 않아도 바로 확인할 수 있습니다.
+- 안정성 개선.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.26/CCMB-0.3.26.dmg" length="2139919" type="application/octet-stream" sparkle:edSignature="LLpTCtlkZaWwKBCJBgFUt2YUK5uImkULI+iI2x6NmRCPOHghYyjzW0NrUyHq2OxNawtnCpIS2umYMMRtpcrQBQ=="/>
+        </item>
+        <item>
             <title>0.3.25</title>
             <pubDate>Thu, 13 Aug 2026 18:54:08 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.3.25</link>
