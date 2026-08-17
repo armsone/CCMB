@@ -18,7 +18,8 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
         run: |
           git init .
-          git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" \
+          basic_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64)"
+          git -c http.extraHeader="Authorization: Basic $basic_auth" \
             fetch --no-tags --depth=1 "https://github.com/$REPOSITORY.git" "$COMMIT_SHA"
           git checkout --detach FETCH_HEAD
       - name: Unit tests
