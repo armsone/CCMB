@@ -1,12 +1,14 @@
-# CCMB
+# CCMB — Codex & Claude Meter Bar
 
-CCMB is an unofficial macOS menu bar app that displays Codex usage and credit information without requiring a terminal window.
+CCMB (Codex & Claude Meter Bar) is an unofficial macOS menu bar app that displays Codex and Claude usage, reset times, account information, and available Codex credits without requiring a terminal window.
 
 > CCMB is a community project. It is not affiliated with or endorsed by OpenAI.
 
 ## Features
 
-- Weekly Codex usage remaining and positive credit balance, including values below one, in the menu bar
+- Codex weekly usage remaining, switching to the positive credit balance when the weekly allowance reaches zero
+- Claude five-hour session and weekly usage remaining
+- A compact two-column Codex and Claude usage panel with exact reset times and account information
 - Manual and configurable automatic refresh
 - Signed automatic updates through Sparkle and GitHub Releases
 - Local JSON sharing for other apps and Codex chats, with freshness evidence
@@ -18,6 +20,7 @@ CCMB is an unofficial macOS menu bar app that displays Codex usage and credit in
 - macOS 10.15 Catalina or later
 - Swift 5.9 or later when building from source
 - Codex CLI installed and signed in for the current macOS user
+- Claude Code installed and signed in when Claude usage information is required
 
 CCMB starts the local `codex app-server` process and uses the current user's existing Codex session. It does not bundle an API key or login credential.
 
@@ -32,10 +35,10 @@ After every successful refresh, CCMB writes an owner-readable JSON snapshot to:
 CCMB also installs a small local command at `~/.codex/bin/ccmb-usage`. In another Codex chat, ask:
 
 ```text
-Run ~/.codex/bin/ccmb-usage and tell me the remaining weekly usage and credit balance. If fresh is false, say that the data is old.
+Run ~/.codex/bin/ccmb-usage and tell me the remaining weekly usage for Codex and Claude, plus the Codex credit balance. If either fresh value is false, say that data is old.
 ```
 
-Use `~/.codex/bin/ccmb-usage --verify-live` when an independent `codex app-server` read should be compared with the saved CCMB value. The JSON includes its source, fetch time, age, running-process check, and verification result. It never includes login tokens.
+Use `~/.codex/bin/ccmb-usage --verify-live` when an independent `codex app-server` read should be compared with the saved CCMB value. The top-level fields describe Codex directly for backward compatibility; the nested `codex` and `claude` objects mirror the same status/weekly remaining/used/reset/account/freshness shape for each service, with `codex` also carrying credit and window fields and `claude` also carrying session/model/extra-usage/account fields. It never includes login tokens.
 
 ## Run from source
 
@@ -96,7 +99,7 @@ The script creates and verifies a notarized Universal app and DMG, signs the upd
 
 ## Privacy and diagnostics
 
-CCMB reads account usage data from the locally installed Codex CLI and displays it on the Mac where it runs. It does not add its own analytics or telemetry. Diagnostic messages use macOS unified logging with private string fields; raw app-server request and response bodies are not logged.
+CCMB reads account usage data from the locally installed Codex CLI and Claude Code session and displays it on the Mac where it runs. It does not add its own analytics or telemetry. Diagnostic messages use macOS unified logging with private string fields; raw service responses and credentials are not logged.
 
 ## Contributing
 
@@ -106,4 +109,4 @@ Issues and pull requests are welcome. Please do not include account details, cre
 
 CCMB is available under the [MIT License](LICENSE).
 
-OpenAI and Codex are trademarks of OpenAI. Their use here is solely to describe compatibility with the Codex CLI.
+OpenAI and Codex are trademarks of OpenAI. Claude is a trademark of Anthropic. Their use here is solely to describe compatibility with Codex CLI and Claude Code.

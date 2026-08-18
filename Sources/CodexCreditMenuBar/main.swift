@@ -22,7 +22,11 @@ private enum SharedUsageStore {
         .appendingPathComponent("bin")
         .appendingPathComponent("ccmb-usage")
 
-    static func publish(_ snapshot: RateLimitSnapshot, refreshInterval: TimeInterval) throws {
+    static func publish(
+        _ snapshot: RateLimitSnapshot,
+        claudeSnapshot: ClaudeUsageSnapshot?,
+        refreshInterval: TimeInterval
+    ) throws {
         let remainingPercent = snapshot.usedPercent.map(UsageCore.remainingPercent)
         let freshForSeconds = max(45, Int(refreshInterval) + 15)
         let sequence = Int64((snapshot.updatedAt.timeIntervalSince1970 * 1_000).rounded())
@@ -44,7 +48,9 @@ private enum SharedUsageStore {
             "freshForSeconds": freshForSeconds,
             "ccmbProcessID": ProcessInfo.processInfo.processIdentifier,
             "ccmbBundleIdentifier": Bundle.main.bundleIdentifier ?? "",
-            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
+            "claude": ClaudeUsageCore.sharedPayload(from: claudeSnapshot),
+            "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: freshForSeconds)
         ]
 
         try FileManager.default.createDirectory(
@@ -99,6 +105,13 @@ private enum SharedUsageStore {
         return payload
     }
 
+    static func readClaudeSnapshot() -> ClaudeUsageSnapshot? {
+        guard let payload = try? readPayload(),
+              let claude = payload["claude"] as? [String: Any]
+        else { return nil }
+        return ClaudeUsageCore.snapshot(fromSharedPayload: claude)
+    }
+
     private static var iso8601Formatter: ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -140,6 +153,8 @@ private enum UsageCommand {
             } else {
                 var direct = try readDirect()
                 direct["cacheFallbackReason"] = UsageCore.cacheFallbackReason(cacheExists: cached != nil, cacheIsCorrupt: cacheIsCorrupt)
+                direct["claude"] = cached?["claude"]
+                    ?? ClaudeUsageCore.sharedPayload(from: ClaudeUsageStore.read())
                 if let cached {
                     direct["ccmbCache"] = cached
                 }
@@ -154,6 +169,11 @@ private enum UsageCommand {
     }
 
     private static func decorateCache(_ payload: [String: Any]) -> [String: Any] {
+        let storedClaude = payload["claude"] as? [String: Any]
+            ?? ClaudeUsageCore.sharedPayload(from: ClaudeUsageStore.read())
+        let freshForSeconds = payload["freshForSeconds"] as? Int ?? 45
+        let storedCodex = payload["codex"] as? [String: Any]
+            ?? UsageCore.codexPayload(from: nil, freshForSeconds: freshForSeconds)
         var output: [String: Any] = [
             "weeklyRemainingPercent": payload["weeklyRemainingPercent"] ?? NSNull(),
             "creditBalance": payload["creditBalance"] ?? NSNull(),
@@ -161,12 +181,13 @@ private enum UsageCommand {
             "windowDurationMins": payload["windowDurationMins"] ?? NSNull(),
             "resetsAt": payload["resetsAt"] ?? NSNull(),
             "origin": "ccmb-cache",
-            "fetchedAt": payload["fetchedAt"] ?? NSNull()
+            "fetchedAt": payload["fetchedAt"] ?? NSNull(),
+            "claude": ClaudeUsageCore.refreshedSharedPayload(storedClaude),
+            "codex": UsageCore.refreshedCodexPayload(storedCodex)
         ]
 
         let fetchedAt = (payload["fetchedAt"] as? String).flatMap(iso8601Formatter.date(from:))
         let ageSeconds = UsageCore.cacheAgeSeconds(fetchedAt: fetchedAt, now: Date())
-        let freshForSeconds = payload["freshForSeconds"] as? Int ?? 45
         let ccmbRunning = processMatches(
             payload["ccmbProcessID"],
             bundleIdentifier: payload["ccmbBundleIdentifier"] as? String
@@ -239,6 +260,8 @@ private enum UsageCommand {
             "ageSeconds": 0,
             "freshForSeconds": 15,
             "fresh": true,
+            "claude": ClaudeUsageCore.sharedPayload(from: ClaudeUsageStore.read()),
+            "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: 15, now: snapshot.updatedAt),
             "evidence": [
                 "status": "ok",
                 "source": "codex app-server",
@@ -606,7 +629,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
             params: [
                 "clientInfo": [
                     "name": "codex_credit_menubar",
-                    "title": "Codex Credit Menu Bar",
+                    "title": "Codex & Claude Meter Bar",
                     "version": clientVersion
                 ]
             ]
@@ -1095,15 +1118,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let shareItem = NSMenuItem(title: "사용량 공유", action: nil, keyEquivalent: "")
     private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중…", action: nil, keyEquivalent: "")
     private let shareFolderItem = NSMenuItem(title: "저장 위치 열기", action: #selector(openSharedUsageFolder), keyEquivalent: "")
-    private let copySharePromptItem = NSMenuItem(title: "채팅 요청문 복사", action: #selector(copySharePrompt), keyEquivalent: "")
-    private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
-    private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
-    private let dashboardItem = NSMenuItem(title: "Codex 사용량 페이지 열기…", action: #selector(openDashboard), keyEquivalent: "")
-    private let claudeDashboardItem = NSMenuItem(
-        title: "Claude 사용량 페이지 열기…",
-        action: #selector(openClaudeDashboard),
+    private let copySharePromptCombinedItem = NSMenuItem(
+        title: "전체(Codex+Claude) 요청문 복사",
+        action: #selector(copySharePromptCombined),
         keyEquivalent: ""
     )
+    private let copySharePromptCodexItem = NSMenuItem(
+        title: "Codex 전용 요청문 복사",
+        action: #selector(copySharePromptCodex),
+        keyEquivalent: ""
+    )
+    private let copySharePromptClaudeItem = NSMenuItem(
+        title: "Claude 전용 요청문 복사",
+        action: #selector(copySharePromptClaude),
+        keyEquivalent: ""
+    )
+    private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
+    private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
+    private let usagePageLinksView = UsagePageButtonsView()
+    private let usagePageLinksItem = NSMenuItem()
     private let checkForUpdatesItem = NSMenuItem(
         title: "업데이트 확인…",
         action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
@@ -1120,11 +1153,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastSnapshot: RateLimitSnapshot?
     private var lastClaudeSnapshot: ClaudeUsageSnapshot?
     private var lastClaudeFetchFailureLabel: String?
-    /// How long a Claude snapshot is shown as current without qualification
-    /// even while the live endpoint is failing — long enough to ride out a
-    /// transient 429/network blip without nagging, short enough that a
-    /// genuinely stale ("47분 전") value still gets flagged.
-    private static let claudeStaleGraceSeconds: TimeInterval = 300
+    /// Set only while a 429 backoff is active; drives a live "N초 후 재시도"
+    /// countdown in the panel instead of a static label frozen at fetch time.
+    private var lastClaudeRateLimitRetryAt: Date?
     private var lastSharedUsageAt: Date?
     private var lastShareError: String?
     private var helperInstallError: String?
@@ -1146,7 +1177,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
-            reason: "Keep Codex credit auto-refresh running"
+            reason: "Keep Codex and Claude usage auto-refresh running"
         )
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -1393,6 +1424,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             if let submenu = item.submenu {
                 prepareNativeMenu(submenu)
             }
+            // Items hosting a custom view (the split usage panel, the usage
+            // page buttons) manage their own subview interactivity and must
+            // stay enabled regardless of the item's own action/submenu.
+            guard item.view == nil else { continue }
             item.isEnabled = item.action != nil || item.submenu != nil
         }
     }
@@ -1445,6 +1480,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(updatedItem)
         copyErrorItem.isHidden = true
         menu.addItem(copyErrorItem)
+        usagePageLinksView.codexButton.target = self
+        usagePageLinksView.codexButton.action = #selector(openDashboard)
+        usagePageLinksView.claudeButton.target = self
+        usagePageLinksView.claudeButton.action = #selector(openClaudeDashboard)
+        usagePageLinksItem.view = usagePageLinksView
+        usagePageLinksItem.isEnabled = true
+        menu.addItem(usagePageLinksItem)
         menu.addItem(refreshItem)
 
         let intervalMenu = NSMenu()
@@ -1459,8 +1501,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         intervalItem.submenu = intervalMenu
         menu.addItem(intervalItem)
-        menu.addItem(dashboardItem)
-        menu.addItem(claudeDashboardItem)
         menu.addItem(accountItem)
         menu.addItem(accountSeparatorItem)
         configureShareMenu()
@@ -1484,11 +1524,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         refresh300Item.target = self
         launchAtLoginItem.target = self
         shareFolderItem.target = self
-        copySharePromptItem.target = self
+        copySharePromptCombinedItem.target = self
+        copySharePromptCodexItem.target = self
+        copySharePromptClaudeItem.target = self
         copyShareCommandItem.target = self
         copyErrorItem.target = self
-        dashboardItem.target = self
-        claudeDashboardItem.target = self
         restartItem.target = self
         footerLinkItem.target = self
         quitItem.target = self
@@ -1589,10 +1629,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         if let resetsAt = snapshot.resetsAt {
-            let relativeReset = Self.relativeFormatter.localizedString(for: resetsAt, relativeTo: Date())
-            let exactReset = Self.resetDateTimeFormatter.string(from: resetsAt)
-            setDetailTitle("\(relativeReset) 초기화", for: resetItem)
-            resetItem.toolTip = exactReset
+            setDetailTitle("\(Self.resetDateTimeFormatter.string(from: resetsAt)) 초기화", for: resetItem)
+            resetItem.toolTip = nil
         } else if let minutes = snapshot.windowDurationMinutes {
             setDetailTitle("사용량 창 \(minutes)분", for: resetItem)
             resetItem.toolTip = nil
@@ -1617,8 +1655,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             )
         }
         setDetailTitle("최근 업데이트 \(Self.timeFormatter.string(from: snapshot.updatedAt))", for: updatedItem)
+        publishSharedUsage(snapshot)
+        updateSplitPanel()
+    }
+
+    private func publishSharedUsage(_ snapshot: RateLimitSnapshot) {
         do {
-            try SharedUsageStore.publish(snapshot, refreshInterval: refreshInterval)
+            try SharedUsageStore.publish(
+                snapshot,
+                claudeSnapshot: lastClaudeSnapshot,
+                refreshInterval: refreshInterval
+            )
             lastSharedUsageAt = snapshot.updatedAt
             lastShareError = nil
             updateShareStatus()
@@ -1627,30 +1674,48 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             updateShareStatus()
             appLog("shared usage publish failed: \(error.localizedDescription)")
         }
-        updateSplitPanel()
     }
 
     private func refreshClaudeUsage() {
         lastClaudeSnapshot = ClaudeUsageCore.mergingCacheSnapshot(
             current: lastClaudeSnapshot,
+            cache: SharedUsageStore.readClaudeSnapshot()
+        )
+        lastClaudeSnapshot = ClaudeUsageCore.mergingCacheSnapshot(
+            current: lastClaudeSnapshot,
             cache: ClaudeUsageStore.read()
         )
+        if let lastSnapshot {
+            publishSharedUsage(lastSnapshot)
+        }
         refreshStatusTitle()
         updateSplitPanel()
 
-        ClaudeOAuthUsageClient.fetchIfDue { [weak self] outcome in
+        let claudeFetchInterval = max(refreshInterval, ClaudeUsageCore.minimumRequestIntervalSeconds)
+        ClaudeOAuthUsageClient.fetchIfDue(minimumInterval: claudeFetchInterval) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case .success(let snapshot):
                 self.lastClaudeSnapshot = ClaudeUsageCore.merge(preferred: snapshot, fallback: self.lastClaudeSnapshot)
                 self.lastClaudeFetchFailureLabel = nil
+                self.lastClaudeRateLimitRetryAt = nil
             case .skippedInFlight, .skippedThrottled:
                 break
-            case .noCredential, .keychainCredentialUnreadable, .httpFailure, .transportFailure, .decodeFailure:
-                self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
+            case .rateLimited(let retryAt), .skippedRateLimitBackoff(let retryAt):
+                self.lastClaudeFetchFailureLabel = nil
+                self.lastClaudeRateLimitRetryAt = retryAt
                 if let diagnostic = outcome.diagnosticDescription {
                     self.appLog("claude usage fetch failed: \(diagnostic)")
                 }
+            case .noCredential, .keychainCredentialUnreadable, .httpFailure, .transportFailure, .decodeFailure:
+                self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
+                self.lastClaudeRateLimitRetryAt = nil
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("claude usage fetch failed: \(diagnostic)")
+                }
+            }
+            if let lastSnapshot = self.lastSnapshot {
+                self.publishSharedUsage(lastSnapshot)
             }
             self.refreshStatusTitle()
             self.updateSplitPanel()
@@ -1664,23 +1729,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func updateSplitPanel() {
-        guard lastSnapshot != nil else {
+        guard let lastSnapshot else {
             splitPanelItem.isHidden = true
             return
         }
 
-        var leftLines = [usageItem.title, creditBalanceItem.title]
-        if !resetCreditsItem.isHidden {
-            leftLines.append(resetCreditsItem.title)
-        }
-        leftLines.append(resetItem.title)
-        leftLines.append(accountItem.title)
-        leftLines.append(updatedItem.title)
-
-        splitPanelView.setLines(
-            left: leftLines,
-            right: Self.claudeDetailLines(from: lastClaudeSnapshot, fetchFailureLabel: lastClaudeFetchFailureLabel)
+        let model = UsagePanelModel(
+            codex: Self.codexColumn(from: lastSnapshot),
+            claude: Self.claudeColumn(
+                from: lastClaudeSnapshot,
+                fetchFailureLabel: lastClaudeFetchFailureLabel,
+                rateLimitRetryAt: lastClaudeRateLimitRetryAt
+            )
         )
+        splitPanelView.apply(model)
 
         accountItem.isHidden = true
         usageItem.isHidden = true
@@ -1693,60 +1755,182 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         splitPanelItem.isHidden = false
     }
 
-    private static func claudeDetailLines(
-        from snapshot: ClaudeUsageSnapshot?,
-        fetchFailureLabel: String?
-    ) -> [String] {
-        guard let snapshot else {
-            if let fetchFailureLabel {
-                return ["Claude 갱신 실패: \(fetchFailureLabel)", "터미널에서 Claude Code 실행 시", "자동으로 채워집니다"]
-            }
-            return ["Claude 정보 없음", "터미널에서 Claude Code 실행 시", "자동으로 채워집니다"]
+    private static func codexColumn(from snapshot: RateLimitSnapshot) -> UsagePanelColumn {
+        let accent = NSColor.systemBlue
+        var quota: UsagePanelQuota?
+        var rows: [UsagePanelRow] = []
+
+        if let usedPercent = snapshot.usedPercent {
+            let remaining = remainingUsagePercent(from: usedPercent)
+            quota = UsagePanelQuota(
+                caption: "남은 주간 사용량",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: remaining <= 15 ? .systemRed : accent,
+                accessibilityValue: "남은 Codex 주간 사용량 \(percentTitle(from: remaining))"
+            )
+        } else {
+            rows.append(UsagePanelRow(label: "주간 사용량", value: "정보 없음"))
         }
 
-        var lines: [String] = []
-        if let model = snapshot.model {
-            lines.append("모델 \(model)")
+        if let creditBalance = snapshot.creditBalance {
+            let weeklyExhausted = snapshot.usedPercent.map { remainingUsagePercent(from: $0) <= 0 } ?? false
+            rows.append(UsagePanelRow(
+                label: weeklyExhausted ? "크레딧 사용 중" : "크레딧 잔액",
+                value: creditDetailTitle(from: creditBalance),
+                valueColor: .systemGreen
+            ))
+        } else {
+            rows.append(UsagePanelRow(
+                label: "크레딧",
+                value: snapshot.detailedCreditsReturned ? "형식 확인 필요" : "정보 없음"
+            ))
         }
+
+        if let resetCredits = snapshot.resetCredits {
+            rows.append(UsagePanelRow(label: "초기화 크레딧", value: "\(resetCredits)개"))
+        }
+
+        if let resetsAt = snapshot.resetsAt {
+            rows.append(UsagePanelRow(label: "주간 초기화", value: resetDateTimeFormatter.string(from: resetsAt)))
+        } else if let minutes = snapshot.windowDurationMinutes {
+            rows.append(UsagePanelRow(label: "사용량 창", value: "\(minutes)분"))
+        }
+
+        var statusLines: [String] = []
+        statusLines.append(snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음")
+        statusLines.append("업데이트 \(timeFormatter.string(from: snapshot.updatedAt))")
+
+        return UsagePanelColumn(
+            title: "Codex",
+            accentColor: accent,
+            quota: quota,
+            rows: rows,
+            statusLines: statusLines,
+            statusColor: .secondaryLabelColor
+        )
+    }
+
+    private static func claudeColumn(
+        from snapshot: ClaudeUsageSnapshot?,
+        fetchFailureLabel: String?,
+        rateLimitRetryAt: Date?
+    ) -> UsagePanelColumn {
+        let accent = NSColor.systemOrange
+        // A live countdown (rateLimitRetryAt) always takes priority over a
+        // static label so it keeps ticking down across UI refreshes.
+        let failureLabel = rateLimitRetryAt.map { ClaudeUsageCore.rateLimitRetryLabel(retryAt: $0, now: Date()) }
+            ?? fetchFailureLabel
+
+        guard let snapshot else {
+            var statusLines: [String] = []
+            if let failureLabel {
+                statusLines.append("갱신 실패: \(failureLabel)")
+            }
+            statusLines.append("터미널에서 Claude Code 실행 시 자동으로 채워집니다")
+            return UsagePanelColumn(
+                title: "Claude",
+                accentColor: accent,
+                quota: nil,
+                rows: [UsagePanelRow(label: "Claude", value: "정보 없음")],
+                statusLines: statusLines,
+                statusColor: failureLabel == nil ? .secondaryLabelColor : .systemRed
+            )
+        }
+
+        var quota: UsagePanelQuota?
+        var rows: [UsagePanelRow] = []
 
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent) {
-            var line = "세션 남음 \(percentTitle(from: remaining))"
-            if let resetsAt = snapshot.fiveHourResetsAt {
-                line += " · \(relativeFormatter.localizedString(for: resetsAt, relativeTo: Date()))"
-            }
-            lines.append(line)
+            quota = UsagePanelQuota(
+                caption: "5시간 세션 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: remaining <= 15 ? .systemRed : accent,
+                accessibilityValue: "남은 Claude 5시간 세션 사용량 \(percentTitle(from: remaining))"
+            )
+        } else {
+            rows.append(UsagePanelRow(label: "5시간 세션", value: "정보 없음"))
         }
 
+        if let resetsAt = snapshot.fiveHourResetsAt {
+            rows.append(UsagePanelRow(label: "세션 초기화", value: resetDateTimeFormatter.string(from: resetsAt)))
+        }
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
-            var line = "주간 남음 \(percentTitle(from: remaining))"
-            if let resetsAt = snapshot.weeklyResetsAt {
-                line += " · \(relativeFormatter.localizedString(for: resetsAt, relativeTo: Date()))"
-            }
-            lines.append(line)
+            rows.append(UsagePanelRow(label: "주간 남음", value: percentTitle(from: remaining), valueColor: .systemPurple))
         }
-
+        if let resetsAt = snapshot.weeklyResetsAt {
+            rows.append(UsagePanelRow(label: "주간 초기화", value: resetDateTimeFormatter.string(from: resetsAt)))
+        }
+        if let model = snapshot.model {
+            rows.append(UsagePanelRow(label: "모델", value: model))
+        }
+        for limit in snapshot.modelWeeklyLimits {
+            guard let remaining = ClaudeUsageCore.remainingPercent(from: limit.usedPercent) else { continue }
+            let detail = limit.resetsAt.map { "초기화 \(resetDateTimeFormatter.string(from: $0))" }
+            rows.append(UsagePanelRow(
+                label: "\(limit.modelName) 주간",
+                value: "\(percentTitle(from: remaining)) 남음",
+                detail: detail
+            ))
+        }
+        if let extraUsage = snapshot.extraUsage {
+            rows.append(UsagePanelRow(label: "추가 사용량", value: extraUsageTitle(extraUsage), valueColor: .systemPurple))
+        }
         if let contextRemaining = snapshot.contextRemainingPercent {
-            lines.append("컨텍스트 남음 \(percentTitle(from: contextRemaining))")
+            rows.append(UsagePanelRow(label: "컨텍스트 남음", value: percentTitle(from: contextRemaining)))
         }
-
         if let costTitle = ClaudeUsageCore.costTitle(from: snapshot.sessionCostUSD) {
-            lines.append("이번 세션 비용 \(costTitle)")
+            rows.append(UsagePanelRow(label: "이번 세션 비용", value: costTitle))
         }
 
-        if let publishedAt = snapshot.publishedAt {
-            var line = "업데이트 \(relativeFormatter.localizedString(for: publishedAt, relativeTo: Date()))"
-            if let fetchFailureLabel,
-               !ClaudeUsageCore.isFresh(publishedAt: publishedAt, now: Date(), freshForSeconds: claudeStaleGraceSeconds) {
-                line += " · 갱신 실패: \(fetchFailureLabel)"
+        var statusLines: [String] = []
+        if let account = snapshot.account {
+            if let email = account.email {
+                statusLines.append("계정 \(email)")
             }
-            lines.append(line)
-        } else if let fetchFailureLabel {
-            lines.append("Claude 갱신 실패: \(fetchFailureLabel)")
+            if let organizationName = account.organizationName, organizationName != account.email {
+                statusLines.append("조직 \(organizationName)")
+            }
+        }
+        if let publishedAt = snapshot.publishedAt {
+            statusLines.append("업데이트 \(relativeFormatter.localizedString(for: publishedAt, relativeTo: Date()))")
+        }
+        if let failureLabel {
+            statusLines.append("갱신 실패: \(failureLabel)")
+        }
+        if statusLines.isEmpty {
+            statusLines.append("Claude 사용량 정보 대기 중")
         }
 
-        return lines.isEmpty
-            ? ["Claude 사용량 정보 대기 중"]
-            : lines
+        return UsagePanelColumn(
+            title: "Claude",
+            accentColor: accent,
+            quota: quota,
+            rows: rows,
+            statusLines: statusLines,
+            statusColor: failureLabel == nil ? .secondaryLabelColor : .systemRed
+        )
+    }
+
+    /// `extraUsage`'s `limitCents`/`usedCents` are cents-denominated
+    /// regardless of which API field variant populated them.
+    private static func extraUsageTitle(_ extraUsage: ClaudeExtraUsage) -> String {
+        let currency = extraUsage.currency ?? "USD"
+        func amount(_ cents: Double?) -> String? {
+            guard let cents else { return nil }
+            return String(format: "%.2f", cents / 100)
+        }
+        switch (amount(extraUsage.usedCents), amount(extraUsage.limitCents)) {
+        case let (used?, limit?):
+            return "\(used) / \(limit) \(currency)"
+        case let (used?, nil):
+            return "\(used) \(currency) 사용"
+        case let (nil, limit?):
+            return "한도 \(limit) \(currency)"
+        default:
+            return "정보 없음"
+        }
     }
 
     private func configureShareMenu() {
@@ -1762,7 +1946,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(shareFolderItem)
         menu.addItem(.separator())
         menu.addItem(guideItem)
-        menu.addItem(copySharePromptItem)
+        menu.addItem(copySharePromptCombinedItem)
+        menu.addItem(.separator())
+        menu.addItem(copySharePromptCodexItem)
+        menu.addItem(copySharePromptClaudeItem)
+        menu.addItem(.separator())
         menu.addItem(copyShareCommandItem)
         shareItem.submenu = menu
     }
@@ -1818,11 +2006,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         NSWorkspace.shared.open(SharedUsageStore.directoryURL)
     }
 
-    @objc private func copySharePrompt() {
-        let prompt = "~/.codex/bin/ccmb-usage를 실행해서 CCMB의 남은 주간 사용량과 크레딧을 알려줘. fresh가 false면 오래된 데이터라고 말해줘."
+    @objc private func copySharePromptCombined() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 Codex와 Claude의 남은 주간 사용량, Codex 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "전체"
+        )
+    }
+
+    @objc private func copySharePromptCodex() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 codex 항목의 남은 주간 사용량과 크레딧을 알려줘. codex.fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "Codex"
+        )
+    }
+
+    @objc private func copySharePromptClaude() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 claude 항목의 남은 주간·5시간 사용량을 알려줘. claude.fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "Claude"
+        )
+    }
+
+    private func copySharePrompt(_ prompt: String, label: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(prompt, forType: .string)
-        shareFeedback = ("채팅 요청문을 복사했습니다", Date().addingTimeInterval(3))
+        shareFeedback = ("\(label) 요청문을 복사했습니다", Date().addingTimeInterval(3))
         updateShareStatus()
     }
 
@@ -1861,7 +2069,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         UserDefaults.standard.set(seconds, forKey: Self.refreshIntervalDefaultsKey)
         if let lastSnapshot {
             do {
-                try SharedUsageStore.publish(lastSnapshot, refreshInterval: refreshInterval)
+                try SharedUsageStore.publish(
+                    lastSnapshot,
+                    claudeSnapshot: lastClaudeSnapshot,
+                    refreshInterval: refreshInterval
+                )
                 lastShareError = nil
             } catch {
                 lastShareError = error.localizedDescription
@@ -1981,9 +2193,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func statusTitle(from snapshot: RateLimitSnapshot, claude: ClaudeUsageSnapshot?) -> String {
         var parts: [String] = []
 
-        if let usedPercent = snapshot.usedPercent {
-            let remainingPercent = remainingUsagePercent(from: usedPercent)
-            parts.append(percentTitle(from: remainingPercent))
+        if let codexTitle = UsageCore.menuBarCodexTitle(
+            usedPercent: snapshot.usedPercent,
+            creditBalance: snapshot.creditBalance
+        ) {
+            parts.append(codexTitle)
         }
 
         if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
@@ -2033,7 +2247,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ko_KR")
         formatter.timeZone = .autoupdatingCurrent
-        formatter.dateFormat = "M월 d일 EEEE a h:mm"
+        formatter.dateFormat = "M월 d일 a h:mm"
         return formatter
     }()
 
