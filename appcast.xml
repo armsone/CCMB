@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.3.28</title>
+            <pubDate>Wed, 19 Aug 2026 00:27:41 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.28</link>
+            <sparkle:version>45</sparkle:version>
+            <sparkle:shortVersionString>0.3.28</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.28
+
+- Codex와 Claude 사용량을 한 화면에서 확인할 수 있도록 정보와 디자인을 확장했습니다.
+- Claude 5시간 세션·주간 사용량·계정·모델 정보를 안정적으로 갱신합니다.
+- 요청 제한(429)에 맞춘 재시도와 자동 새로 고침 간격으로 과도한 요청을 줄였습니다.
+- Codex 잔여 주간 사용량이 0%일 때 크레딧 잔액을 메뉴 막대에 표시합니다.
+- 사용량 페이지 열기와 공유 항목을 Codex·Claude별로 구분했습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.28/CCMB-0.3.28.dmg" length="2365223" type="application/octet-stream" sparkle:edSignature="tT7uNbAw4wV/jCfMyXCOq81iCUwtC0+q7mmGWF60WEf/U9200nVK3f7R4syn3zshFto/geyS5QEPX/Rre2jbBw=="/>
+        </item>
+        <item>
             <title>0.3.27</title>
             <pubDate>Mon, 17 Aug 2026 23:46:33 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.3.27</link>
@@ -30,19 +47,6 @@
 - 안정성 개선.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.26/CCMB-0.3.26.dmg" length="2139919" type="application/octet-stream" sparkle:edSignature="LLpTCtlkZaWwKBCJBgFUt2YUK5uImkULI+iI2x6NmRCPOHghYyjzW0NrUyHq2OxNawtnCpIS2umYMMRtpcrQBQ=="/>
-        </item>
-        <item>
-            <title>0.3.25</title>
-            <pubDate>Thu, 13 Aug 2026 18:54:08 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.25</link>
-            <sparkle:version>42</sparkle:version>
-            <sparkle:shortVersionString>0.3.25</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.25
-
-자동 업데이트와 안정성 개선을 포함합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.25/CCMB-0.3.25.dmg" length="2106176" type="application/octet-stream" sparkle:edSignature="iYMybkqNPwvm7ZK4jl2KX5CR1yarhiTFp4tYJBFHW9pURsCVTNXLibB9B/lWZN3qZXGV//zxGDJzP4dlB+cLAg=="/>
         </item>
     </channel>
 </rss>
