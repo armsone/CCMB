@@ -100,6 +100,9 @@ struct UsagePanelColumn {
     let title: String
     let accentColor: NSColor
     let quota: UsagePanelQuota?
+    /// Optional companion quota shown to the right of the primary ring.
+    /// Claude uses this for its weekly window beside the 5-hour session.
+    let secondaryQuota: UsagePanelQuota?
     let rows: [UsagePanelRow]
     /// Account identity and refresh age are laid out in separate, shared-height
     /// footer bands so both columns line up immediately above the chart.
@@ -421,7 +424,9 @@ private final class UsageColumnView: NSView {
     private static let titleHeight: CGFloat = 16
     private static let titleGap: CGFloat = 6
     private static let quotaDiameter: CGFloat = 46
+    private static let dualQuotaDiameter: CGFloat = 42
     private static let quotaGap: CGFloat = 10
+    private static let dualQuotaGroupGap: CGFloat = 8
     private static let rowGap: CGFloat = 4
     private static let rowsTopGap: CGFloat = 8
     private static let singleLineRowHeight: CGFloat = 24
@@ -443,10 +448,25 @@ private final class UsageColumnView: NSView {
         return field
     }()
     private let quotaCaptionLabel: NSTextField = {
-        let field = NSTextField(labelWithString: "")
+        let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byTruncatingTail
+        field.lineBreakMode = .byWordWrapping
+        return field
+    }()
+    private let secondaryRingView = UsageRingView()
+    private let secondaryPercentLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .bold)
+        field.alignment = .center
+        field.textColor = .labelColor
+        return field
+    }()
+    private let secondaryQuotaCaptionLabel: NSTextField = {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.font = .systemFont(ofSize: 9.5, weight: .medium)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byWordWrapping
         return field
     }()
     private let accountLabel: NSTextField = {
@@ -481,6 +501,9 @@ private final class UsageColumnView: NSView {
         addSubview(ringView)
         addSubview(percentLabel)
         addSubview(quotaCaptionLabel)
+        addSubview(secondaryRingView)
+        addSubview(secondaryPercentLabel)
+        addSubview(secondaryQuotaCaptionLabel)
         addSubview(accountLabel)
         addSubview(refreshLabel)
         addSubview(statusLabel)
@@ -515,21 +538,62 @@ private final class UsageColumnView: NSView {
             ringView.setAccessibilityLabel(quota.caption)
             ringView.setAccessibilityValue(quota.accessibilityValue)
 
-            let diameter = Self.quotaDiameter
+            let isDualQuota = column.secondaryQuota != nil
+            let diameter = isDualQuota ? Self.dualQuotaDiameter : Self.quotaDiameter
+            let groupWidth = isDualQuota
+                ? (width - Self.dualQuotaGroupGap) / 2
+                : width
             ringView.frame = NSRect(x: 0, y: y, width: diameter, height: diameter)
             percentLabel.frame = NSRect(x: 0, y: y + (diameter - 18) / 2, width: diameter, height: 18)
             let captionX = diameter + Self.quotaGap
             quotaCaptionLabel.frame = NSRect(
                 x: captionX,
-                y: y + (diameter - 14) / 2,
-                width: max(0, width - captionX),
-                height: 14
+                y: y + (diameter - (isDualQuota ? 28 : 14)) / 2,
+                width: max(0, groupWidth - captionX),
+                height: isDualQuota ? 28 : 14
             )
+
+            if let secondaryQuota = column.secondaryQuota {
+                secondaryRingView.isHidden = false
+                secondaryPercentLabel.isHidden = false
+                secondaryQuotaCaptionLabel.isHidden = false
+                secondaryRingView.progressColor = secondaryQuota.color
+                secondaryRingView.trackColor = secondaryQuota.color.withAlphaComponent(0.18)
+                secondaryRingView.fraction = secondaryQuota.fraction
+                secondaryPercentLabel.stringValue = secondaryQuota.percentText
+                secondaryQuotaCaptionLabel.stringValue = secondaryQuota.caption
+                secondaryRingView.setAccessibilityElement(true)
+                secondaryRingView.setAccessibilityLabel(secondaryQuota.caption)
+                secondaryRingView.setAccessibilityValue(secondaryQuota.accessibilityValue)
+
+                let secondaryX = groupWidth + Self.dualQuotaGroupGap
+                secondaryRingView.frame = NSRect(x: secondaryX, y: y, width: diameter, height: diameter)
+                secondaryPercentLabel.frame = NSRect(
+                    x: secondaryX,
+                    y: y + (diameter - 18) / 2,
+                    width: diameter,
+                    height: 18
+                )
+                let secondaryCaptionX = secondaryX + diameter + Self.quotaGap
+                secondaryQuotaCaptionLabel.frame = NSRect(
+                    x: secondaryCaptionX,
+                    y: y + (diameter - 28) / 2,
+                    width: max(0, width - secondaryCaptionX),
+                    height: 28
+                )
+            } else {
+                secondaryRingView.isHidden = true
+                secondaryPercentLabel.isHidden = true
+                secondaryQuotaCaptionLabel.isHidden = true
+            }
             y += diameter
         } else {
             ringView.isHidden = true
             percentLabel.isHidden = true
             quotaCaptionLabel.isHidden = true
+            secondaryRingView.isHidden = true
+            secondaryPercentLabel.isHidden = true
+            secondaryQuotaCaptionLabel.isHidden = true
         }
 
         syncRows(column.rows)
@@ -559,6 +623,9 @@ private final class UsageColumnView: NSView {
         var accessibilityParts = [column.title]
         if let quota = column.quota {
             accessibilityParts.append(quota.accessibilityValue)
+        }
+        if let secondaryQuota = column.secondaryQuota {
+            accessibilityParts.append(secondaryQuota.accessibilityValue)
         }
         accessibilityParts.append(contentsOf: column.rows.map(\.accessibilityLabel))
         accessibilityParts.append(contentsOf: column.accountLines)

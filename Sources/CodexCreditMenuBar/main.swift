@@ -1918,6 +1918,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             title: "Codex",
             accentColor: accent,
             quota: quota,
+            secondaryQuota: nil,
             rows: rows,
             accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
             refreshLine: "업데이트 \(relativeFormatter.localizedString(for: snapshot.updatedAt, relativeTo: Date()))",
@@ -1947,6 +1948,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 title: "Claude",
                 accentColor: accent,
                 quota: nil,
+                secondaryQuota: nil,
                 rows: [UsagePanelRow(label: "Claude", value: "정보 없음")],
                 accountLines: ["계정 정보 없음"],
                 refreshLine: nil,
@@ -1956,6 +1958,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         var quota: UsagePanelQuota?
+        var weeklyQuota: UsagePanelQuota?
         var rows: [UsagePanelRow] = []
 
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent) {
@@ -1974,7 +1977,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             rows.append(UsagePanelRow(label: "세션 초기화", value: resetDateTimeFormatter.string(from: resetsAt)))
         }
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
-            rows.append(UsagePanelRow(label: "주간 남음", value: percentTitle(from: remaining), valueColor: .systemPurple))
+            weeklyQuota = UsagePanelQuota(
+                caption: "주간 사용량 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: remaining <= 15 ? .systemRed : .systemPurple,
+                accessibilityValue: "남은 Claude 주간 사용량 \(percentTitle(from: remaining))"
+            )
         }
         if let resetsAt = snapshot.weeklyResetsAt {
             rows.append(UsagePanelRow(label: "주간 초기화", value: resetDateTimeFormatter.string(from: resetsAt)))
@@ -2025,6 +2034,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             title: "Claude",
             accentColor: accent,
             quota: quota,
+            secondaryQuota: weeklyQuota,
             rows: rows,
             accountLines: accountLines,
             refreshLine: refreshLine,
