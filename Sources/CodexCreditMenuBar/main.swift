@@ -1914,16 +1914,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             rows.append(UsagePanelRow(label: "사용량 창", value: "\(minutes)분"))
         }
 
-        var statusLines: [String] = []
-        statusLines.append(snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음")
-        statusLines.append("업데이트 \(timeFormatter.string(from: snapshot.updatedAt))")
-
         return UsagePanelColumn(
             title: "Codex",
             accentColor: accent,
             quota: quota,
             rows: rows,
-            statusLines: statusLines,
+            accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
+            refreshLine: "업데이트 \(relativeFormatter.localizedString(for: snapshot.updatedAt, relativeTo: Date()))",
+            statusLines: [],
             statusColor: .secondaryLabelColor
         )
     }
@@ -1950,6 +1948,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 accentColor: accent,
                 quota: nil,
                 rows: [UsagePanelRow(label: "Claude", value: "정보 없음")],
+                accountLines: ["계정 정보 없음"],
+                refreshLine: nil,
                 statusLines: statusLines,
                 statusColor: failureLabel == nil ? .secondaryLabelColor : .systemRed
             )
@@ -2001,23 +2001,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             rows.append(UsagePanelRow(label: "이번 세션 비용", value: costTitle))
         }
 
-        var statusLines: [String] = []
+        var accountLines: [String] = []
         if let account = snapshot.account {
             if let email = account.email {
-                statusLines.append("계정 \(email)")
+                accountLines.append("계정 \(email)")
             }
             if let organizationName = account.organizationName, organizationName != account.email {
-                statusLines.append("조직 \(organizationName)")
+                accountLines.append("조직 \(organizationName)")
             }
         }
-        if let publishedAt = snapshot.publishedAt {
-            statusLines.append("업데이트 \(relativeFormatter.localizedString(for: publishedAt, relativeTo: Date()))")
+        if accountLines.isEmpty {
+            accountLines.append("계정 정보 없음")
         }
+        let refreshLine = snapshot.publishedAt.map {
+            "업데이트 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
+        }
+        var statusLines: [String] = []
         if let failureLabel {
             statusLines.append("갱신 실패: \(failureLabel)")
-        }
-        if statusLines.isEmpty {
-            statusLines.append("Claude 사용량 정보 대기 중")
         }
 
         return UsagePanelColumn(
@@ -2025,6 +2026,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             accentColor: accent,
             quota: quota,
             rows: rows,
+            accountLines: accountLines,
+            refreshLine: refreshLine,
             statusLines: statusLines,
             statusColor: failureLabel == nil ? .secondaryLabelColor : .systemRed
         )

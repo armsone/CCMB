@@ -101,8 +101,11 @@ struct UsagePanelColumn {
     let accentColor: NSColor
     let quota: UsagePanelQuota?
     let rows: [UsagePanelRow]
-    /// Secondary status lines shown below the rows (account/update status,
-    /// last-updated age, fetch failure or backoff countdown).
+    /// Account identity and refresh age are laid out in separate, shared-height
+    /// footer bands so both columns line up immediately above the chart.
+    let accountLines: [String]
+    let refreshLine: String?
+    /// Additional status such as a fetch failure or backoff countdown.
     let statusLines: [String]
     let statusColor: NSColor
 }
@@ -413,7 +416,7 @@ private final class UsageMetricRowView: NSView {
 }
 
 /// One column of the panel: a title, an optional primary quota ring, a
-/// stack of metric rows, and secondary status lines.
+/// stack of metric rows, and an aligned account/refresh footer.
 private final class UsageColumnView: NSView {
     private static let titleHeight: CGFloat = 16
     private static let titleGap: CGFloat = 6
@@ -446,14 +449,29 @@ private final class UsageColumnView: NSView {
         field.lineBreakMode = .byTruncatingTail
         return field
     }()
-    private let statusLabel: NSTextField = {
+    private let accountLabel: NSTextField = {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 9.5)
         field.textColor = .tertiaryLabelColor
         return field
     }()
+    private let refreshLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 9.5)
+        field.textColor = .tertiaryLabelColor
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }()
+    private let statusLabel: NSTextField = {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.font = .systemFont(ofSize: 9.5)
+        return field
+    }()
 
     private var rowViews: [UsageMetricRowView] = []
+    private var accountLineCount = 0
+    private var hasRefreshLine = false
+    private var statusLineCount = 0
 
     override var isFlipped: Bool { true }
 
@@ -463,6 +481,8 @@ private final class UsageColumnView: NSView {
         addSubview(ringView)
         addSubview(percentLabel)
         addSubview(quotaCaptionLabel)
+        addSubview(accountLabel)
+        addSubview(refreshLabel)
         addSubview(statusLabel)
     }
 
@@ -471,8 +491,8 @@ private final class UsageColumnView: NSView {
     }
 
     /// Lays out the column immediately using the given fixed width and
-    /// returns the resulting content height. The caller positions this
-    /// view's own frame using that height afterward.
+    /// returns the body height. The caller then gives both columns one shared
+    /// footer origin so account and refresh information align horizontally.
     @discardableResult
     func apply(_ column: UsagePanelColumn, width: CGFloat) -> CGFloat {
         titleLabel.stringValue = column.title
@@ -525,26 +545,54 @@ private final class UsageColumnView: NSView {
             y -= Self.rowGap
         }
 
-        if column.statusLines.isEmpty {
-            statusLabel.isHidden = true
-        } else {
-            y += Self.statusTopGap
-            statusLabel.stringValue = column.statusLines.joined(separator: "\n")
-            statusLabel.textColor = column.statusColor
-            statusLabel.isHidden = false
-            let statusHeight = CGFloat(column.statusLines.count) * Self.statusLineHeight
-            statusLabel.frame = NSRect(x: 0, y: y, width: width, height: statusHeight)
-            y += statusHeight
-        }
+        accountLineCount = column.accountLines.count
+        accountLabel.stringValue = column.accountLines.joined(separator: "\n")
+        accountLabel.isHidden = column.accountLines.isEmpty
+        hasRefreshLine = column.refreshLine != nil
+        refreshLabel.stringValue = column.refreshLine ?? ""
+        refreshLabel.isHidden = column.refreshLine == nil
+        statusLineCount = column.statusLines.count
+        statusLabel.stringValue = column.statusLines.joined(separator: "\n")
+        statusLabel.textColor = column.statusColor
+        statusLabel.isHidden = column.statusLines.isEmpty
 
         let accessibilitySummary = ([column.title]
             + (column.quota.map { [$0.accessibilityValue] } ?? [])
             + column.rows.map(\.accessibilityLabel)
+            + column.accountLines
+            + (column.refreshLine.map { [$0] } ?? [])
             + column.statusLines).joined(separator: ", ")
         setAccessibilityElement(true)
         setAccessibilityLabel(accessibilitySummary)
 
         return y
+    }
+
+    func footerCapacities() -> (account: Int, refresh: Int, status: Int) {
+        (accountLineCount, hasRefreshLine ? 1 : 0, statusLineCount)
+    }
+
+    func footerHeight(accountCapacity: Int, refreshCapacity: Int, statusCapacity: Int) -> CGFloat {
+        let lineCount = accountCapacity + refreshCapacity + statusCapacity
+        return lineCount == 0 ? 0 : Self.statusTopGap + CGFloat(lineCount) * Self.statusLineHeight
+    }
+
+    func layoutFooter(
+        top: CGFloat,
+        width: CGFloat,
+        accountCapacity: Int,
+        refreshCapacity: Int,
+        statusCapacity: Int
+    ) {
+        guard accountCapacity + refreshCapacity + statusCapacity > 0 else { return }
+        var y = top + Self.statusTopGap
+        let accountHeight = CGFloat(accountLineCount) * Self.statusLineHeight
+        accountLabel.frame = NSRect(x: 0, y: y, width: width, height: accountHeight)
+        y += CGFloat(accountCapacity) * Self.statusLineHeight
+        refreshLabel.frame = NSRect(x: 0, y: y, width: width, height: hasRefreshLine ? Self.statusLineHeight : 0)
+        y += CGFloat(refreshCapacity) * Self.statusLineHeight
+        let statusHeight = CGFloat(statusLineCount) * Self.statusLineHeight
+        statusLabel.frame = NSRect(x: 0, y: y, width: width, height: statusHeight)
     }
 
     private func syncRows(_ rows: [UsagePanelRow]) {
@@ -594,9 +642,35 @@ final class SplitUsagePanelView: NSView {
     }
 
     func apply(_ model: UsagePanelModel) {
-        let leftHeight = leftColumnView.apply(model.codex, width: columnWidth)
-        let rightHeight = rightColumnView.apply(model.claude, width: columnWidth)
-        let contentHeight = max(leftHeight, rightHeight, 1)
+        let leftBodyHeight = leftColumnView.apply(model.codex, width: columnWidth)
+        let rightBodyHeight = rightColumnView.apply(model.claude, width: columnWidth)
+        let bodyHeight = max(leftBodyHeight, rightBodyHeight, 1)
+        let leftFooter = leftColumnView.footerCapacities()
+        let rightFooter = rightColumnView.footerCapacities()
+        let accountCapacity = max(leftFooter.account, rightFooter.account)
+        let refreshCapacity = max(leftFooter.refresh, rightFooter.refresh)
+        let statusCapacity = max(leftFooter.status, rightFooter.status)
+        let footerHeight = leftColumnView.footerHeight(
+            accountCapacity: accountCapacity,
+            refreshCapacity: refreshCapacity,
+            statusCapacity: statusCapacity
+        )
+        let contentHeight = bodyHeight + footerHeight
+
+        leftColumnView.layoutFooter(
+            top: bodyHeight,
+            width: columnWidth,
+            accountCapacity: accountCapacity,
+            refreshCapacity: refreshCapacity,
+            statusCapacity: statusCapacity
+        )
+        rightColumnView.layoutFooter(
+            top: bodyHeight,
+            width: columnWidth,
+            accountCapacity: accountCapacity,
+            refreshCapacity: refreshCapacity,
+            statusCapacity: statusCapacity
+        )
 
         let leftX = sidePadding
         let rightX = sidePadding + columnWidth + columnGap
