@@ -556,12 +556,17 @@ private final class UsageColumnView: NSView {
         statusLabel.textColor = column.statusColor
         statusLabel.isHidden = column.statusLines.isEmpty
 
-        let accessibilitySummary = ([column.title]
-            + (column.quota.map { [$0.accessibilityValue] } ?? [])
-            + column.rows.map(\.accessibilityLabel)
-            + column.accountLines
-            + (column.refreshLine.map { [$0] } ?? [])
-            + column.statusLines).joined(separator: ", ")
+        var accessibilityParts = [column.title]
+        if let quota = column.quota {
+            accessibilityParts.append(quota.accessibilityValue)
+        }
+        accessibilityParts.append(contentsOf: column.rows.map(\.accessibilityLabel))
+        accessibilityParts.append(contentsOf: column.accountLines)
+        if let refreshLine = column.refreshLine {
+            accessibilityParts.append(refreshLine)
+        }
+        accessibilityParts.append(contentsOf: column.statusLines)
+        let accessibilitySummary = accessibilityParts.joined(separator: ", ")
         setAccessibilityElement(true)
         setAccessibilityLabel(accessibilitySummary)
 
