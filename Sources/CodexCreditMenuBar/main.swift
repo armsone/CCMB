@@ -1110,10 +1110,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let updatedItem = NSMenuItem(title: "가져온 시간 없음", action: nil, keyEquivalent: "")
     private let refreshItem = NSMenuItem(title: "새로 고침 · 30초 후", action: #selector(refresh), keyEquivalent: "")
     private let intervalItem = NSMenuItem(title: "자동 새로 고침 · 30초", action: nil, keyEquivalent: "")
-    private let refreshOffItem = NSMenuItem(title: "끔", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
-    private let refresh30Item = NSMenuItem(title: "30초", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
-    private let refresh60Item = NSMenuItem(title: "1분", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
-    private let refresh300Item = NSMenuItem(title: "5분", action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
+    /// One item per `UsageCore.refreshIntervalOptions` entry. Built from that
+    /// list rather than hand-declared so the menu, the checkmark logic, and
+    /// the stored-value normalizer can never disagree about what is offered.
+    private lazy var refreshIntervalItems: [NSMenuItem] = UsageCore.refreshIntervalOptions.map { seconds in
+        let item = NSMenuItem(
+            title: seconds == 0 ? "끔" : Self.durationTitle(seconds: seconds),
+            action: #selector(AppDelegate.setRefreshInterval(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = seconds
+        return item
+    }
     private let launchAtLoginItem = NSMenuItem(title: "로그인 시 자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let shareItem = NSMenuItem(title: "사용량 공유", action: nil, keyEquivalent: "")
     private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중…", action: nil, keyEquivalent: "")
@@ -1137,6 +1145,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
     private let usagePageLinksView = UsagePageButtonsView()
     private let usagePageLinksItem = NSMenuItem()
+    private let historyChartView = UsageHistoryChartView()
+    private let historyChartItem = NSMenuItem()
+    /// Per-refresh consumption strips, persisted so the chart is not blank for
+    /// the first stretch after every launch.
+    private var codexConsumption = UsageConsumptionTracker()
+    private var claudeConsumption = UsageConsumptionTracker()
     private let checkForUpdatesItem = NSMenuItem(
         title: "업데이트 확인…",
         action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
@@ -1185,6 +1199,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+        loadConsumptionTrackers()
         configureStatusItem()
         installUsageHelper()
         configureClient()
@@ -1398,14 +1413,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func updateRefreshIntervalMenu() {
-        refreshOffItem.state = refreshInterval == 0 ? .on : .off
-        refresh30Item.state = refreshInterval == 30 ? .on : .off
-        refresh60Item.state = refreshInterval == 60 ? .on : .off
-        refresh300Item.state = refreshInterval == 300 ? .on : .off
-        setDetailTitle(refreshOffItem.title, for: refreshOffItem)
-        setDetailTitle(refresh30Item.title, for: refresh30Item)
-        setDetailTitle(refresh60Item.title, for: refresh60Item)
-        setDetailTitle(refresh300Item.title, for: refresh300Item)
+        for item in refreshIntervalItems {
+            let seconds = (item.representedObject as? Int) ?? -1
+            item.state = Int(refreshInterval) == seconds ? .on : .off
+            setDetailTitle(item.title, for: item)
+        }
         if refreshInterval > 0 {
             setDetailTitle("자동 새로 고침 · \(Self.durationTitle(seconds: Int(refreshInterval)))", for: intervalItem)
         } else {
@@ -1480,6 +1492,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(updatedItem)
         copyErrorItem.isHidden = true
         menu.addItem(copyErrorItem)
+        historyChartItem.view = historyChartView
+        historyChartItem.isEnabled = false
+        historyChartItem.isHidden = true
+        menu.addItem(historyChartItem)
+
         usagePageLinksView.codexButton.target = self
         usagePageLinksView.codexButton.action = #selector(openDashboard)
         usagePageLinksView.claudeButton.target = self
@@ -1490,14 +1507,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(refreshItem)
 
         let intervalMenu = NSMenu()
-        refreshOffItem.representedObject = 0
-        refresh30Item.representedObject = 30
-        refresh60Item.representedObject = 60
-        refresh300Item.representedObject = 300
-        intervalMenu.addItem(refreshOffItem)
-        intervalMenu.addItem(refresh30Item)
-        intervalMenu.addItem(refresh60Item)
-        intervalMenu.addItem(refresh300Item)
+        for item in refreshIntervalItems {
+            intervalMenu.addItem(item)
+        }
 
         intervalItem.submenu = intervalMenu
         menu.addItem(intervalItem)
@@ -1518,10 +1530,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         checkForUpdatesItem.target = updaterController
         refreshItem.target = self
-        refreshOffItem.target = self
-        refresh30Item.target = self
-        refresh60Item.target = self
-        refresh300Item.target = self
+        // The loop above only walks top-level items, so submenu items need
+        // their target set explicitly.
+        for item in refreshIntervalItems {
+            item.target = self
+        }
         launchAtLoginItem.target = self
         shareFolderItem.target = self
         copySharePromptCombinedItem.target = self
@@ -1610,6 +1623,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func apply(_ snapshot: RateLimitSnapshot) {
         lastSnapshot = snapshot
+        recordCodexConsumption(from: snapshot)
         refreshStatusTitle()
         lastErrorMessage = nil
         usageItem.toolTip = nil
@@ -1685,6 +1699,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             current: lastClaudeSnapshot,
             cache: ClaudeUsageStore.read()
         )
+        recordClaudeConsumption()
         if let lastSnapshot {
             publishSharedUsage(lastSnapshot)
         }
@@ -1697,6 +1712,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             switch outcome {
             case .success(let snapshot):
                 self.lastClaudeSnapshot = ClaudeUsageCore.merge(preferred: snapshot, fallback: self.lastClaudeSnapshot)
+                self.recordClaudeConsumption()
                 self.lastClaudeFetchFailureLabel = nil
                 self.lastClaudeRateLimitRetryAt = nil
             case .skippedInFlight, .skippedThrottled:
@@ -1722,6 +1738,106 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
+    // MARK: - Per-refresh consumption chart
+    //
+    // Everything below is plain data bookkeeping plus a view update. It runs on
+    // the main thread but never blocks it: no waits, no process control, no
+    // synchronous IPC. That matters because this code runs while the menu is
+    // open, and a stalled main thread during menu tracking freezes keyboard
+    // input for the whole system.
+
+    /// The chart is its own full-width row just above the usage-page buttons,
+    /// so it refreshes alongside the panel rather than as part of a column.
+    private func updateHistoryChart() {
+        let codexStrip = lastSnapshot.flatMap { codexHistoryStrip(from: $0) }
+        let hasContent = historyChartView.apply(codex: codexStrip, claude: claudeHistoryStrip())
+        historyChartItem.isHidden = !hasContent
+    }
+
+    /// Codex bills against the weekly quota until it is exhausted and only then
+    /// draws down credits, so "how much did that refresh cost" is a different
+    /// number depending on which meter is live. The chart follows whichever one
+    /// is actually being spent.
+    private static func codexChartsCredits(_ snapshot: RateLimitSnapshot) -> Bool {
+        guard let balance = snapshot.creditBalance, balance > 0 else { return false }
+        guard let usedPercent = snapshot.usedPercent else { return true }
+        return remainingUsagePercent(from: usedPercent) <= 0
+    }
+
+    private func recordCodexConsumption(from snapshot: RateLimitSnapshot) {
+        let usesCredits = Self.codexChartsCredits(snapshot)
+        codexConsumption.record(
+            reading: usesCredits ? snapshot.creditBalance : snapshot.usedPercent,
+            at: snapshot.updatedAt,
+            isDecreasing: usesCredits,
+            metricKey: usesCredits ? "codex.credit" : "codex.weekly"
+        )
+        persistConsumptionTrackers()
+    }
+
+    private func recordClaudeConsumption() {
+        guard let snapshot = lastClaudeSnapshot, let publishedAt = snapshot.publishedAt else { return }
+        // The 5-hour session meter is the one that visibly moves while working;
+        // weekly is the fallback for accounts that only report it.
+        let usesSession = snapshot.fiveHourUsedPercent != nil
+        claudeConsumption.record(
+            reading: usesSession ? snapshot.fiveHourUsedPercent : snapshot.weeklyUsedPercent,
+            at: publishedAt,
+            isDecreasing: false,
+            metricKey: usesSession ? "claude.session" : "claude.weekly"
+        )
+        persistConsumptionTrackers()
+    }
+
+    private func codexHistoryStrip(from snapshot: RateLimitSnapshot) -> UsageHistoryStrip? {
+        // No emptiness guard: the strip is always drawn at full width, with
+        // not-yet-measured slots shown as faint placeholders.
+        let samples = codexConsumption.samples
+        let usesCredits = Self.codexChartsCredits(snapshot)
+        let unit = usesCredits ? " 크레딧" : "%"
+        let latest = samples.last?.amount ?? 0
+        return UsageHistoryStrip(
+            caption: "Codex · 갱신당 \(usesCredits ? "크레딧" : "주간") \(UsageConsumptionCore.amountTitle(latest, unit: usesCredits ? "" : "%"))",
+            samples: samples,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: unit,
+            color: .systemBlue,
+            accessibilityValue: "최근 \(samples.count)회 갱신 소비 기록, 마지막 갱신 \(UsageConsumptionCore.amountTitle(latest, unit: unit))"
+        )
+    }
+
+    private func claudeHistoryStrip() -> UsageHistoryStrip? {
+        let samples = claudeConsumption.samples
+        let usesSession = lastClaudeSnapshot?.fiveHourUsedPercent != nil
+        let latest = UsageConsumptionCore.amountTitle(samples.last?.amount ?? 0, unit: "%")
+        return UsageHistoryStrip(
+            caption: "Claude · 갱신당 \(usesSession ? "세션" : "주간") \(latest)",
+            samples: samples,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: "%",
+            color: .systemOrange,
+            accessibilityValue: "최근 \(samples.count)회 갱신 소비 기록, 마지막 갱신 \(latest)"
+        )
+    }
+
+    private struct ConsumptionHistoryStore: Codable {
+        var codex: UsageConsumptionTracker
+        var claude: UsageConsumptionTracker
+    }
+
+    private func loadConsumptionTrackers() {
+        guard let data = UserDefaults.standard.data(forKey: Self.consumptionHistoryDefaultsKey),
+              let store = try? JSONDecoder().decode(ConsumptionHistoryStore.self, from: data) else { return }
+        codexConsumption = store.codex
+        claudeConsumption = store.claude
+    }
+
+    private func persistConsumptionTrackers() {
+        let store = ConsumptionHistoryStore(codex: codexConsumption, claude: claudeConsumption)
+        guard let data = try? JSONEncoder().encode(store) else { return }
+        UserDefaults.standard.set(data, forKey: Self.consumptionHistoryDefaultsKey)
+    }
+
     private func refreshStatusTitle() {
         guard let snapshot = lastSnapshot else { return }
         setStatusTitle(Self.statusTitle(from: snapshot, claude: lastClaudeSnapshot))
@@ -1729,6 +1845,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func updateSplitPanel() {
+        updateHistoryChart()
         guard let lastSnapshot else {
             splitPanelItem.isHidden = true
             return
@@ -2260,6 +2377,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static let launchAgentLabel = "com.codex.creditmenubar"
     private static let refreshIntervalDefaultsKey = "automaticRefreshIntervalSeconds"
+    private static let consumptionHistoryDefaultsKey = "usageConsumptionHistoryV1"
     private static let footerLinkURLString = "https://github.com/armsone"
 
     private static func savedRefreshInterval() -> TimeInterval {

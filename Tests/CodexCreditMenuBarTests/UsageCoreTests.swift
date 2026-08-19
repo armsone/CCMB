@@ -50,10 +50,20 @@ final class UsageCoreTests: XCTestCase {
     }
 
     func testRefreshIntervalOnlyAcceptsSupportedValues() {
-        XCTAssertEqual(UsageCore.normalizedRefreshInterval(nil), 30)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(nil), 180)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(0), 0)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(60), 60)
-        XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), 30)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(180), 180)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(600), 600)
+        // An unknown stored value falls back to the default, not to whatever
+        // the first option happens to be.
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), 180)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(30), 30)
+    }
+
+    func testRefreshIntervalOptionsCoverTheAdvertisedCadences() {
+        XCTAssertEqual(UsageCore.refreshIntervalOptions, [0, 30, 60, 180, 300, 600])
+        XCTAssertTrue(UsageCore.refreshIntervalOptions.contains(UsageCore.defaultRefreshIntervalSeconds))
     }
 
     func testCacheFallbackReasonTreatsCorruptCacheLikeMissing() {
@@ -395,7 +405,29 @@ final class ClaudeUsageCoreTests: XCTestCase {
 
         XCTAssertEqual(result?.weeklyUsedPercent, 20)
         XCTAssertEqual(result?.publishedAt, Date(timeIntervalSince1970: 200))
-        XCTAssertEqual(result?.fiveHourUsedPercent, 40, "older snapshot's own fields still backfill what the newer one lacks")
+        XCTAssertNil(result?.fiveHourUsedPercent, "an older missing quota must not be presented with the newer cache timestamp")
+    }
+
+    func testNewerMetadataOnlyStatusLineDoesNotFreshenOldQuota() {
+        let olderLive = makeSnapshot(
+            fiveHourUsedPercent: 40,
+            publishedAt: Date(timeIntervalSince1970: 100)
+        )
+        let newerMetadataOnlyCache = makeSnapshot(
+            model: "Sonnet 5",
+            contextRemainingPercent: 80,
+            publishedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        let result = ClaudeUsageCore.mergingCacheSnapshot(
+            current: olderLive,
+            cache: newerMetadataOnlyCache
+        )
+
+        XCTAssertEqual(result?.fiveHourUsedPercent, 40)
+        XCTAssertEqual(result?.model, "Sonnet 5")
+        XCTAssertEqual(result?.contextRemainingPercent, 80)
+        XCTAssertEqual(result?.publishedAt, Date(timeIntervalSince1970: 100))
     }
 
     func testMergingCacheSnapshotHandlesNilInputs() {
@@ -762,6 +794,133 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
         XCTAssertEqual(ClaudeUsageFetchOutcome.skippedRateLimitBackoff(retryAt: retryAt).rateLimitRetryAt, retryAt)
         XCTAssertNil(ClaudeUsageFetchOutcome.httpFailure(status: 429).rateLimitRetryAt)
         XCTAssertNil(ClaudeUsageFetchOutcome.skippedThrottled.rateLimitRetryAt)
+    }
+
+    // MARK: - Per-refresh consumption strip
+
+    func testConsumptionFollowsTheMetricDirection() {
+        // Credits count down.
+        XCTAssertEqual(UsageConsumptionCore.consumption(previous: 100, current: 97.5, isDecreasing: true), 2.5)
+        // Used-percentage counts up.
+        XCTAssertEqual(UsageConsumptionCore.consumption(previous: 40, current: 43, isDecreasing: false), 3)
+    }
+
+    func testQuotaResetIsReportedAsZeroConsumptionNotAsASpike() {
+        // Weekly % rolling back to 0 at reset.
+        XCTAssertEqual(UsageConsumptionCore.consumption(previous: 96, current: 0, isDecreasing: false), 0)
+        // A credit top-up.
+        XCTAssertEqual(UsageConsumptionCore.consumption(previous: 5, current: 1_000, isDecreasing: true), 0)
+    }
+
+    func testAmountTitleKeepsSmallReadingsVisible() {
+        // A refresh that burned a hundredth of a credit must not render as "0".
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(0.0042, unit: ""), "0.0042")
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(1.5, unit: " 크레딧"), "1.5 크레딧")
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(2, unit: "%"), "2%")
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(0, unit: "%"), "0%")
+        // 100.00 must survive trailing-zero trimming intact.
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(100, unit: ""), "100")
+    }
+
+    func testNewestSampleIsDrawnInTheLeftmostSlot() {
+        // Samples are stored oldest-first, so the last one is the newest and it
+        // must land in slot 0.
+        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 0, sampleCount: 3), 2)
+        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 1, sampleCount: 3), 1)
+        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 2, sampleCount: 3), 0)
+        // Beyond the history: placeholder slots, not a wrapped or clamped index.
+        XCTAssertNil(UsageConsumptionCore.sampleIndex(forSlot: 3, sampleCount: 3))
+        XCTAssertNil(UsageConsumptionCore.sampleIndex(forSlot: 23, sampleCount: 3))
+        XCTAssertNil(UsageConsumptionCore.sampleIndex(forSlot: 0, sampleCount: 0))
+        XCTAssertNil(UsageConsumptionCore.sampleIndex(forSlot: -1, sampleCount: 3))
+        // A full window fills every slot.
+        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 0, sampleCount: 24), 23)
+        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 23, sampleCount: 24), 0)
+    }
+
+    func testBarFractionsScaleToTheWindowPeak() {
+        XCTAssertEqual(UsageConsumptionCore.barFractions([1, 2, 4]), [0.25, 0.5, 1])
+        // An all-quiet window must not divide by zero.
+        XCTAssertEqual(UsageConsumptionCore.barFractions([0, 0]), [0, 0])
+        XCTAssertEqual(UsageConsumptionCore.barFractions([]), [])
+    }
+
+    func testTrackerFirstReadingOnlyEstablishesABaseline() {
+        var tracker = UsageConsumptionTracker()
+        tracker.record(reading: 100, at: Date(timeIntervalSince1970: 0), isDecreasing: true, metricKey: "credit")
+        XCTAssertTrue(tracker.amounts.isEmpty)
+        tracker.record(reading: 98, at: Date(timeIntervalSince1970: 60), isDecreasing: true, metricKey: "credit")
+        XCTAssertEqual(tracker.amounts, [2])
+    }
+
+    func testTrackerIgnoresRepeatsOfDataItHasAlreadySeen() {
+        var tracker = UsageConsumptionTracker()
+        let first = Date(timeIntervalSince1970: 0)
+        let second = Date(timeIntervalSince1970: 60)
+        tracker.record(reading: 100, at: first, isDecreasing: true, metricKey: "credit")
+        tracker.record(reading: 98, at: second, isDecreasing: true, metricKey: "credit")
+        // A menu open or file-watcher hit re-applies the same snapshot; it must
+        // not add a second bar for one refresh.
+        tracker.record(reading: 98, at: second, isDecreasing: true, metricKey: "credit")
+        tracker.record(reading: 98, at: first, isDecreasing: true, metricKey: "credit")
+        XCTAssertEqual(tracker.amounts, [2])
+    }
+
+    func testTrackerIgnoresMissingReadings() {
+        var tracker = UsageConsumptionTracker()
+        tracker.record(reading: 100, at: Date(timeIntervalSince1970: 0), isDecreasing: true, metricKey: "credit")
+        tracker.record(reading: nil, at: Date(timeIntervalSince1970: 60), isDecreasing: true, metricKey: "credit")
+        XCTAssertTrue(tracker.amounts.isEmpty)
+        // The baseline survives the gap, so the next real reading differences
+        // against 100 rather than starting over.
+        tracker.record(reading: 95, at: Date(timeIntervalSince1970: 120), isDecreasing: true, metricKey: "credit")
+        XCTAssertEqual(tracker.amounts, [5])
+    }
+
+    func testTrackerKeepsOnlyTheMostRecentSamples() {
+        var tracker = UsageConsumptionTracker()
+        for step in 0...30 {
+            tracker.record(
+                reading: Double(step),
+                at: Date(timeIntervalSince1970: TimeInterval(step) * 60),
+                isDecreasing: false,
+                metricKey: "weekly",
+                capacity: 24
+            )
+        }
+        XCTAssertEqual(tracker.amounts.count, 24)
+        XCTAssertEqual(tracker.amounts.allSatisfy { $0 == 1 }, true)
+    }
+
+    func testSwitchingMetricsResetsTheStripInsteadOfDrawingOneHugeBar() {
+        var tracker = UsageConsumptionTracker()
+        tracker.record(reading: 10, at: Date(timeIntervalSince1970: 0), isDecreasing: false, metricKey: "weekly")
+        tracker.record(reading: 20, at: Date(timeIntervalSince1970: 60), isDecreasing: false, metricKey: "weekly")
+        XCTAssertEqual(tracker.amounts, [10])
+
+        // Weekly is exhausted and Codex starts billing credits: a 1105-credit
+        // balance differenced against a 20% reading would be nonsense.
+        tracker.record(reading: 1_105, at: Date(timeIntervalSince1970: 120), isDecreasing: true, metricKey: "credit")
+        XCTAssertTrue(tracker.amounts.isEmpty)
+        tracker.record(reading: 1_100, at: Date(timeIntervalSince1970: 180), isDecreasing: true, metricKey: "credit")
+        XCTAssertEqual(tracker.amounts, [5])
+    }
+
+    func testTrackerSurvivesAnEncodeDecodeRoundTrip() throws {
+        var tracker = UsageConsumptionTracker()
+        tracker.record(reading: 100, at: Date(timeIntervalSince1970: 0), isDecreasing: true, metricKey: "credit")
+        tracker.record(reading: 97, at: Date(timeIntervalSince1970: 60), isDecreasing: true, metricKey: "credit")
+
+        let data = try JSONEncoder().encode(tracker)
+        var restored = try JSONDecoder().decode(UsageConsumptionTracker.self, from: data)
+        XCTAssertEqual(restored, tracker)
+
+        // The restored baseline and dedupe clock must survive too, or the first
+        // refresh after launch would drop a bar or duplicate one.
+        restored.record(reading: 97, at: Date(timeIntervalSince1970: 60), isDecreasing: true, metricKey: "credit")
+        XCTAssertEqual(restored.amounts, [3])
+        restored.record(reading: 96, at: Date(timeIntervalSince1970: 120), isDecreasing: true, metricKey: "credit")
+        XCTAssertEqual(restored.amounts, [3, 1])
     }
 
     func testRateLimitedOutcomeReportsThe429Label() {

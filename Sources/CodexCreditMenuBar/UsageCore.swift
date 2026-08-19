@@ -11,6 +11,127 @@ struct RateLimitSnapshot {
     let updatedAt: Date
 }
 
+/// One bar of a column's consumption strip: how much the tracked metric moved
+/// between two consecutive refreshes.
+struct UsageConsumptionSample: Codable, Equatable {
+    let at: Date
+    let amount: Double
+}
+
+enum UsageConsumptionCore {
+    /// Codex reports a credit balance that counts *down* and a weekly
+    /// used-percentage that counts *up*. Both are reported here as positive
+    /// consumption so the chart never has to know which meter it is drawing.
+    static func consumption(previous: Double, current: Double, isDecreasing: Bool) -> Double {
+        let delta = isDecreasing ? previous - current : current - previous
+        // A quota reset (weekly % falling back toward 0, a credit top-up) shows
+        // up as negative consumption. Report zero: a negative bar is
+        // meaningless, and taking the magnitude would draw the reset itself as
+        // the largest spike in the window.
+        return delta > 0 ? delta : 0
+    }
+
+    /// Consumption per refresh is often a fraction of a percent or of a credit,
+    /// so two decimals would round most readings to "0". Small values keep four.
+    /// Lives here rather than in the app delegate because the hover tooltip in
+    /// the chart view needs the same formatting.
+    static func amountTitle(_ amount: Double, unit: String) -> String {
+        guard amount > 0 else { return "0\(unit)" }
+        let format = amount < 0.01 ? "%.4f" : "%.2f"
+        let text = String(format: format, amount)
+            .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
+        return "\(text)\(unit)"
+    }
+
+    /// Maps a drawing slot to an index into a sample array that is stored
+    /// oldest-first.
+    ///
+    /// Slot 0 is the newest reading, so reading the strip left to right is
+    /// reading backwards in time. The strip always draws a fixed number of
+    /// slots — it never grows over its first 24 refreshes — and slots past the
+    /// end of the history return `nil` so the view can draw a placeholder
+    /// rather than invent a reading that never happened.
+    static func sampleIndex(forSlot slot: Int, sampleCount: Int) -> Int? {
+        guard slot >= 0 else { return nil }
+        let index = sampleCount - 1 - slot
+        return index >= 0 ? index : nil
+    }
+
+    /// Bar heights as fractions of the window's own peak. Consumption per
+    /// refresh has no natural ceiling, so an absolute scale would flatten every
+    /// bar to nothing on a quiet day. An all-zero window yields all zeros
+    /// instead of dividing by zero.
+    static func barFractions(_ amounts: [Double]) -> [Double] {
+        guard let peak = amounts.max(), peak > 0 else {
+            return Array(repeating: 0, count: amounts.count)
+        }
+        return amounts.map { max(0, $0) / peak }
+    }
+}
+
+/// Rolling per-refresh consumption history for a single metric.
+///
+/// Deliberately dumb about *what* it measures: it takes a raw reading plus that
+/// metric's direction and an identifying key, and it is the key that makes
+/// switching meters safe — when Codex exhausts its weekly quota and starts
+/// billing credits, the strip resets rather than drawing the first
+/// cross-metric difference as one enormous bar.
+struct UsageConsumptionTracker: Codable, Equatable {
+    static let defaultCapacity = 24
+
+    private(set) var samples: [UsageConsumptionSample] = []
+    private var lastReading: Double?
+    private var lastRecordedAt: Date?
+    private var metricKey: String?
+
+    init() {}
+
+    var amounts: [Double] { samples.map(\.amount) }
+
+    /// - Parameters:
+    ///   - reading: the metric's current absolute value. A `nil` reading is
+    ///     ignored so a momentarily missing field never fabricates a bar.
+    ///   - date: the source data's own timestamp, never "now". Readings at or
+    ///     before the last recorded timestamp are dropped, which is what stops
+    ///     plain UI redraws — menu opens, file-watcher hits, offline retries —
+    ///     from inventing bars for data that has not actually changed.
+    mutating func record(
+        reading: Double?,
+        at date: Date,
+        isDecreasing: Bool,
+        metricKey: String,
+        capacity: Int = defaultCapacity
+    ) {
+        if self.metricKey != metricKey {
+            self.metricKey = metricKey
+            samples.removeAll()
+            lastReading = nil
+            lastRecordedAt = nil
+        }
+        guard let reading else { return }
+        if let lastRecordedAt, date <= lastRecordedAt { return }
+        defer {
+            lastReading = reading
+            lastRecordedAt = date
+        }
+        // The first reading only establishes a baseline: there is nothing to
+        // difference it against yet.
+        guard let previous = lastReading else { return }
+        samples.append(UsageConsumptionSample(
+            at: date,
+            amount: UsageConsumptionCore.consumption(
+                previous: previous,
+                current: reading,
+                isDecreasing: isDecreasing
+            )
+        ))
+        if samples.count > capacity {
+            samples.removeFirst(samples.count - capacity)
+        }
+    }
+}
+
 enum UsageCore {
     static let usageHelperMarker = "# CCMB_USAGE_HELPER_VERSION="
 
@@ -72,8 +193,20 @@ enum UsageCore {
         statusOK && processMatches && ageSeconds <= max(0, freshForSeconds)
     }
 
+    /// Selectable auto-refresh cadences in seconds, `0` meaning off. The menu,
+    /// the persistence normalizer, and the tests all read this one list so a
+    /// new cadence cannot be added in one place and forgotten in another.
+    static let refreshIntervalOptions: [Int] = [0, 30, 60, 180, 300, 600]
+
+    /// Three minutes: frequent enough to feel live, infrequent enough that an
+    /// always-on menu bar app is not a meaningful battery or rate-limit cost.
+    /// Applies to a fresh install only; a stored valid choice always wins.
+    static let defaultRefreshIntervalSeconds = 180
+
     static func normalizedRefreshInterval(_ seconds: Int?) -> TimeInterval {
-        guard let seconds, [0, 30, 60, 300].contains(seconds) else { return 30 }
+        guard let seconds, refreshIntervalOptions.contains(seconds) else {
+            return TimeInterval(defaultRefreshIntervalSeconds)
+        }
         return TimeInterval(seconds)
     }
 
@@ -236,6 +369,10 @@ struct ClaudeUsageSnapshot {
             extraUsage: extraUsage,
             account: account
         )
+    }
+
+    var hasRateLimitUsage: Bool {
+        weeklyUsedPercent != nil || fiveHourUsedPercent != nil
     }
 }
 
@@ -508,8 +645,46 @@ enum ClaudeUsageCore {
 
         let currentDate = current.publishedAt ?? .distantPast
         let cacheDate = cache.publishedAt ?? .distantPast
-        return cacheDate > currentDate
-            ? merge(preferred: cache, fallback: current)
-            : merge(preferred: current, fallback: cache)
+        guard cacheDate > currentDate else {
+            return merge(preferred: current, fallback: cache)
+        }
+
+        if cache.hasRateLimitUsage {
+            // The official statusLine payload owns primary quota fields when
+            // it is newer. Do not make an old missing quota look freshly
+            // updated by backfilling it from a prior OAuth snapshot.
+            return ClaudeUsageSnapshot(
+                model: cache.model ?? current.model,
+                weeklyUsedPercent: cache.weeklyUsedPercent,
+                weeklyResetsAt: cache.weeklyResetsAt,
+                fiveHourUsedPercent: cache.fiveHourUsedPercent,
+                fiveHourResetsAt: cache.fiveHourResetsAt,
+                contextUsedPercent: cache.contextUsedPercent ?? current.contextUsedPercent,
+                contextRemainingPercent: cache.contextRemainingPercent ?? current.contextRemainingPercent,
+                sessionCostUSD: cache.sessionCostUSD ?? current.sessionCostUSD,
+                publishedAt: cache.publishedAt,
+                modelWeeklyLimits: current.modelWeeklyLimits,
+                extraUsage: current.extraUsage,
+                account: current.account
+            )
+        }
+
+        // A statusLine event can contain only session metadata before the
+        // first Claude response. Adopt that metadata without refreshing the
+        // timestamp attached to older quota values.
+        return ClaudeUsageSnapshot(
+            model: cache.model ?? current.model,
+            weeklyUsedPercent: current.weeklyUsedPercent,
+            weeklyResetsAt: current.weeklyResetsAt,
+            fiveHourUsedPercent: current.fiveHourUsedPercent,
+            fiveHourResetsAt: current.fiveHourResetsAt,
+            contextUsedPercent: cache.contextUsedPercent ?? current.contextUsedPercent,
+            contextRemainingPercent: cache.contextRemainingPercent ?? current.contextRemainingPercent,
+            sessionCostUSD: cache.sessionCostUSD ?? current.sessionCostUSD,
+            publishedAt: current.publishedAt,
+            modelWeeklyLimits: current.modelWeeklyLimits,
+            extraUsage: current.extraUsage,
+            account: current.account
+        )
     }
 }

@@ -6,3 +6,5 @@ PROJECT_CONTEXT.md
 *.log
 *.dmg
 *.zip
+.ccmb-agent/
+Products/last-build.log

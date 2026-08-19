@@ -79,6 +79,23 @@ struct UsagePanelQuota {
     let accessibilityValue: String
 }
 
+/// Compact bar strip showing how much the column's metric was consumed at each
+/// refresh, drawn directly under the column title.
+struct UsageHistoryStrip {
+    let caption: String
+    /// Stored oldest-first. Only real readings; short histories are padded at
+    /// draw time rather than in the data, and each sample keeps the timestamp
+    /// of the refresh it came from so hovering a bar can report it.
+    let samples: [UsageConsumptionSample]
+    /// Slots the strip always draws, so the chart keeps a constant width.
+    /// Filled from the left with the newest reading first.
+    let slotCount: Int
+    /// Appended to a hovered bar's value, e.g. " 크레딧" or "%".
+    let unitSuffix: String
+    let color: NSColor
+    let accessibilityValue: String
+}
+
 struct UsagePanelColumn {
     let title: String
     let accentColor: NSColor
@@ -88,6 +105,171 @@ struct UsagePanelColumn {
     /// last-updated age, fetch failure or backoff countdown).
     let statusLines: [String]
     let statusColor: NSColor
+}
+
+/// Fixed-height bar strip, newest sample on the left.
+private final class UsageHistoryBarView: NSView {
+    private static let barGap: CGFloat = 2
+    /// Zero-consumption refreshes still get a hairline, so the strip reads as
+    /// "sampled, nothing used" rather than as a hole in the data.
+    private static let minimumBarHeight: CGFloat = 1.5
+
+    /// Real samples only, stored oldest-first. Never padded — padding is a
+    /// drawing concern, so the data stays honest about how much was measured.
+    /// Drawing reverses the order so the newest reading sits at the left edge.
+    var samples: [UsageConsumptionSample] = [] {
+        didSet { needsDisplay = true }
+    }
+    /// Appended to the hovered value in the hover readout.
+    var unitSuffix: String = ""
+    /// Called with the hovered sample, or `nil` when the pointer leaves the
+    /// strip. The owner uses it to swap the caption for a readout.
+    var onHover: ((UsageConsumptionSample?) -> Void)?
+
+    private var hoveredSlot: Int?
+
+    private static let hoverTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "a h:mm:ss"
+        return formatter
+    }()
+
+    /// Text shown when a bar is hovered: when the refresh happened and what it
+    /// cost.
+    static func hoverTitle(for sample: UsageConsumptionSample, unitSuffix: String) -> String {
+        let time = hoverTimeFormatter.string(from: sample.at)
+        return "\(time) · \(UsageConsumptionCore.amountTitle(sample.amount, unit: unitSuffix))"
+    }
+    /// Total slots drawn. Slots with no sample yet render as faint placeholders
+    /// so "we measured and nothing was used" stays distinguishable from
+    /// "we have not measured this far back yet".
+    var slotCount: Int = UsageConsumptionTracker.defaultCapacity {
+        didSet { needsDisplay = true }
+    }
+    var barColor: NSColor = .controlAccentColor {
+        didSet { needsDisplay = true }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installHoverTracking()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let slots = max(slotCount, samples.count)
+        guard slots > 0 else { return }
+
+        let fractions = UsageConsumptionCore.barFractions(samples.map(\.amount))
+        let count = CGFloat(slots)
+        let totalGap = Self.barGap * max(0, count - 1)
+        let barWidth = max(1, (bounds.width - totalGap) / count)
+        let baseline = bounds.height
+        let radius = min(1.5, barWidth / 2)
+
+        for index in 0..<slots {
+            // Slot 0 is the newest reading; older ones trail off to the right.
+            let sampleIndex = UsageConsumptionCore.sampleIndex(
+                forSlot: index,
+                sampleCount: fractions.count
+            )
+            let fraction = sampleIndex.map { fractions[$0] }
+            let height: CGFloat
+            let color: NSColor
+            switch fraction {
+            case .some(let value) where value > 0:
+                height = max(Self.minimumBarHeight, CGFloat(value) * bounds.height)
+                color = barColor
+            case .some:
+                // Measured, consumed nothing.
+                height = Self.minimumBarHeight
+                color = barColor.withAlphaComponent(0.28)
+            case .none:
+                // Not measured yet: an even fainter placeholder so the strip
+                // holds its shape without claiming a reading that never happened.
+                height = Self.minimumBarHeight
+                color = barColor.withAlphaComponent(0.10)
+            }
+            let x = CGFloat(index) * (barWidth + Self.barGap)
+            if index == hoveredSlot {
+                // A faint full-height backdrop, so it is obvious which bar the
+                // readout belongs to even when that bar is a hairline.
+                NSColor.labelColor.withAlphaComponent(0.10).setFill()
+                NSBezierPath(
+                    roundedRect: NSRect(x: x - 1, y: 0, width: barWidth + 2, height: bounds.height),
+                    xRadius: 2,
+                    yRadius: 2
+                ).fill()
+            }
+            let rect = NSRect(x: x, y: baseline - height, width: barWidth, height: height)
+            color.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+        }
+    }
+
+    // MARK: - Hover
+    //
+    // ONE tracking area, installed once in init and never touched again.
+    //
+    // The previous version rebuilt a tracking area per slot from inside
+    // `updateTrackingAreas()` and from every data/geometry change. Removing and
+    // re-adding areas there makes AppKit schedule another update pass, which
+    // rebuilds them again — the main thread spins at 100% instead of returning
+    // to the event loop. With a menu open that is indistinguishable from a
+    // freeze: NSMenu owns keyboard input while tracking, so the whole machine
+    // stops accepting keystrokes. `.inVisibleRect` lets AppKit keep this single
+    // area's geometry in sync on its own, so nothing ever needs rebuilding.
+
+    private func installHoverTracking() {
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    /// Slot under a point in this view's coordinates, or nil if outside.
+    private func slot(at point: NSPoint) -> Int? {
+        guard bounds.contains(point) else { return nil }
+        let slots = max(slotCount, samples.count)
+        guard slots > 0, bounds.width > 0 else { return nil }
+        let totalGap = Self.barGap * CGFloat(max(0, slots - 1))
+        let barWidth = max(1, (bounds.width - totalGap) / CGFloat(slots))
+        let step = barWidth + Self.barGap
+        let index = Int(floor(point.x / step))
+        return (0..<slots).contains(index) ? index : nil
+    }
+
+    private func updateHover(to slot: Int?) {
+        guard slot != hoveredSlot else { return }
+        hoveredSlot = slot
+        let sample = slot
+            .flatMap { UsageConsumptionCore.sampleIndex(forSlot: $0, sampleCount: samples.count) }
+            .map { samples[$0] }
+        toolTip = sample.map { Self.hoverTitle(for: $0, unitSuffix: unitSuffix) }
+        needsDisplay = true
+        onHover?(sample)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateHover(to: slot(at: convert(event.locationInWindow, from: nil)))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        updateHover(to: slot(at: convert(event.locationInWindow, from: nil)))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        updateHover(to: nil)
+    }
 }
 
 struct UsagePanelModel {
@@ -433,6 +615,235 @@ final class SplitUsagePanelView: NSView {
         let claudeSummary = model.claude.quota?.accessibilityValue ?? model.claude.title
         setAccessibilityLabel("Codex 및 Claude 사용량 패널")
         setAccessibilityValue("\(codexSummary), \(claudeSummary)")
+    }
+}
+
+/// Full-width per-refresh consumption chart, hosted as its own NSMenuItem
+/// directly above the usage-page buttons. Its column geometry deliberately
+/// matches `SplitUsagePanelView` so each strip lines up under the Codex and
+/// Claude columns it belongs to.
+@MainActor
+final class UsageHistoryChartView: NSView {
+    // Column geometry is copied from SplitUsagePanelView on purpose: the two
+    // strips must sit exactly under the Codex and Claude columns above them,
+    // and the inner divider must line up with that panel's divider. That
+    // alignment is what makes the whole menu read as one object.
+    private static let viewWidth: CGFloat = 510
+    private static let sidePadding: CGFloat = 16
+    private static let columnWidth: CGFloat = 230
+    private static let columnGap: CGFloat = 18
+
+    /// The card is inset from the strips, not the other way round, so the bars
+    /// keep their column alignment while the card frames them.
+    private static let cardInset: CGFloat = 8
+    private static let cardTop: CGFloat = 2
+    private static let cardPadding: CGFloat = 8
+    private static let cardCornerRadius: CGFloat = 10
+
+    private static let captionHeight: CGFloat = 13
+    private static let captionGap: CGFloat = 4
+    private static let barsHeight: CGFloat = 28
+    private static let baselineGap: CGFloat = 4
+    private static let footerHeight: CGFloat = 11
+    private static let bottomPadding: CGFloat = 8
+    private static let dotDiameter: CGFloat = 6
+    private static let dotTextGap: CGFloat = 10
+
+    private static let contentTop = cardTop + cardPadding
+    private static let barsTop = contentTop + captionHeight + captionGap
+    private static let baselineY = barsTop + barsHeight
+    private static let footerTop = baselineY + baselineGap
+    private static let cardHeight =
+        cardPadding + captionHeight + captionGap + barsHeight
+        + baselineGap + footerHeight + cardPadding
+
+    static let viewHeight: CGFloat = cardTop + cardHeight + bottomPadding
+
+    private let codexCaption = UsageHistoryChartView.makeCaption()
+    private let claudeCaption = UsageHistoryChartView.makeCaption()
+    private let footerLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "왼쪽이 최신 · 갱신 24회")
+        field.font = .systemFont(ofSize: 9, weight: .regular)
+        field.textColor = .tertiaryLabelColor
+        field.alignment = .center
+        return field
+    }()
+    private let codexBars = UsageHistoryBarView()
+    private let claudeBars = UsageHistoryBarView()
+    /// The caption each side falls back to once the pointer leaves its strip.
+    private var codexBaseCaption = ""
+    private var claudeBaseCaption = ""
+
+    override var isFlipped: Bool { true }
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.viewWidth, height: Self.viewHeight))
+        addSubview(codexCaption)
+        addSubview(codexBars)
+        addSubview(claudeCaption)
+        addSubview(claudeBars)
+        addSubview(footerLabel)
+        setAccessibilityElement(false)
+
+        codexBars.onHover = { [weak self] sample in
+            guard let self else { return }
+            self.codexCaption.stringValue = sample
+                .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.codexBars.unitSuffix) }
+                ?? self.codexBaseCaption
+        }
+        claudeBars.onHover = { [weak self] sample in
+            guard let self else { return }
+            self.claudeCaption.stringValue = sample
+                .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.claudeBars.unitSuffix) }
+                ?? self.claudeBaseCaption
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        // The card. A single low-contrast surface with a hairline edge is
+        // enough to read the two strips as one panel; a heavier box would
+        // compete with the usage panel directly above it.
+        let card = NSRect(
+            x: Self.cardInset,
+            y: Self.cardTop,
+            width: bounds.width - Self.cardInset * 2,
+            height: Self.cardHeight
+        )
+        let cardPath = NSBezierPath(
+            roundedRect: card,
+            xRadius: Self.cardCornerRadius,
+            yRadius: Self.cardCornerRadius
+        )
+        NSColor.labelColor.withAlphaComponent(0.045).setFill()
+        cardPath.fill()
+        NSColor.separatorColor.setStroke()
+        cardPath.lineWidth = 1
+        cardPath.stroke()
+
+        // Divider between the two halves, at the same x as the usage panel's.
+        let dividerX = Self.sidePadding + Self.columnWidth + Self.columnGap / 2
+        NSColor.separatorColor.setFill()
+        NSBezierPath(rect: NSRect(
+            x: dividerX,
+            y: Self.contentTop,
+            width: 1,
+            height: Self.baselineY - Self.contentTop
+        )).fill()
+
+        // A recessive floor under each strip, so the bars read as sitting on an
+        // axis rather than floating.
+        NSColor.separatorColor.withAlphaComponent(0.6).setFill()
+        for x in [Self.sidePadding, Self.sidePadding + Self.columnWidth + Self.columnGap] {
+            NSBezierPath(rect: NSRect(
+                x: x,
+                y: Self.baselineY,
+                width: Self.columnWidth,
+                height: 1
+            )).fill()
+        }
+
+        // Identity dots. The caption text itself stays in secondary ink — the
+        // dot carries the series colour so the label never has to.
+        drawDot(color: codexBars.barColor, x: Self.sidePadding, visible: !codexCaption.isHidden)
+        drawDot(
+            color: claudeBars.barColor,
+            x: Self.sidePadding + Self.columnWidth + Self.columnGap,
+            visible: !claudeCaption.isHidden
+        )
+    }
+
+    private func drawDot(color: NSColor, x: CGFloat, visible: Bool) {
+        guard visible else { return }
+        let y = Self.contentTop + (Self.captionHeight - Self.dotDiameter) / 2
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(
+            x: x,
+            y: y,
+            width: Self.dotDiameter,
+            height: Self.dotDiameter
+        )).fill()
+    }
+
+    private static func makeCaption() -> NSTextField {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10, weight: .medium)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }
+
+    /// Returns false when neither side has anything to draw, so the caller can
+    /// hide the whole row instead of leaving an empty band in the menu.
+    @discardableResult
+    func apply(codex: UsageHistoryStrip?, claude: UsageHistoryStrip?) -> Bool {
+        codexBaseCaption = codex?.caption ?? ""
+        claudeBaseCaption = claude?.caption ?? ""
+        footerLabel.frame = NSRect(
+            x: Self.cardInset,
+            y: Self.footerTop,
+            width: bounds.width - Self.cardInset * 2,
+            height: Self.footerHeight
+        )
+        footerLabel.stringValue = "왼쪽이 최신 · 갱신 \(UsageConsumptionTracker.defaultCapacity)회"
+        let codexShown = configure(
+            codex,
+            caption: codexCaption,
+            bars: codexBars,
+            x: Self.sidePadding
+        )
+        let claudeShown = configure(
+            claude,
+            caption: claudeCaption,
+            bars: claudeBars,
+            x: Self.sidePadding + Self.columnWidth + Self.columnGap
+        )
+        footerLabel.isHidden = !(codexShown || claudeShown)
+        needsDisplay = true
+        return codexShown || claudeShown
+    }
+
+    private func configure(
+        _ strip: UsageHistoryStrip?,
+        caption: NSTextField,
+        bars: UsageHistoryBarView,
+        x: CGFloat
+    ) -> Bool {
+        guard let strip else {
+            caption.isHidden = true
+            bars.isHidden = true
+            return false
+        }
+        caption.isHidden = false
+        bars.isHidden = false
+        caption.stringValue = strip.caption
+        // Shifted right to clear the identity dot drawn at `x`.
+        caption.frame = NSRect(
+            x: x + Self.dotTextGap,
+            y: Self.contentTop,
+            width: max(0, Self.columnWidth - Self.dotTextGap),
+            height: Self.captionHeight
+        )
+        bars.samples = strip.samples
+        bars.slotCount = strip.slotCount
+        bars.unitSuffix = strip.unitSuffix
+        bars.barColor = strip.color
+        bars.frame = NSRect(
+            x: x,
+            y: Self.barsTop,
+            width: Self.columnWidth,
+            height: Self.barsHeight
+        )
+        bars.setAccessibilityElement(true)
+        bars.setAccessibilityRole(.image)
+        bars.setAccessibilityLabel(strip.caption)
+        bars.setAccessibilityValue(strip.accessibilityValue)
+        return true
     }
 }
 
