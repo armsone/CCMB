@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.3.29</title>
+            <pubDate>Wed, 19 Aug 2026 21:36:07 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.29</link>
+            <sparkle:version>46</sparkle:version>
+            <sparkle:shortVersionString>0.3.29</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.29
+
+- Codex와 Claude의 계정 정보와 최근 갱신 시각을 그래프 바로 위의 정렬된 하단 영역에 배치했습니다.
+- Codex와 Claude의 갱신 시각을 동일한 상대 시간 형식으로 통일했습니다.
+- 갱신별 사용량 그래프로 최근 Codex 크레딧·주간 사용량과 Claude 세션·주간 사용량 변화를 확인할 수 있습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.29/CCMB-0.3.29.dmg" length="2440328" type="application/octet-stream" sparkle:edSignature="jSTKQFWl/yVhTuybDTwTguErpXxodxyONogxf3vi2vIw65cVq1JO0BMQH3npdM62HrJ/sPe67LL9I99ihqzxBQ=="/>
+        </item>
+        <item>
             <title>0.3.28</title>
             <pubDate>Wed, 19 Aug 2026 00:27:41 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.3.28</link>
@@ -33,20 +48,6 @@
 - 손상된 공유 캐시가 있어도 `ccmb-usage`가 실시간 조회로 복구하도록 개선했습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.27/CCMB-0.3.27.dmg" length="2147001" type="application/octet-stream" sparkle:edSignature="dmBbOw10X7LObBJsGOsIKNlbRy/ldPfojqbDJgHlzvio0scRHkWuCTqYKBG9kecsCtpWyzEGFRQGSzkP40bwAg=="/>
-        </item>
-        <item>
-            <title>0.3.26</title>
-            <pubDate>Mon, 17 Aug 2026 22:36:56 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.26</link>
-            <sparkle:version>43</sparkle:version>
-            <sparkle:shortVersionString>0.3.26</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.26
-
-- 메뉴바에서 Claude Code 세션/주간 남은 사용량을 터미널을 열어두지 않아도 바로 확인할 수 있습니다.
-- 안정성 개선.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.26/CCMB-0.3.26.dmg" length="2139919" type="application/octet-stream" sparkle:edSignature="LLpTCtlkZaWwKBCJBgFUt2YUK5uImkULI+iI2x6NmRCPOHghYyjzW0NrUyHq2OxNawtnCpIS2umYMMRtpcrQBQ=="/>
         </item>
     </channel>
 </rss>
