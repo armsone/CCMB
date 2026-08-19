@@ -9,8 +9,14 @@ cd "$ROOT_DIR" || exit 1
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
 EXE="CodexCreditMenuBar"
+PACKAGE_SCRIPT="$ROOT_DIR/Scripts/package-macos.sh"
+APP_VERSION="$(sed -n 's/^APP_VERSION="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
+APP_BUILD="$(sed -n 's/^APP_BUILD="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
 step() { printf '\n==== %s ====\n' "$1"; }
 fail() { printf '\n실패: %s\nCCMB_RESULT=FAIL:%s\n' "$1" "$2"; exit 1; }
+
+[ -n "$APP_VERSION" ] && [ -n "$APP_BUILD" ] \
+  || fail "앱 버전 정보를 읽지 못했습니다." "version-missing"
 
 printf 'CCMB 빌드 시작: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 sw_vers 2>&1
@@ -68,6 +74,10 @@ fi
 DEST_BIN="$STAGE/Contents/MacOS/$EXE"
 cp "$BIN" "$DEST_BIN" || fail "실행 파일 교체 실패" "copy-bin"
 chmod 755 "$DEST_BIN"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$STAGE/Contents/Info.plist" \
+  || fail "앱 버전 갱신 실패" "version-write"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD" "$STAGE/Contents/Info.plist" \
+  || fail "앱 빌드 번호 갱신 실패" "build-write"
 
 # SwiftPM이 뱉는 실행 파일에는 번들 안 Frameworks를 찾는 경로가 없다.
 # package-macos.sh 와 똑같이 넣어주지 않으면 Sparkle을 못 찾고 즉시 죽는다.
@@ -156,11 +166,20 @@ step "메인 스레드 건강 검사"
 # 메뉴바 앱의 메인 스레드가 막히면 macOS 전체 키보드 입력이 멎는다.
 # 실행 직후 2초간 표본을 떠서 메인 스레드가 블로킹 대기 중이 아닌지 확인한다.
 SAMPLE="/tmp/ccmb-mainthread.txt"
+MAIN_SAMPLE="/tmp/ccmb-mainthread-only.txt"
 sample "$EXE" 2 -file "$SAMPLE" >/dev/null 2>&1
 if [ -f "$SAMPLE" ]; then
-  if grep -qE "semaphore_wait|dispatch_group_wait|_dispatch_sync|AndWait" "$SAMPLE"; then
+  # `sample` includes every queue. Gemini's worker queue legitimately waits on
+  # a semaphore while `agy` is running, so inspect only DispatchQueue_1 (the
+  # AppKit main thread) instead of mistaking a background wait for an app hang.
+  awk '
+    /DispatchQueue_1: com.apple.main-thread/ { in_main = 1 }
+    in_main && /^    [0-9]+ Thread_/ && $0 !~ /com.apple.main-thread/ { exit }
+    in_main { print }
+  ' "$SAMPLE" > "$MAIN_SAMPLE"
+  if grep -qE "semaphore_wait|dispatch_group_wait|_dispatch_sync|AndWait" "$MAIN_SAMPLE"; then
     echo "경고: 메인 스레드가 블로킹 대기 중일 수 있습니다."
-    grep -nE "semaphore_wait|dispatch_group_wait|_dispatch_sync|AndWait" "$SAMPLE" | head -5
+    grep -nE "semaphore_wait|dispatch_group_wait|_dispatch_sync|AndWait" "$MAIN_SAMPLE" | head -5
     pkill -9 -x "$EXE" 2>/dev/null
     fail "메인 스레드 블로킹이 감지되어 앱을 종료했습니다." "mainthread-block"
   fi

@@ -2,6 +2,10 @@ import Foundation
 
 struct RateLimitSnapshot {
     let accountID: String?
+    /// Stable app-server `PlanType` identifier (for example `plus` or
+    /// `business`). Kept as the protocol value so display wording can evolve
+    /// without changing cached usage semantics.
+    let planType: String?
     let usedPercent: Double?
     let windowDurationMinutes: Int?
     let resetsAt: Date?
@@ -9,6 +13,29 @@ struct RateLimitSnapshot {
     let creditBalance: Double?
     let detailedCreditsReturned: Bool
     let updatedAt: Date
+}
+
+enum CodexPlanCore {
+    /// User-facing titles for the official app-server `PlanType` enum. Unknown
+    /// future values remain hidden instead of being presented as a guessed
+    /// product name.
+    static func title(for planType: String?) -> String? {
+        guard let planType else { return nil }
+        switch planType.lowercased() {
+        case "free": return "ChatGPT Free"
+        case "go": return "ChatGPT Go"
+        case "plus": return "ChatGPT Plus"
+        case "pro": return "ChatGPT Pro"
+        case "prolite": return "ChatGPT Pro Lite"
+        case "team": return "ChatGPT Team"
+        case "self_serve_business_usage_based": return "ChatGPT Business · 사용량 기반"
+        case "business": return "ChatGPT Business"
+        case "ent26", "enterprise": return "ChatGPT Enterprise"
+        case "enterprise_cbp_usage_based": return "ChatGPT Enterprise · 사용량 기반"
+        case "edu": return "ChatGPT Edu"
+        default: return nil
+        }
+    }
 }
 
 /// One bar of a column's consumption strip: how much the tracked metric moved
@@ -49,8 +76,8 @@ enum UsageConsumptionCore {
     ///
     /// Slot 0 is the newest reading, so reading the strip left to right is
     /// reading backwards in time. The strip always draws a fixed number of
-    /// slots — it never grows over its first 24 refreshes — and slots past the
-    /// end of the history return `nil` so the view can draw a placeholder
+    /// slots — it never grows over its first 40 refreshes — and slots past the
+    /// end of the 40-reading history return `nil` so the view can draw a placeholder
     /// rather than invent a reading that never happened.
     static func sampleIndex(forSlot slot: Int, sampleCount: Int) -> Int? {
         guard slot >= 0 else { return nil }
@@ -70,6 +97,38 @@ enum UsageConsumptionCore {
     }
 }
 
+/// Rolling per-refresh consumption history for all three providers, persisted
+/// to UserDefaults as one JSON blob. A blob written before Gemini support
+/// existed (missing `gemini`) still decodes successfully, with `gemini`
+/// starting as an empty tracker instead of failing the whole decode and
+/// silently discarding the Codex/Claude history alongside it.
+struct UsageConsumptionHistoryStore: Codable, Equatable {
+    var codex: UsageConsumptionTracker
+    var claude: UsageConsumptionTracker
+    var gemini: UsageConsumptionTracker
+
+    enum CodingKeys: String, CodingKey {
+        case codex, claude, gemini
+    }
+
+    init(
+        codex: UsageConsumptionTracker = UsageConsumptionTracker(),
+        claude: UsageConsumptionTracker = UsageConsumptionTracker(),
+        gemini: UsageConsumptionTracker = UsageConsumptionTracker()
+    ) {
+        self.codex = codex
+        self.claude = claude
+        self.gemini = gemini
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        codex = try container.decode(UsageConsumptionTracker.self, forKey: .codex)
+        claude = try container.decode(UsageConsumptionTracker.self, forKey: .claude)
+        gemini = (try? container.decodeIfPresent(UsageConsumptionTracker.self, forKey: .gemini)) ?? UsageConsumptionTracker()
+    }
+}
+
 /// Rolling per-refresh consumption history for a single metric.
 ///
 /// Deliberately dumb about *what* it measures: it takes a raw reading plus that
@@ -78,7 +137,7 @@ enum UsageConsumptionCore {
 /// billing credits, the strip resets rather than drawing the first
 /// cross-metric difference as one enormous bar.
 struct UsageConsumptionTracker: Codable, Equatable {
-    static let defaultCapacity = 24
+    static let defaultCapacity = 40
 
     private(set) var samples: [UsageConsumptionSample] = []
     private var lastReading: Double?
@@ -197,15 +256,32 @@ enum UsageCore {
     /// the persistence normalizer, and the tests all read this one list so a
     /// new cadence cannot be added in one place and forgotten in another.
     static let refreshIntervalOptions: [Int] = [0, 30, 60, 180, 300, 600]
+    static let claudeRefreshIntervalOptions: [Int] = [0, 300, 600, 900, 1_800, 3_600]
+    static let geminiRefreshIntervalOptions: [Int] = [0, 120, 300, 600, 900, 1_800]
 
-    /// Three minutes: frequent enough to feel live, infrequent enough that an
-    /// always-on menu bar app is not a meaningful battery or rate-limit cost.
+    /// Provider-specific defaults balance freshness with each source's cost.
     /// Applies to a fresh install only; a stored valid choice always wins.
-    static let defaultRefreshIntervalSeconds = 180
+    static let defaultRefreshIntervalSeconds = 30
+    static let defaultClaudeRefreshIntervalSeconds = 600
+    static let defaultGeminiRefreshIntervalSeconds = 300
 
     static func normalizedRefreshInterval(_ seconds: Int?) -> TimeInterval {
         guard let seconds, refreshIntervalOptions.contains(seconds) else {
             return TimeInterval(defaultRefreshIntervalSeconds)
+        }
+        return TimeInterval(seconds)
+    }
+
+    static func normalizedClaudeRefreshInterval(_ seconds: Int?) -> TimeInterval {
+        guard let seconds, claudeRefreshIntervalOptions.contains(seconds) else {
+            return TimeInterval(defaultClaudeRefreshIntervalSeconds)
+        }
+        return TimeInterval(seconds)
+    }
+
+    static func normalizedGeminiRefreshInterval(_ seconds: Int?) -> TimeInterval {
+        guard let seconds, geminiRefreshIntervalOptions.contains(seconds) else {
+            return TimeInterval(defaultGeminiRefreshIntervalSeconds)
         }
         return TimeInterval(seconds)
     }
@@ -277,6 +353,340 @@ enum UsageCore {
     private static let sharedISO8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+}
+
+/// A single quota bucket reported by
+/// `agy -p '/usage' --mode plan --sandbox --output-format json` under the
+/// `command.data.groups[]` entry named `"Gemini Models"`.
+struct GeminiUsageBucket: Sendable, Equatable {
+    let id: String
+    let name: String?
+    let window: String
+    /// 0...1, already clamped.
+    let remainingFraction: Double
+    let resetsAt: Date?
+}
+
+/// Combines the `gemini-weekly`/`gemini-5h` buckets from `/usage` with the
+/// separate `/credits` balance into one snapshot, mirroring
+/// `ClaudeUsageSnapshot`'s shape closely enough that the shared-file and
+/// panel code can follow the same conventions for a third provider.
+struct GeminiUsageSnapshot: Sendable, Equatable {
+    let weeklyRemainingFraction: Double?
+    let weeklyResetsAt: Date?
+    let fiveHourRemainingFraction: Double?
+    let fiveHourResetsAt: Date?
+    let creditBalance: Int?
+    let publishedAt: Date?
+    /// Active Google account recorded by the local Gemini/Antigravity CLI.
+    /// This is display-only and is deliberately excluded from the shared
+    /// usage JSON so enabling CCMB sharing never broadens its account data.
+    let accountEmail: String?
+    /// Plan inferred only from entitlements present in Antigravity's own
+    /// structured `/usage` response; never scraped from a signed-in browser.
+    let planTitle: String?
+
+    init(
+        weeklyRemainingFraction: Double? = nil,
+        weeklyResetsAt: Date? = nil,
+        fiveHourRemainingFraction: Double? = nil,
+        fiveHourResetsAt: Date? = nil,
+        creditBalance: Int? = nil,
+        publishedAt: Date? = nil,
+        accountEmail: String? = nil,
+        planTitle: String? = nil
+    ) {
+        self.weeklyRemainingFraction = weeklyRemainingFraction
+        self.weeklyResetsAt = weeklyResetsAt
+        self.fiveHourRemainingFraction = fiveHourRemainingFraction
+        self.fiveHourResetsAt = fiveHourResetsAt
+        self.creditBalance = creditBalance
+        self.publishedAt = publishedAt
+        self.accountEmail = accountEmail
+        self.planTitle = planTitle
+    }
+}
+
+/// Pure decoder for Gemini CLI's local account selector. The file contains no
+/// OAuth token — only the active email and a list of old accounts — and CCMB
+/// accepts only a plausible email-shaped active value.
+enum GeminiAccountCore {
+    private struct AccountsFile: Decodable {
+        let active: String?
+    }
+
+    static func activeEmail(from data: Data) -> String? {
+        guard let decoded = try? JSONDecoder().decode(AccountsFile.self, from: data),
+              let active = decoded.active?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !active.isEmpty,
+              active.contains("@")
+        else { return nil }
+        return active
+    }
+}
+
+enum ClaudePlanCore {
+    /// Reads only non-secret account metadata cached by Claude Code. OAuth
+    /// credentials live elsewhere and are never opened by this parser.
+    static func title(fromAccountMetadata data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = root["oauthAccount"] as? [String: Any]
+        else { return nil }
+
+        let rateLimitTier = account["organizationRateLimitTier"] as? String
+        if rateLimitTier?.contains("max_20x") == true { return "Claude Max 20×" }
+        if rateLimitTier?.contains("max_5x") == true { return "Claude Max 5×" }
+
+        switch account["organizationType"] as? String {
+        case "claude_max": return "Claude Max"
+        case "claude_pro": return "Claude Pro"
+        case "claude_team": return "Claude Team"
+        case "claude_enterprise": return "Claude Enterprise"
+        default: return nil
+        }
+    }
+}
+
+/// Pure parsing and shared-payload logic for the Gemini/Antigravity `agy`
+/// CLI. Deliberately has no knowledge of how `agy` gets launched, so it is
+/// fully testable without spawning a process.
+enum GeminiUsageCore {
+    static let sharedFreshForSeconds: TimeInterval = 300
+    /// Each fetch launches the `agy` CLI twice (`/usage` and `/credits`),
+    /// each its own subprocess, so this floor sits above Claude's
+    /// unofficial-HTTP-endpoint floor.
+    static let minimumRequestIntervalSeconds: TimeInterval = 120
+    static let weeklyBucketID = "gemini-weekly"
+    static let fiveHourBucketID = "gemini-5h"
+    static let geminiModelsGroupName = "Gemini Models"
+
+    static func remainingPercent(from fraction: Double?) -> Double? {
+        guard let fraction else { return nil }
+        return min(max(fraction, 0), 1) * 100
+    }
+
+    static func isFresh(publishedAt: Date?, now: Date, freshForSeconds: TimeInterval) -> Bool {
+        guard let publishedAt else { return false }
+        return now.timeIntervalSince(publishedAt) <= freshForSeconds
+    }
+
+    /// Same scheduling rule as `ClaudeUsageCore.shouldThrottleFetch`: a timer
+    /// tick that arrives within scheduling tolerance is never deferred to the
+    /// next cycle.
+    static func shouldThrottleFetch(minimumInterval: TimeInterval, lastFetchDate: Date?, now: Date) -> Bool {
+        guard minimumInterval > 0, let lastFetchDate else { return false }
+        let timerTolerance = min(1, minimumInterval * 0.05)
+        return now.timeIntervalSince(lastFetchDate) < minimumInterval - timerTolerance
+    }
+
+    /// Envelope shared by every `agy ... --output-format json` command:
+    /// `{"command": {"name": "...", "data": {...}}}`.
+    private struct CommandEnvelope<CommandData: Decodable>: Decodable {
+        struct Command: Decodable {
+            let name: String?
+            let data: CommandData?
+        }
+        let command: Command?
+    }
+
+    private struct UsageData: Decodable {
+        struct Group: Decodable {
+            let name: String?
+            let buckets: [Bucket]?
+        }
+        struct Bucket: Decodable {
+            let id: String?
+            let name: String?
+            let window: String?
+            let remainingFraction: Double?
+            let resetTime: String?
+            enum CodingKeys: String, CodingKey {
+                case id, name, window
+                case remainingFraction = "remaining_fraction"
+                case resetTime = "reset_time"
+            }
+        }
+        let groups: [Group]?
+    }
+
+    private struct CreditsData: Decodable {
+        let remainingCredits: Int?
+        enum CodingKeys: String, CodingKey {
+            case remainingCredits = "remaining_credits"
+        }
+    }
+
+    /// Parses `agy -p '/usage' ... --output-format json` stdout into the
+    /// `"Gemini Models"` group's buckets. Returns `nil` for any shape the CLI
+    /// contract does not guarantee — wrong `command.name`, an absent group,
+    /// or malformed JSON — never throws, so a CLI update never crashes CCMB.
+    static func parseUsage(_ data: Data) -> [GeminiUsageBucket]? {
+        guard let envelope = try? JSONDecoder().decode(CommandEnvelope<UsageData>.self, from: data),
+              envelope.command?.name == "usage",
+              let groups = envelope.command?.data?.groups,
+              let geminiGroup = groups.first(where: { $0.name == geminiModelsGroupName }),
+              let rawBuckets = geminiGroup.buckets
+        else { return nil }
+
+        let buckets = rawBuckets.compactMap { bucket -> GeminiUsageBucket? in
+            guard let id = bucket.id, !id.isEmpty, let fraction = bucket.remainingFraction else { return nil }
+            return GeminiUsageBucket(
+                id: id,
+                name: bucket.name,
+                window: bucket.window ?? "",
+                remainingFraction: min(max(fraction, 0), 1),
+                resetsAt: parseDate(bucket.resetTime)
+            )
+        }
+        return buckets.isEmpty ? nil : buckets
+    }
+
+    /// `/usage` exposes quota groups, not the billing product name. In
+    /// particular, the Claude/GPT group is not reliable proof of Ultra, so do
+    /// not promote an account from that group alone. A session bucket is the
+    /// stable paid-entitlement signal currently available to the CLI.
+    static func parsePlanTitle(_ data: Data) -> String? {
+        guard let envelope = try? JSONDecoder().decode(CommandEnvelope<UsageData>.self, from: data),
+              envelope.command?.name == "usage",
+              let groups = envelope.command?.data?.groups
+        else { return nil }
+
+        let geminiBuckets = groups.first(where: { $0.name == geminiModelsGroupName })?.buckets ?? []
+        if geminiBuckets.contains(where: { $0.id == fiveHourBucketID }) {
+            return "Google AI Pro"
+        }
+        return geminiBuckets.isEmpty ? nil : "Google AI 기본"
+    }
+
+    /// Parses `agy -p '/credits' ... --output-format json` stdout into the
+    /// remaining AI credit balance. `upgrade_uri` is intentionally never
+    /// read here: it is account-specific and must not be persisted or
+    /// exposed outside the running process.
+    static func parseCredits(_ data: Data) -> Int? {
+        guard let envelope = try? JSONDecoder().decode(CommandEnvelope<CreditsData>.self, from: data),
+              envelope.command?.name == "credits"
+        else { return nil }
+        return envelope.command?.data?.remainingCredits
+    }
+
+    static func snapshot(
+        buckets: [GeminiUsageBucket],
+        creditBalance: Int?,
+        publishedAt: Date,
+        accountEmail: String? = nil,
+        planTitle: String? = nil
+    ) -> GeminiUsageSnapshot {
+        let weekly = buckets.first { $0.id == weeklyBucketID }
+        let fiveHour = buckets.first { $0.id == fiveHourBucketID }
+        return GeminiUsageSnapshot(
+            weeklyRemainingFraction: weekly?.remainingFraction,
+            weeklyResetsAt: weekly?.resetsAt,
+            fiveHourRemainingFraction: fiveHour?.remainingFraction,
+            fiveHourResetsAt: fiveHour?.resetsAt,
+            creditBalance: creditBalance,
+            publishedAt: publishedAt,
+            accountEmail: accountEmail,
+            planTitle: planTitle
+        )
+    }
+
+    /// Nested `gemini` object mirroring `codex`/`claude`'s shape in the
+    /// shared `usage-v1.json` file: status/weekly/5-hour/reset/freshness.
+    static func sharedPayload(from snapshot: GeminiUsageSnapshot?, now: Date = Date()) -> [String: Any] {
+        guard let snapshot else {
+            return [
+                "status": "unavailable",
+                "weeklyRemainingPercent": NSNull(),
+                "weeklyResetsAt": NSNull(),
+                "fiveHourRemainingPercent": NSNull(),
+                "fiveHourResetsAt": NSNull(),
+                "creditBalance": NSNull(),
+                "planTitle": NSNull(),
+                "fetchedAt": NSNull(),
+                "ageSeconds": NSNull(),
+                "freshForSeconds": Int(sharedFreshForSeconds),
+                "fresh": false
+            ]
+        }
+
+        let ageSeconds = snapshot.publishedAt.map { max(0, Int(now.timeIntervalSince($0))) }
+        return [
+            "status": (snapshot.weeklyRemainingFraction == nil && snapshot.fiveHourRemainingFraction == nil) ? "partial" : "ok",
+            "weeklyRemainingPercent": remainingPercent(from: snapshot.weeklyRemainingFraction) ?? NSNull(),
+            "weeklyResetsAt": snapshot.weeklyResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "fiveHourRemainingPercent": remainingPercent(from: snapshot.fiveHourRemainingFraction) ?? NSNull(),
+            "fiveHourResetsAt": snapshot.fiveHourResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "creditBalance": snapshot.creditBalance ?? NSNull(),
+            "planTitle": snapshot.planTitle ?? NSNull(),
+            "fetchedAt": snapshot.publishedAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "ageSeconds": ageSeconds ?? NSNull(),
+            "freshForSeconds": Int(sharedFreshForSeconds),
+            "fresh": isFresh(publishedAt: snapshot.publishedAt, now: now, freshForSeconds: sharedFreshForSeconds)
+        ]
+    }
+
+    /// Recomputes a stored `gemini` payload's `ageSeconds`/`fresh` from its
+    /// own `fetchedAt`, the same role `refreshedSharedPayload` plays for
+    /// Claude on a cache read.
+    static func refreshedSharedPayload(_ payload: [String: Any], now: Date = Date()) -> [String: Any] {
+        var output = payload
+        let fetchedAt = (payload["fetchedAt"] as? String).flatMap(sharedISO8601Formatter.date(from:))
+        let freshForSeconds = (payload["freshForSeconds"] as? NSNumber)?.doubleValue ?? sharedFreshForSeconds
+        output["ageSeconds"] = fetchedAt.map { max(0, Int(now.timeIntervalSince($0))) } ?? NSNull()
+        output["fresh"] = isFresh(publishedAt: fetchedAt, now: now, freshForSeconds: freshForSeconds)
+        return output
+    }
+
+    /// Restores the last successful Gemini snapshot from CCMB's own shared
+    /// JSON, the same role `ClaudeUsageCore.snapshot(fromSharedPayload:)`
+    /// plays for Claude so an app restart does not momentarily show "정보
+    /// 없음" for data that was fetched minutes ago.
+    static func snapshot(fromSharedPayload payload: [String: Any]) -> GeminiUsageSnapshot? {
+        func fraction(_ key: String) -> Double? {
+            guard let percent = (payload[key] as? NSNumber)?.doubleValue else { return nil }
+            return min(max(percent / 100, 0), 1)
+        }
+        func date(_ key: String) -> Date? {
+            (payload[key] as? String).flatMap(sharedISO8601Formatter.date(from:))
+        }
+
+        let snapshot = GeminiUsageSnapshot(
+            weeklyRemainingFraction: fraction("weeklyRemainingPercent"),
+            weeklyResetsAt: date("weeklyResetsAt"),
+            fiveHourRemainingFraction: fraction("fiveHourRemainingPercent"),
+            fiveHourResetsAt: date("fiveHourResetsAt"),
+            creditBalance: (payload["creditBalance"] as? NSNumber)?.intValue,
+            publishedAt: date("fetchedAt"),
+            planTitle: payload["planTitle"] as? String
+        )
+
+        guard snapshot.publishedAt != nil
+            || snapshot.weeklyRemainingFraction != nil
+            || snapshot.fiveHourRemainingFraction != nil
+            || snapshot.creditBalance != nil
+            || snapshot.planTitle != nil
+        else { return nil }
+        return snapshot
+    }
+
+    /// `agy`'s `reset_time` is not guaranteed to carry fractional seconds the
+    /// way CCMB's own written timestamps do, so both forms are tried.
+    private static func parseDate(_ string: String?) -> Date? {
+        guard let string else { return nil }
+        return sharedISO8601Formatter.date(from: string) ?? sharedISO8601FormatterWholeSeconds.date(from: string)
+    }
+
+    private static let sharedISO8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let sharedISO8601FormatterWholeSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
         return formatter
     }()
 }
@@ -385,6 +795,12 @@ enum ClaudeUsageCore {
         return min(max(100 - usedPercent, 0), 100)
     }
 
+    /// The Fable-specific weekly limit, matched case-insensitively, so it can
+    /// be promoted to its own quota ring instead of a lower metric row.
+    static func fableWeeklyLimit(in limits: [ClaudeModelWeeklyLimit]) -> ClaudeModelWeeklyLimit? {
+        limits.first { $0.modelName.caseInsensitiveCompare("Fable") == .orderedSame }
+    }
+
     static func costTitle(from cost: Double?) -> String? {
         guard let cost, cost > 0 else { return nil }
         if cost < 0.01 {
@@ -459,12 +875,24 @@ enum ClaudeUsageCore {
         return now < retryAt
     }
 
-    /// Concise Korean label for a 429 backoff, e.g. `요청 제한(429) · 42초 후 재시도`.
+    /// Concise Korean label for a 429 backoff, e.g.
+    /// `429 · 59분 후 재시도`.
     /// Recomputed from `now` on every call so the same stored `retryAt` keeps
     /// counting down correctly across repeated UI refreshes without a new fetch.
     static func rateLimitRetryLabel(retryAt: Date, now: Date) -> String {
         let remainingSeconds = max(0, Int(ceil(retryAt.timeIntervalSince(now))))
-        return "요청 제한(429) · \(remainingSeconds)초 후 재시도"
+        let duration: String
+        if remainingSeconds >= 3_600 {
+            let totalMinutes = Int(ceil(Double(remainingSeconds) / 60))
+            let hours = totalMinutes / 60
+            let minutes = totalMinutes % 60
+            duration = minutes == 0 ? "\(hours)시간" : "\(hours)시간 \(minutes)분"
+        } else if remainingSeconds >= 60 {
+            duration = "\(Int(ceil(Double(remainingSeconds) / 60)))분"
+        } else {
+            duration = "\(remainingSeconds)초"
+        }
+        return "429 · \(duration) 후 재시도"
     }
 
     static func sharedPayload(from snapshot: ClaudeUsageSnapshot?, now: Date = Date()) -> [String: Any] {

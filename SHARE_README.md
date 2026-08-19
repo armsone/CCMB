@@ -1,6 +1,6 @@
 # CCMB — Codex & Claude Meter Bar 설치 및 사용 안내
 
-CCMB는 macOS 메뉴바에서 Codex와 Claude 사용량, 초기화 시간, 계정 정보와 Codex 크레딧을 함께 확인하는 앱입니다.
+CCMB는 macOS 메뉴바에서 Codex, Claude, Gemini(Antigravity) 사용량, 초기화 시간, 계정 정보와 Codex·Gemini 크레딧을 함께 확인하는 앱입니다.
 
 ## 친구가 사용하기 전에 필요한 것
 
@@ -8,13 +8,14 @@ CCMB는 macOS 메뉴바에서 Codex와 Claude 사용량, 초기화 시간, 계�
 - Codex CLI 설치(설치 방식에 따라 Node.js 필요)
 - 친구 본인의 OpenAI/Codex 계정 로그인
 - Claude 사용량도 확인하려면 Claude Code 설치 및 로그인
+- Gemini 사용량도 확인하려면 Antigravity `agy` CLI 설치 및 로그인
 
 ## 설치
 
 1. `CCMB.dmg`를 엽니다.
 2. `CCMB.app`을 `Applications` 폴더로 드래그합니다.
 3. `Applications` 폴더에서 `CCMB.app`을 실행합니다.
-4. 메뉴바 오른쪽에 Codex와 Claude 사용량이 나타납니다. Codex 주간 사용량이 0%가 되면 퍼센트 대신 남은 크레딧 숫자가 표시됩니다.
+4. 메뉴바 오른쪽에 Codex, Claude, Gemini 사용량이 나타납니다. Codex 주간 사용량이 0%가 되면 퍼센트 대신 남은 크레딧 숫자가 표시됩니다.
 
 ## 업데이트
 
@@ -41,10 +42,11 @@ codex app-server --help
 
 ## 앱에서 보는 정보
 
-- 메뉴바의 Codex 주간 잔량과 Claude 5시간 세션 잔량
+- 메뉴바의 Codex 주간 잔량, Claude 5시간 세션 잔량, Gemini 5시간 잔량
 - Codex 주간 잔량이 0%일 때 `%` 없는 크레딧 숫자로 자동 전환
 - Codex 주간 사용량과 크레딧 상세값
 - Claude 5시간 세션·주간 사용량과 모델 정보
+- Gemini 5시간·주간 사용량과 AI 크레딧 잔액
 - 리셋 크레딧
 - 초기화 시간
 - 가져온 시간
@@ -65,7 +67,7 @@ CCMB는 정상적으로 가져온 최신 값을 다음 파일에 저장합니다
 직접 요청하려면 다른 채팅에 아래처럼 입력합니다.
 
 ```text
-~/.codex/bin/ccmb-usage를 실행해서 Codex와 Claude의 남은 주간 사용량, Codex 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.
+~/.codex/bin/ccmb-usage를 실행해서 Codex, Claude, Gemini의 남은 주간 사용량과 Codex·Gemini 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.
 ```
 
 터미널에서 직접 확인할 수도 있습니다.
@@ -80,7 +82,7 @@ CCMB는 정상적으로 가져온 최신 값을 다음 파일에 저장합니다
 ~/.codex/bin/ccmb-usage --verify-live
 ```
 
-최상위 필드는 기존 호환성을 위한 Codex 정보이고, `codex`와 `claude` 중첩 객체는 각각 같은 형태(상태·주간 잔여/사용량·초기화·계정·최신성)로 정보를 담습니다. `codex`에는 크레딧·사용량 창 정보가, `claude`에는 세션·모델·추가 사용량·계정(이메일·조직) 정보가 추가로 들어갑니다. 각 결과의 `fresh`, `fetchedAt`, `ageSeconds`가 최신성을 설명하며 로그인 토큰과 인증정보는 공유 파일에 저장하지 않습니다.
+최상위 필드는 기존 호환성을 위한 Codex 정보이고, `codex`·`claude`·`gemini` 중첩 객체는 각각 같은 형태(상태·주간 잔여·초기화·최신성)로 정보를 담습니다. `codex`에는 크레딧·사용량 창 정보가, `claude`에는 세션·모델·추가 사용량·계정(이메일·조직) 정보가, `gemini`에는 5시간 창과 AI 크레딧 잔액이 추가로 들어갑니다. 각 결과의 `fresh`, `fetchedAt`, `ageSeconds`가 최신성을 설명하며 로그인 토큰, 인증정보, Gemini의 계정별 업그레이드 링크는 공유 파일에 저장하지 않습니다.
 
 ## 자동 시작과 재실행
 

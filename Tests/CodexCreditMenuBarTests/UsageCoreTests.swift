@@ -2,6 +2,12 @@ import XCTest
 @testable import CodexCreditMenuBar
 
 final class UsageCoreTests: XCTestCase {
+    func testClaudePlanReadsOnlyAccountMetadataAndUsesRateLimitTier() {
+        let data = Data(#"{"oauthAccount":{"organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_5x"}}"#.utf8)
+        XCTAssertEqual(ClaudePlanCore.title(fromAccountMetadata: data), "Claude Max 5×")
+        XCTAssertNil(ClaudePlanCore.title(fromAccountMetadata: Data(#"{"other":true}"#.utf8)))
+    }
+
     func testRemainingPercentIsClamped() {
         XCTAssertEqual(UsageCore.remainingPercent(from: -5), 100)
         XCTAssertEqual(UsageCore.remainingPercent(from: 25), 75)
@@ -50,20 +56,34 @@ final class UsageCoreTests: XCTestCase {
     }
 
     func testRefreshIntervalOnlyAcceptsSupportedValues() {
-        XCTAssertEqual(UsageCore.normalizedRefreshInterval(nil), 180)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(nil), 30)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(0), 0)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(60), 60)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(180), 180)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(600), 600)
         // An unknown stored value falls back to the default, not to whatever
         // the first option happens to be.
-        XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), 180)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), 30)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(30), 30)
+
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(nil), 600)
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(0), 0)
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(600), 600)
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(42), 600)
+
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(nil), 300)
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(0), 0)
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(120), 120)
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(42), 300)
     }
 
     func testRefreshIntervalOptionsCoverTheAdvertisedCadences() {
         XCTAssertEqual(UsageCore.refreshIntervalOptions, [0, 30, 60, 180, 300, 600])
+        XCTAssertEqual(UsageCore.claudeRefreshIntervalOptions, [0, 300, 600, 900, 1_800, 3_600])
+        XCTAssertEqual(UsageCore.geminiRefreshIntervalOptions, [0, 120, 300, 600, 900, 1_800])
         XCTAssertTrue(UsageCore.refreshIntervalOptions.contains(UsageCore.defaultRefreshIntervalSeconds))
+        XCTAssertTrue(UsageCore.claudeRefreshIntervalOptions.contains(UsageCore.defaultClaudeRefreshIntervalSeconds))
+        XCTAssertTrue(UsageCore.geminiRefreshIntervalOptions.contains(UsageCore.defaultGeminiRefreshIntervalSeconds))
     }
 
     func testCacheFallbackReasonTreatsCorruptCacheLikeMissing() {
@@ -80,6 +100,7 @@ final class UsageCoreTests: XCTestCase {
 
     private func makeRateLimitSnapshot(
         accountID: String? = nil,
+        planType: String? = nil,
         usedPercent: Double? = nil,
         windowDurationMinutes: Int? = nil,
         resetsAt: Date? = nil,
@@ -90,6 +111,7 @@ final class UsageCoreTests: XCTestCase {
     ) -> RateLimitSnapshot {
         RateLimitSnapshot(
             accountID: accountID,
+            planType: planType,
             usedPercent: usedPercent,
             windowDurationMinutes: windowDurationMinutes,
             resetsAt: resetsAt,
@@ -98,6 +120,15 @@ final class UsageCoreTests: XCTestCase {
             detailedCreditsReturned: detailedCreditsReturned,
             updatedAt: updatedAt
         )
+    }
+
+    func testCodexPlanTitlesUseOfficialProtocolValues() {
+        XCTAssertEqual(CodexPlanCore.title(for: "plus"), "ChatGPT Plus")
+        XCTAssertEqual(CodexPlanCore.title(for: "pro"), "ChatGPT Pro")
+        XCTAssertEqual(CodexPlanCore.title(for: "business"), "ChatGPT Business")
+        XCTAssertEqual(CodexPlanCore.title(for: "enterprise_cbp_usage_based"), "ChatGPT Enterprise · 사용량 기반")
+        XCTAssertNil(CodexPlanCore.title(for: "unknown"))
+        XCTAssertNil(CodexPlanCore.title(for: "future-plan"))
     }
 
     func testCodexPayloadForMissingSnapshotIsExplicitlyUnavailable() {
@@ -156,12 +187,269 @@ final class UsageCoreTests: XCTestCase {
     }
 }
 
+final class UsageConsumptionHistoryStoreTests: XCTestCase {
+    func testDecodingPreGeminiBlobPreservesCodexAndClaudeAndDefaultsGeminiEmpty() throws {
+        var codex = UsageConsumptionTracker()
+        codex.record(reading: 100, at: Date(timeIntervalSince1970: 0), isDecreasing: true, metricKey: "codex.credit")
+        codex.record(reading: 90, at: Date(timeIntervalSince1970: 60), isDecreasing: true, metricKey: "codex.credit")
+        var claude = UsageConsumptionTracker()
+        claude.record(reading: 10, at: Date(timeIntervalSince1970: 0), isDecreasing: false, metricKey: "claude.session")
+        claude.record(reading: 15, at: Date(timeIntervalSince1970: 60), isDecreasing: false, metricKey: "claude.session")
+
+        struct LegacyStore: Codable {
+            let codex: UsageConsumptionTracker
+            let claude: UsageConsumptionTracker
+        }
+        let legacyData = try JSONEncoder().encode(LegacyStore(codex: codex, claude: claude))
+
+        let restored = try JSONDecoder().decode(UsageConsumptionHistoryStore.self, from: legacyData)
+
+        XCTAssertEqual(restored.codex, codex)
+        XCTAssertEqual(restored.claude, claude)
+        XCTAssertTrue(restored.gemini.amounts.isEmpty)
+    }
+
+    func testRoundTripsWithGeminiHistoryIncluded() throws {
+        var gemini = UsageConsumptionTracker()
+        gemini.record(reading: 99, at: Date(timeIntervalSince1970: 0), isDecreasing: true, metricKey: "gemini.5h")
+        gemini.record(reading: 95, at: Date(timeIntervalSince1970: 60), isDecreasing: true, metricKey: "gemini.5h")
+        let store = UsageConsumptionHistoryStore(gemini: gemini)
+
+        let data = try JSONEncoder().encode(store)
+        let restored = try JSONDecoder().decode(UsageConsumptionHistoryStore.self, from: data)
+
+        XCTAssertEqual(restored, store)
+        XCTAssertEqual(restored.gemini.amounts, [4])
+    }
+}
+
+final class GeminiUsageCoreTests: XCTestCase {
+    private func data(_ json: String) -> Data {
+        Data(json.utf8)
+    }
+
+    func testActiveGeminiAccountReadsOnlyAValidEmail() {
+        XCTAssertEqual(
+            GeminiAccountCore.activeEmail(from: data(#"{"active":"person@example.com","old":[]}"#)),
+            "person@example.com"
+        )
+        XCTAssertNil(GeminiAccountCore.activeEmail(from: data(#"{"active":"","old":[]}"#)))
+        XCTAssertNil(GeminiAccountCore.activeEmail(from: data(#"{"active":"not-an-email","old":[]}"#)))
+        XCTAssertNil(GeminiAccountCore.activeEmail(from: data("not-json")))
+    }
+
+    func testParseUsageReadsWeeklyAndFiveHourBucketsFromGeminiGroup() throws {
+        let json = """
+        {
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {"id": "gemini-weekly", "name": "Weekly", "window": "weekly", "remaining_fraction": 0.9996002912521362, "reset_time": "2026-08-24T00:00:00.000000+00:00"},
+                                {"id": "gemini-5h", "name": "5 hour", "window": "5h", "remaining_fraction": 0.9976015090942383, "reset_time": "2026-08-19T05:00:00.000000+00:00"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        """
+        let buckets = try XCTUnwrap(GeminiUsageCore.parseUsage(data(json)))
+        XCTAssertEqual(buckets.count, 2)
+
+        let snapshot = GeminiUsageCore.snapshot(buckets: buckets, creditBalance: nil, publishedAt: Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(snapshot.weeklyRemainingFraction, 0.9996002912521362)
+        XCTAssertEqual(snapshot.fiveHourRemainingFraction, 0.9976015090942383)
+        XCTAssertNotNil(snapshot.weeklyResetsAt)
+        XCTAssertNotNil(snapshot.fiveHourResetsAt)
+    }
+
+    func testPlanInferenceUsesStructuredAntigravityEntitlements() {
+        let ultra = """
+        {"command":{"name":"usage","data":{"groups":[
+          {"name":"Gemini Models","buckets":[{"id":"gemini-5h","remaining_fraction":1}]},
+          {"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","remaining_fraction":1}]}
+        ]}}}
+        """
+        XCTAssertEqual(GeminiUsageCore.parsePlanTitle(data(ultra)), "Google AI Pro")
+
+        let paid = """
+        {"command":{"name":"usage","data":{"groups":[
+          {"name":"Gemini Models","buckets":[{"id":"gemini-5h","remaining_fraction":1}]}
+        ]}}}
+        """
+        XCTAssertEqual(GeminiUsageCore.parsePlanTitle(data(paid)), "Google AI Pro")
+    }
+
+    func testParseUsageRejectsWrongCommandName() {
+        let json = """
+        {"command": {"name": "credits", "data": {"groups": []}}}
+        """
+        XCTAssertNil(GeminiUsageCore.parseUsage(data(json)))
+    }
+
+    func testParseUsageReturnsNilWhenGeminiGroupMissing() {
+        let json = """
+        {"command": {"name": "usage", "data": {"groups": [{"name": "Other Models", "buckets": []}]}}}
+        """
+        XCTAssertNil(GeminiUsageCore.parseUsage(data(json)))
+    }
+
+    func testParseUsageReturnsNilForMalformedJSON() {
+        XCTAssertNil(GeminiUsageCore.parseUsage(data("not-json")))
+    }
+
+    func testParseUsageAcceptsResetTimeWithoutFractionalSeconds() throws {
+        let json = """
+        {
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {"id": "gemini-5h", "window": "5h", "remaining_fraction": 0.5, "reset_time": "2026-08-19T05:00:00Z"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        """
+        let buckets = try XCTUnwrap(GeminiUsageCore.parseUsage(data(json)))
+        XCTAssertNotNil(buckets.first?.resetsAt)
+    }
+
+    func testParseCreditsReadsRemainingCreditsAndIgnoresUpgradeURI() throws {
+        let json = """
+        {"command": {"name": "credits", "data": {"remaining_credits": 42, "upgrade_uri": "https://example.com/account/secret"}}}
+        """
+        XCTAssertEqual(GeminiUsageCore.parseCredits(data(json)), 42)
+    }
+
+    func testParseCreditsRejectsWrongCommandName() {
+        let json = """
+        {"command": {"name": "usage", "data": {"remaining_credits": 42}}}
+        """
+        XCTAssertNil(GeminiUsageCore.parseCredits(data(json)))
+    }
+
+    func testSharedPayloadIncludesWeeklyAndFiveHourRemainingPercentAndCredits() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let snapshot = GeminiUsageSnapshot(
+            weeklyRemainingFraction: 0.9996002912521362,
+            weeklyResetsAt: Date(timeIntervalSince1970: 2_000),
+            fiveHourRemainingFraction: 0.9976015090942383,
+            fiveHourResetsAt: Date(timeIntervalSince1970: 1_500),
+            creditBalance: 42,
+            publishedAt: Date(timeIntervalSince1970: 900)
+        )
+
+        let payload = GeminiUsageCore.sharedPayload(from: snapshot, now: now)
+
+        XCTAssertEqual(payload["status"] as? String, "ok")
+        XCTAssertEqual((payload["weeklyRemainingPercent"] as? Double).map { round($0 * 100) / 100 }, 99.96)
+        XCTAssertEqual((payload["fiveHourRemainingPercent"] as? Double).map { round($0 * 100) / 100 }, 99.76)
+        XCTAssertEqual(payload["creditBalance"] as? Int, 42)
+        XCTAssertEqual(payload["ageSeconds"] as? Int, 100)
+        XCTAssertEqual(payload["fresh"] as? Bool, true)
+        // The account-specific upgrade URI must never be persisted.
+        XCTAssertNil(payload["upgradeURI"])
+        XCTAssertNil(payload["upgrade_uri"])
+    }
+
+    func testSharedPayloadForMissingSnapshotIsExplicitlyUnavailable() {
+        let payload = GeminiUsageCore.sharedPayload(from: nil)
+
+        XCTAssertEqual(payload["status"] as? String, "unavailable")
+        XCTAssertTrue(payload["weeklyRemainingPercent"] is NSNull)
+        XCTAssertEqual(payload["fresh"] as? Bool, false)
+    }
+
+    func testSharedPayloadRoundTripsIntoRestartSnapshot() throws {
+        let original = GeminiUsageSnapshot(
+            weeklyRemainingFraction: 0.9,
+            weeklyResetsAt: Date(timeIntervalSince1970: 2_000),
+            fiveHourRemainingFraction: 0.5,
+            fiveHourResetsAt: Date(timeIntervalSince1970: 1_500),
+            creditBalance: 7,
+            publishedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let payload = GeminiUsageCore.sharedPayload(from: original, now: Date(timeIntervalSince1970: 1_010))
+
+        let restored = try XCTUnwrap(GeminiUsageCore.snapshot(fromSharedPayload: payload))
+
+        XCTAssertEqual(restored.weeklyRemainingFraction ?? 0, original.weeklyRemainingFraction ?? 0, accuracy: 0.0001)
+        XCTAssertEqual(restored.fiveHourRemainingFraction ?? 0, original.fiveHourRemainingFraction ?? 0, accuracy: 0.0001)
+        XCTAssertEqual(restored.creditBalance, original.creditBalance)
+        XCTAssertEqual(restored.publishedAt, original.publishedAt)
+    }
+
+    func testRestartSnapshotRejectsEmptySharedPayload() {
+        XCTAssertNil(GeminiUsageCore.snapshot(fromSharedPayload: [:]))
+    }
+
+    func testRefreshedSharedPayloadRecalculatesFreshness() {
+        let snapshot = GeminiUsageSnapshot(fiveHourRemainingFraction: 0.8, publishedAt: Date(timeIntervalSince1970: 1_000))
+        let stored = GeminiUsageCore.sharedPayload(from: snapshot, now: Date(timeIntervalSince1970: 1_100))
+
+        let refreshed = GeminiUsageCore.refreshedSharedPayload(stored, now: Date(timeIntervalSince1970: 1_500))
+
+        XCTAssertEqual(refreshed["ageSeconds"] as? Int, 500)
+        XCTAssertEqual(refreshed["fresh"] as? Bool, false)
+    }
+
+    func testShouldThrottleFetchRequiresTheHigherGeminiFloor() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertTrue(GeminiUsageCore.shouldThrottleFetch(
+            minimumInterval: GeminiUsageCore.minimumRequestIntervalSeconds,
+            lastFetchDate: Date(timeIntervalSince1970: 950),
+            now: now
+        ))
+        XCTAssertFalse(GeminiUsageCore.shouldThrottleFetch(
+            minimumInterval: GeminiUsageCore.minimumRequestIntervalSeconds,
+            lastFetchDate: Date(timeIntervalSince1970: 850),
+            now: now
+        ))
+        XCTAssertFalse(GeminiUsageCore.shouldThrottleFetch(minimumInterval: 120, lastFetchDate: nil, now: now))
+    }
+}
+
+final class GeminiUsageFetchOutcomeTests: XCTestCase {
+    func testSkippedOutcomesCarryNoDiagnosticOrLabel() {
+        for outcome: GeminiUsageFetchOutcome in [.skippedInFlight, .skippedThrottled] {
+            XCTAssertNil(outcome.diagnosticDescription)
+            XCTAssertNil(outcome.staleReasonLabel)
+        }
+    }
+
+    func testFailureOutcomesAlwaysCarryADiagnosticAndLabel() {
+        let failures: [GeminiUsageFetchOutcome] = [.commandNotFound, .timedOut, .nonZeroExit(1), .decodeFailure]
+        for outcome in failures {
+            XCTAssertNotNil(outcome.diagnosticDescription)
+            XCTAssertNotNil(outcome.staleReasonLabel)
+        }
+    }
+}
+
 final class ClaudeUsageCoreTests: XCTestCase {
     func testRemainingPercentIsClampedAndNilSafe() {
         XCTAssertEqual(ClaudeUsageCore.remainingPercent(from: 28), 72)
         XCTAssertEqual(ClaudeUsageCore.remainingPercent(from: -5), 100)
         XCTAssertEqual(ClaudeUsageCore.remainingPercent(from: 150), 0)
         XCTAssertNil(ClaudeUsageCore.remainingPercent(from: nil))
+    }
+
+    func testFableWeeklyLimitMatchesCaseInsensitivelyAndIgnoresOtherModels() {
+        let opus = ClaudeModelWeeklyLimit(modelName: "Opus", usedPercent: 60, resetsAt: nil)
+        let fable = ClaudeModelWeeklyLimit(modelName: "fable", usedPercent: 20, resetsAt: nil)
+        XCTAssertEqual(ClaudeUsageCore.fableWeeklyLimit(in: [opus, fable]), fable)
+        XCTAssertNil(ClaudeUsageCore.fableWeeklyLimit(in: [opus]))
+        XCTAssertNil(ClaudeUsageCore.fableWeeklyLimit(in: []))
     }
 
     func testCostTitleFormatsSmallAndLargeValues() {
@@ -269,15 +557,15 @@ final class ClaudeUsageCoreTests: XCTestCase {
         let retryAt = Date(timeIntervalSince1970: 1_090)
         XCTAssertEqual(
             ClaudeUsageCore.rateLimitRetryLabel(retryAt: retryAt, now: Date(timeIntervalSince1970: 1_000)),
-            "요청 제한(429) · 90초 후 재시도"
+            "429 · 2분 후 재시도"
         )
         XCTAssertEqual(
             ClaudeUsageCore.rateLimitRetryLabel(retryAt: retryAt, now: Date(timeIntervalSince1970: 1_089.4)),
-            "요청 제한(429) · 1초 후 재시도"
+            "429 · 1초 후 재시도"
         )
         XCTAssertEqual(
             ClaudeUsageCore.rateLimitRetryLabel(retryAt: retryAt, now: Date(timeIntervalSince1970: 1_200)),
-            "요청 제한(429) · 0초 후 재시도"
+            "429 · 0초 후 재시도"
         )
     }
 
@@ -834,8 +1122,8 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
         XCTAssertNil(UsageConsumptionCore.sampleIndex(forSlot: 0, sampleCount: 0))
         XCTAssertNil(UsageConsumptionCore.sampleIndex(forSlot: -1, sampleCount: 3))
         // A full window fills every slot.
-        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 0, sampleCount: 24), 23)
-        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 23, sampleCount: 24), 0)
+        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 0, sampleCount: 40), 39)
+        XCTAssertEqual(UsageConsumptionCore.sampleIndex(forSlot: 39, sampleCount: 40), 0)
     }
 
     func testBarFractionsScaleToTheWindowPeak() {
@@ -879,16 +1167,15 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
 
     func testTrackerKeepsOnlyTheMostRecentSamples() {
         var tracker = UsageConsumptionTracker()
-        for step in 0...30 {
+        for step in 0...60 {
             tracker.record(
                 reading: Double(step),
                 at: Date(timeIntervalSince1970: TimeInterval(step) * 60),
                 isDecreasing: false,
-                metricKey: "weekly",
-                capacity: 24
+                metricKey: "weekly"
             )
         }
-        XCTAssertEqual(tracker.amounts.count, 24)
+        XCTAssertEqual(tracker.amounts.count, 40)
         XCTAssertEqual(tracker.amounts.allSatisfy { $0 == 1 }, true)
     }
 
