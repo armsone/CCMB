@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.3.30</title>
+            <pubDate>Wed, 19 Aug 2026 22:15:43 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.30</link>
+            <sparkle:version>47</sparkle:version>
+            <sparkle:shortVersionString>0.3.30</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.30
+
+- Claude의 5시간 세션 사용량과 주간 사용량을 상단에서 좌우 링으로 나란히 표시합니다.
+- 상단 주간 사용량과 중복되던 한 줄 패널을 제거해 정보를 더 간결하게 정리했습니다.
+- Codex와 Claude의 계정·갱신 정보 및 사용량 그래프 정렬은 그대로 유지합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.30/CCMB-0.3.30.dmg" length="2443974" type="application/octet-stream" sparkle:edSignature="jmfDXCuPKfCA2A3fbmOzqgXF5/W1HXRZNGPnjN2TJBIHDxnVNwvCfdEuHPBBnmZxEIfX4QgC88CEqAr1aJM3AQ=="/>
+        </item>
+        <item>
             <title>0.3.29</title>
             <pubDate>Wed, 19 Aug 2026 21:36:07 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.3.29</link>
@@ -33,21 +48,6 @@
 - 사용량 페이지 열기와 공유 항목을 Codex·Claude별로 구분했습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.28/CCMB-0.3.28.dmg" length="2365223" type="application/octet-stream" sparkle:edSignature="tT7uNbAw4wV/jCfMyXCOq81iCUwtC0+q7mmGWF60WEf/U9200nVK3f7R4syn3zshFto/geyS5QEPX/Rre2jbBw=="/>
-        </item>
-        <item>
-            <title>0.3.27</title>
-            <pubDate>Mon, 17 Aug 2026 23:46:33 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.27</link>
-            <sparkle:version>44</sparkle:version>
-            <sparkle:shortVersionString>0.3.27</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.27
-
-- Claude 사용량 라이브 조회 실패 원인을 구분해 오래된 값이 최신 정보처럼 보이지 않도록 개선했습니다.
-- 최신 라이브 값과 Claude Code 상태 캐시를 안전하게 병합하고 자동 재시도 안정성을 높였습니다.
-- 손상된 공유 캐시가 있어도 `ccmb-usage`가 실시간 조회로 복구하도록 개선했습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.27/CCMB-0.3.27.dmg" length="2147001" type="application/octet-stream" sparkle:edSignature="dmBbOw10X7LObBJsGOsIKNlbRy/ldPfojqbDJgHlzvio0scRHkWuCTqYKBG9kecsCtpWyzEGFRQGSzkP40bwAg=="/>
         </item>
     </channel>
 </rss>
