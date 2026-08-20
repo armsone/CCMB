@@ -35,6 +35,14 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertEqual(UsageCore.menuBarCodexTitle(usedPercent: nil, creditBalance: 0.49), "0.49")
     }
 
+    func testCodexQuotaDisplaysCreditsOnlyAfterWeeklyQuotaIsExhausted() {
+        XCTAssertFalse(UsageCore.codexQuotaDisplaysCredits(usedPercent: 99, creditBalance: 10))
+        XCTAssertTrue(UsageCore.codexQuotaDisplaysCredits(usedPercent: 100, creditBalance: 10))
+        XCTAssertTrue(UsageCore.codexQuotaDisplaysCredits(usedPercent: 120, creditBalance: 0.5))
+        XCTAssertFalse(UsageCore.codexQuotaDisplaysCredits(usedPercent: 100, creditBalance: 0))
+        XCTAssertFalse(UsageCore.codexQuotaDisplaysCredits(usedPercent: nil, creditBalance: 10))
+    }
+
     func testUsageHelperOnlyReplacesCCMBOwnedFile() {
         XCTAssertTrue(UsageCore.canReplaceUsageHelper(existingContents: nil))
         XCTAssertTrue(UsageCore.canReplaceUsageHelper(existingContents: "#!/bin/sh\n# CCMB_USAGE_HELPER_VERSION=1\n"))
@@ -84,6 +92,14 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertTrue(UsageCore.refreshIntervalOptions.contains(UsageCore.defaultRefreshIntervalSeconds))
         XCTAssertTrue(UsageCore.claudeRefreshIntervalOptions.contains(UsageCore.defaultClaudeRefreshIntervalSeconds))
         XCTAssertTrue(UsageCore.geminiRefreshIntervalOptions.contains(UsageCore.defaultGeminiRefreshIntervalSeconds))
+    }
+
+    func testPanelOpacityIsClampedToNinetyFiveThroughOneHundredPercent() {
+        XCTAssertEqual(UsageCore.normalizedPanelOpacity(0.7), 0.95)
+        XCTAssertEqual(UsageCore.normalizedPanelOpacity(0.95), 0.95)
+        XCTAssertEqual(UsageCore.normalizedPanelOpacity(0.975), 0.975)
+        XCTAssertEqual(UsageCore.normalizedPanelOpacity(1.0), 1.0)
+        XCTAssertEqual(UsageCore.normalizedPanelOpacity(1.2), 1.0)
     }
 
     func testCacheFallbackReasonTreatsCorruptCacheLikeMissing() {

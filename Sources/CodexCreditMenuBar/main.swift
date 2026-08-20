@@ -1257,10 +1257,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
         keyEquivalent: ""
     )
-    private lazy var updateVersionView = MenuActionRowView(
-        leftTitle: "업데이트 확인…",
-        rightTitle: "현재 버전 \(appVersion)"
+    private lazy var updateVersionView = VersionOpacityRowView(
+        updateTitle: "업데이트 확인…",
+        versionTitle: "현재 버전 \(appVersion)"
     )
+    private var panelOpacity: Double = AppDelegate.savedPanelOpacity()
     private let updateVersionItem = NSMenuItem()
     private let restartItem = NSMenuItem(title: "CCMB 다시 시작", action: #selector(restartApp), keyEquivalent: "")
     private let diagnosticsItem = NSMenuItem(title: "진단 로그", action: nil, keyEquivalent: "")
@@ -1271,6 +1272,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let splitPanelView = SplitUsagePanelView()
     private let splitPanelItem = NSMenuItem()
     private var pinnedUsageWindowController: PinnedUsageWindowController?
+    /// The status-item's own dropdown, once usage data has loaded at least
+    /// once. Reuses the exact same content stack as the persistent "항상
+    /// 보기" panel — one whole-panel background behind fully opaque
+    /// foreground rows — instead of an `NSMenu`, whose own vibrant
+    /// background can't be tinted by the opacity slider. Before the first
+    /// snapshot arrives, `showStatusMenu` still falls back to the native
+    /// `statusMenu` built below, which carries the original loading/offline
+    /// text rows.
+    private lazy var statusDropdownController: PinnedUsageWindowController = {
+        let controller = PinnedUsageWindowController(transient: true)
+        controller.dismissalExcludedView = statusItem.button
+        controller.onCodexRefreshIntervalChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
+        controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
+        controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+        controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
+        controller.setShareMenu(makeShareMenu())
+        controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
+        controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
+        controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
+        controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
+        controller.onRestart = { [weak self] in self?.restartApp() }
+        controller.onQuit = { [weak self] in self?.quit() }
+        controller.onToggleAlwaysView = { [weak self] in self?.togglePinnedUsageWindow() }
+        controller.setOpacity(panelOpacity)
+        return controller
+    }()
     private let usageSeparatorItem = NSMenuItem.separator()
     private let accountSeparatorItem = NSMenuItem.separator()
     private var lastRateLimitUpdatedAt: Date?
@@ -1588,6 +1615,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             claude: claudeRemaining,
             gemini: geminiRemaining
         )
+        statusDropdownController.updateRefreshCountdown(
+            codex: codexRemaining,
+            claude: claudeRemaining,
+            gemini: geminiRemaining
+        )
         guard nextAutoRefreshAt != .distantFuture else {
             setDetailTitle("새로 고침", for: refreshItem)
             return
@@ -1747,15 +1779,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         configureShareMenu()
         menu.addItem(shareItem)
         menu.addItem(.separator())
-        updateVersionView.leftButton.target = updaterController
-        updateVersionView.leftButton.action = #selector(SPUStandardUpdaterController.checkForUpdates(_:))
-        updateVersionView.rightButton.isBordered = false
-        updateVersionView.rightButton.isEnabled = false
-        updateVersionView.rightButton.font = .systemFont(ofSize: 11, weight: .regular)
-        updateVersionView.rightButton.setAccessibilityRole(.staticText)
+        updateVersionView.updateButton.target = updaterController
+        updateVersionView.updateButton.action = #selector(SPUStandardUpdaterController.checkForUpdates(_:))
+        updateVersionView.versionButton.isBordered = false
+        updateVersionView.versionButton.isEnabled = false
+        updateVersionView.versionButton.font = .systemFont(ofSize: 11, weight: .regular)
+        updateVersionView.versionButton.setAccessibilityRole(.staticText)
+        updateVersionView.opacitySlider.target = self
+        updateVersionView.opacitySlider.action = #selector(changePanelOpacity(_:))
+        updateVersionView.setOpacity(panelOpacity)
         updateVersionItem.view = updateVersionView
         updateVersionItem.isEnabled = true
         menu.addItem(updateVersionItem)
+        applyPanelOpacity()
 
         configureDiagnosticsMenu()
         utilityActionsView.buttons[0].target = self
@@ -1834,20 +1870,35 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// Opens the wide dashboard centered beneath the status item, with its
     /// top edge seven points below the menu-bar button's bottom edge.
     @objc private func showStatusMenu() {
-        guard
-            let menu = statusMenu,
-            let button = statusItem.button,
-            let window = button.window
-        else { return }
-        menu.update()
+        guard let button = statusItem.button, let window = button.window else { return }
+
+        // Before the first usage snapshot ever arrives, fall back to the
+        // native menu, which still carries the original loading/offline/
+        // error text rows that the dropdown panel has no equivalent for.
+        guard lastSnapshot != nil else {
+            guard let menu = statusMenu else { return }
+            menu.update()
+            let windowRect = button.convert(button.bounds, to: nil)
+            let screenRect = window.convertToScreen(windowRect)
+            let point = NSPoint(x: screenRect.midX - menu.size.width / 2, y: screenRect.minY - 7)
+            button.highlight(true)
+            menu.popUp(positioning: nil, at: point, in: nil)
+            button.highlight(false)
+            return
+        }
+
+        if statusDropdownController.isVisible {
+            statusDropdownController.close()
+            return
+        }
+
+        diagnosticLog.log("menu_open")
         let windowRect = button.convert(button.bounds, to: nil)
         let screenRect = window.convertToScreen(windowRect)
-        let point = NSPoint(
-            x: screenRect.midX - menu.size.width / 2,
-            y: screenRect.minY - 7
-        )
+        let point = NSPoint(x: screenRect.midX - UsagePanelLayout.viewWidth / 2, y: screenRect.minY - 7)
         button.highlight(true)
-        menu.popUp(positioning: nil, at: point, in: nil)
+        statusDropdownController.positionTopLeft(point)
+        statusDropdownController.show()
         button.highlight(false)
     }
 
@@ -2250,6 +2301,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         )
         splitPanelView.apply(model)
         updatePinnedUsageWindow(with: model)
+        updateStatusDropdown(with: model)
 
         accountItem.isHidden = true
         usageItem.isHidden = true
@@ -2273,13 +2325,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         if let usedPercent = snapshot.usedPercent {
             let remaining = remainingUsagePercent(from: usedPercent)
-            quota = UsagePanelQuota(
-                caption: "주간 남음",
-                percentText: percentTitle(from: remaining),
-                fraction: remaining / 100,
-                color: accent,
-                accessibilityValue: "남은 Codex 주간 사용량 \(percentTitle(from: remaining))"
-            )
+            if UsageCore.codexQuotaDisplaysCredits(
+                usedPercent: snapshot.usedPercent,
+                creditBalance: snapshot.creditBalance
+            ), let creditBalance = snapshot.creditBalance {
+                let creditTitle = creditDetailTitle(from: creditBalance)
+                quota = UsagePanelQuota(
+                    caption: "남은 크레딧",
+                    percentText: creditTitle,
+                    fraction: 0,
+                    color: accent,
+                    accessibilityValue: "남은 Codex 크레딧 \(creditTitle)",
+                    displayStyle: .prominentValue
+                )
+            } else {
+                quota = UsagePanelQuota(
+                    caption: "주간 남음",
+                    percentText: percentTitle(from: remaining),
+                    fraction: remaining / 100,
+                    color: accent,
+                    accessibilityValue: "남은 Codex 주간 사용량 \(percentTitle(from: remaining))"
+                )
+            }
         } else {
             rows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
         }
@@ -2594,7 +2661,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func configureShareMenu() {
-        let menu = NSMenu()
         let shareTitleStyle = NSMutableParagraphStyle()
         shareTitleStyle.firstLineHeadIndent = 4
         shareTitleStyle.headIndent = 4
@@ -2603,25 +2669,43 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             attributes: [.paragraphStyle: shareTitleStyle]
         )
         shareItem.setAccessibilityLabel("사용량 공유")
+        shareItem.submenu = makeShareMenu()
+    }
+
+    private func makeShareMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func copyItem(_ source: NSMenuItem) -> NSMenuItem {
+            let item = NSMenuItem(title: source.title, action: source.action, keyEquivalent: source.keyEquivalent)
+            item.target = source.action == nil ? nil : self
+            item.isEnabled = source.action == nil ? false : source.isEnabled
+            item.state = source.state
+            item.toolTip = source.toolTip
+            item.setAccessibilityLabel(source.accessibilityLabel())
+            return item
+        }
         let pathItem = NSMenuItem(title: "저장: ~/Library/Application Support/CCMB", action: nil, keyEquivalent: "")
         let fileItem = NSMenuItem(title: "파일: usage-v1.json", action: nil, keyEquivalent: "")
         let guideItem = NSMenuItem(title: "채팅에 “CCMB 사용량 알려줘” 입력", action: nil, keyEquivalent: "")
+        pathItem.isEnabled = false
+        fileItem.isEnabled = false
+        guideItem.isEnabled = false
 
-        menu.addItem(shareStatusItem)
+        menu.addItem(copyItem(shareStatusItem))
         menu.addItem(.separator())
         menu.addItem(pathItem)
         menu.addItem(fileItem)
-        menu.addItem(shareFolderItem)
+        menu.addItem(copyItem(shareFolderItem))
         menu.addItem(.separator())
         menu.addItem(guideItem)
-        menu.addItem(copySharePromptCombinedItem)
+        menu.addItem(copyItem(copySharePromptCombinedItem))
         menu.addItem(.separator())
-        menu.addItem(copySharePromptCodexItem)
-        menu.addItem(copySharePromptClaudeItem)
-        menu.addItem(copySharePromptGeminiItem)
+        menu.addItem(copyItem(copySharePromptCodexItem))
+        menu.addItem(copyItem(copySharePromptClaudeItem))
+        menu.addItem(copyItem(copySharePromptGeminiItem))
         menu.addItem(.separator())
-        menu.addItem(copyShareCommandItem)
-        shareItem.submenu = menu
+        menu.addItem(copyItem(copyShareCommandItem))
+        return menu
     }
 
     private func configureDiagnosticsMenu() {
@@ -2875,7 +2959,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             controller.onCodexRefreshIntervalChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
             controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
             controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+            controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
+            controller.setShareMenu(makeShareMenu())
+            controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
+            controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
+            controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
+            controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
+            controller.onRestart = { [weak self] in self?.restartApp() }
+            controller.onQuit = { [weak self] in self?.quit() }
             pinnedUsageWindowController = controller
+            controller.setOpacity(panelOpacity)
         }
         controller.apply(
             model: model,
@@ -2886,16 +2979,75 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             claudeRefreshInterval: Int(claudeRefreshInterval),
             geminiRefreshInterval: Int(geminiRefreshInterval)
         )
+        controller.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: isLaunchAtLoginEnabled,
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+        )
+        controller.setShareMenu(makeShareMenu())
         if !controller.isVisible {
             controller.show()
         }
         updatePinnedUsageWindowMenu()
     }
 
+    /// Keeps the status-item's own transient dropdown current even while it
+    /// isn't visible, so it never needs to rebuild `UsagePanelModel` itself
+    /// when `showStatusMenu` opens it — the same reasoning `apply(...)`
+    /// below already uses for the persistent pinned panel.
+    private func updateStatusDropdown(with model: UsagePanelModel) {
+        statusDropdownController.apply(
+            model: model,
+            codexHistory: lastSnapshot.flatMap { codexHistoryStrip(from: $0) },
+            claudeHistory: claudeHistoryStrip(),
+            geminiHistory: geminiHistoryStrip(),
+            codexRefreshInterval: Int(refreshInterval),
+            claudeRefreshInterval: Int(claudeRefreshInterval),
+            geminiRefreshInterval: Int(geminiRefreshInterval)
+        )
+        statusDropdownController.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: isLaunchAtLoginEnabled,
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+        )
+        statusDropdownController.setShareMenu(makeShareMenu())
+    }
+
     private func updatePinnedUsageWindowMenu() {
         let enabled = UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
         pinnedUsageWindowItem.state = enabled ? .on : .off
         utilityActionsView.buttons[0].title = enabled ? "✓ 항상 보기" : "항상 보기"
+        statusDropdownController.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: isLaunchAtLoginEnabled,
+            alwaysViewEnabled: enabled
+        )
+    }
+
+    /// Applies one shared value to the status dropdown and the pinned panel
+    /// so their whole-panel background materials fade together while all
+    /// text, charts, and buttons stay fully opaque.
+    private func applyPanelOpacity() {
+        statusDropdownController.setOpacity(panelOpacity)
+        pinnedUsageWindowController?.setOpacity(panelOpacity)
+        updateVersionView.setOpacity(panelOpacity)
+    }
+
+    @objc private func changePanelOpacity(_ sender: NSSlider) {
+        setPanelOpacity(sender.doubleValue)
+    }
+
+    /// Same opacity change the status menu's own slider performs, invoked
+    /// from the pinned panel's mirrored slider via a callback rather than
+    /// duplicating the persistence/apply logic there.
+    private func changePinnedPanelOpacity(_ opacity: Double) {
+        setPanelOpacity(opacity)
+    }
+
+    private func setPanelOpacity(_ opacity: Double) {
+        panelOpacity = UsageCore.normalizedPanelOpacity(opacity)
+        UserDefaults.standard.set(panelOpacity, forKey: Self.panelOpacityDefaultsKey)
+        applyPanelOpacity()
     }
 
     @objc private func openDashboard() {
@@ -2938,6 +3090,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         launchAtLoginItem.state = enabled ? .on : .off
         lifecycleActionsView.buttons[0].title = enabled ? "✓ 자동 실행" : "자동 실행"
         setDetailTitle(launchAtLoginItem.title, for: launchAtLoginItem)
+        pinnedUsageWindowController?.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: enabled,
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+        )
+        statusDropdownController.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: enabled,
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+        )
     }
 
     private func refreshLaunchAgentPathIfNeeded() {
@@ -3095,7 +3257,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static let geminiRefreshIntervalDefaultsKey = "geminiAutomaticRefreshIntervalSeconds"
     private static let pinnedUsageWindowDefaultsKey = "pinnedUsageWindowEnabled"
     private static let consumptionHistoryDefaultsKey = "usageConsumptionHistoryV1"
+    private static let panelOpacityDefaultsKey = "usagePanelOpacity"
     private static let footerLinkURLString = "https://github.com/armsone"
+
+    private static func savedPanelOpacity() -> Double {
+        guard UserDefaults.standard.object(forKey: panelOpacityDefaultsKey) != nil else { return 1.0 }
+        let saved = UserDefaults.standard.double(forKey: panelOpacityDefaultsKey)
+        return UsageCore.normalizedPanelOpacity(saved)
+    }
 
     private static func savedRefreshInterval() -> TimeInterval {
         let saved = UserDefaults.standard.object(forKey: refreshIntervalDefaultsKey) == nil

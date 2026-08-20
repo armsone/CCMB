@@ -233,6 +233,11 @@ enum UsageCore {
         return creditTitle(from: creditBalance)
     }
 
+    static func codexQuotaDisplaysCredits(usedPercent: Double?, creditBalance: Double?) -> Bool {
+        guard let usedPercent, let creditBalance, creditBalance > 0 else { return false }
+        return remainingPercent(from: usedPercent) <= 0
+    }
+
     static func canReplaceUsageHelper(existingContents: String?) -> Bool {
         guard let existingContents else { return true }
         return existingContents.contains(usageHelperMarker)
@@ -250,6 +255,12 @@ enum UsageCore {
         freshForSeconds: Int
     ) -> Bool {
         statusOK && processMatches && ageSeconds <= max(0, freshForSeconds)
+    }
+
+    static let minimumPanelOpacity = 0.95
+
+    static func normalizedPanelOpacity(_ opacity: Double) -> Double {
+        min(max(opacity, minimumPanelOpacity), 1.0)
     }
 
     /// Selectable auto-refresh cadences in seconds, `0` meaning off. The menu,

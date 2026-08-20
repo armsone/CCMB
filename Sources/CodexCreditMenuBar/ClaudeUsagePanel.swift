@@ -92,12 +92,34 @@ struct UsagePanelRow {
 /// The column's single most important number, shown as a compact ring with
 /// a centered percentage and a caption describing what it measures.
 struct UsagePanelQuota {
+    enum DisplayStyle {
+        case ring
+        case prominentValue
+    }
+
     let caption: String
     let percentText: String
     /// Remaining fraction (0...1) the ring fills in.
     let fraction: Double
     let color: NSColor
     let accessibilityValue: String
+    let displayStyle: DisplayStyle
+
+    init(
+        caption: String,
+        percentText: String,
+        fraction: Double,
+        color: NSColor,
+        accessibilityValue: String,
+        displayStyle: DisplayStyle = .ring
+    ) {
+        self.caption = caption
+        self.percentText = percentText
+        self.fraction = fraction
+        self.color = color
+        self.accessibilityValue = accessibilityValue
+        self.displayStyle = displayStyle
+    }
 }
 
 /// Compact bar strip showing how much the column's metric was consumed at each
@@ -815,7 +837,8 @@ private final class UsageColumnView: NSView {
 
         if let quota = column.quota {
             y += Self.titleGap
-            ringView.isHidden = false
+            let showsRing = quota.displayStyle == .ring
+            ringView.isHidden = !showsRing
             percentLabel.isHidden = false
             quotaCaptionLabel.isHidden = false
             ringView.progressColor = quota.color
@@ -826,7 +849,7 @@ private final class UsageColumnView: NSView {
             ringView.gradientColors = column.primaryQuotaGradientColors
             percentLabel.stringValue = quota.percentText
             quotaCaptionLabel.stringValue = quota.caption
-            ringView.setAccessibilityElement(true)
+            ringView.setAccessibilityElement(showsRing)
             ringView.setAccessibilityLabel(quota.caption)
             ringView.setAccessibilityValue(quota.accessibilityValue)
 
@@ -847,7 +870,14 @@ private final class UsageColumnView: NSView {
             )
             let primaryRingX = (groupWidth - diameter) / 2
             ringView.frame = NSRect(x: primaryRingX, y: y, width: diameter, height: diameter)
-            percentLabel.frame = NSRect(x: primaryRingX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
+            if quota.displayStyle == .prominentValue {
+                percentLabel.font = .monospacedDigitSystemFont(ofSize: 24, weight: .bold)
+                percentLabel.textColor = quota.color
+                percentLabel.frame = NSRect(x: 0, y: y + (diameter - 30) / 2, width: groupWidth, height: 30)
+            } else {
+                percentLabel.textColor = NSColor.labelColor.withAlphaComponent(0.60)
+                percentLabel.frame = NSRect(x: primaryRingX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
+            }
             quotaCaptionLabel.frame = NSRect(
                 x: 0,
                 y: y + diameter + Self.quotaCaptionGap,
@@ -1058,8 +1088,20 @@ enum UsagePanelLayout {
 /// an `NSMenu` do not always receive AppKit's usual hover treatment, so the
 /// bezel gets a light tint only while the pointer is over an enabled button.
 @MainActor
-final class RolloverButton: NSButton {
+class RolloverButton: NSButton {
     private var hoverTrackingArea: NSTrackingArea?
+    private var restingAttributedTitle: NSAttributedString?
+    /// The resting `contentTintColor`, captured once the button lands in a
+    /// window. When `hoverTintColor` is set, the button reverts to this
+    /// (normally still `nil`, i.e. the system default) once the pointer
+    /// leaves, instead of staying stuck on the hover color.
+    private var restingTintColor: NSColor?
+    /// When set, the button's foreground/bezel stay neutral at rest and only
+    /// switch to this color while the pointer is over the button — used by
+    /// controls that should read as quiet until rollover names their brand.
+    /// `nil` preserves the earlier bezel-only rollover, which leaves
+    /// `contentTintColor` exactly as the caller configured it.
+    var hoverTintColor: NSColor?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1073,18 +1115,67 @@ final class RolloverButton: NSButton {
         addTrackingArea(area)
         hoverTrackingArea = area
         alphaValue = 0.50
+        restingTintColor = contentTintColor
     }
 
     override func mouseEntered(with event: NSEvent) {
         guard isEnabled else { return }
-        let tint = contentTintColor ?? .controlAccentColor
+        let tint = hoverTintColor ?? contentTintColor ?? .controlAccentColor
         alphaValue = 1
+        contentTintColor = tint
         bezelColor = tint.withAlphaComponent(0.18)
+        if hoverTintColor != nil {
+            restingAttributedTitle = attributedTitle.copy() as? NSAttributedString
+            let coloredTitle = NSMutableAttributedString(attributedString: attributedTitle)
+            if coloredTitle.length == 0, !title.isEmpty {
+                coloredTitle.append(NSAttributedString(
+                    string: title,
+                    attributes: [.font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+                ))
+            }
+            coloredTitle.addAttribute(
+                .foregroundColor,
+                value: tint,
+                range: NSRange(location: 0, length: coloredTitle.length)
+            )
+            attributedTitle = coloredTitle
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
         alphaValue = 0.50
+        contentTintColor = restingTintColor
         bezelColor = nil
+        if let restingAttributedTitle {
+            attributedTitle = restingAttributedTitle
+            self.restingAttributedTitle = nil
+        }
+    }
+}
+
+/// Background-only translucent surface shared by the popup and pinned usage
+/// panels. Content always lives in sibling views layered on top rather than
+/// as subviews of this one, so fading its `alphaValue` never touches text,
+/// charts, or buttons — only the material behind them.
+@MainActor
+final class PanelBackgroundView: NSVisualEffectView {
+    init(blendingMode: NSVisualEffectView.BlendingMode) {
+        super.init(frame: .zero)
+        material = .popover
+        self.blendingMode = blendingMode
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.masksToBounds = true
+        autoresizingMask = [.width, .height]
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setOpacity(_ opacity: Double) {
+        alphaValue = CGFloat(UsageCore.normalizedPanelOpacity(opacity))
     }
 }
 
@@ -1093,8 +1184,8 @@ final class RolloverButton: NSButton {
 @MainActor
 final class SplitUsagePanelView: NSView {
     private let columnWidth = UsagePanelLayout.columnWidth
-    private let topPadding: CGFloat = 5
-    private let bottomPadding: CGFloat = 10
+    private let topPadding: CGFloat = 8
+    private let bottomPadding: CGFloat = 8
 
     private let codexColumnView = UsageColumnView()
     private let claudeColumnView = UsageColumnView()
@@ -1404,51 +1495,103 @@ final class UsageHistoryChartView: NSView {
 /// than trying to override macOS menu dismissal behavior.
 @MainActor
 final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
-    // The persistent panel uses the exact same edge-to-edge dashboard stack as
-    // the menu so switching to "always visible" never changes its geometry.
-    private static let padding: CGFloat = 0
+    // The persistent panel mirrors the status menu's own dashboard stack —
+    // usage panel, refresh countdown controls, history chart, usage-page
+    // buttons, then the same lower settings rows — edge to edge horizontally,
+    // with a small balanced top/bottom margin since this stack is no longer
+    // sitting inside an `NSMenu`'s own inset.
+    private static let horizontalPadding: CGFloat = 0
+    private static let topPadding: CGFloat = 8
+    private static let bottomPadding: CGFloat = 8
     private static let sectionGap: CGFloat = 0
 
     private let usageView = SplitUsagePanelView()
     private let historyView = UsageHistoryChartView()
     private let usagePageButtonsView = UsagePageButtonsView()
     private let refreshIntervalControlsView = RefreshIntervalControlsView()
-    private let containerView = NSVisualEffectView()
+    private let shareActionsView = SingleActionRowView(title: "사용량 공유")
+    private let updateVersionView = VersionOpacityRowView(updateTitle: "업데이트 확인…", versionTitle: "")
+    private let utilityActionsView = MenuActionRowView(titles: ["✓ 항상 보기", "진단 로그", "GitHub 보기"])
+    private let lifecycleActionsView = MenuActionRowView(titles: ["자동 실행", "다시 시작", "종료"])
+    private let containerView = PanelBackgroundView(blendingMode: .behindWindow)
+    /// Holds every content view, layered on top of `containerView`, so fading
+    /// the background never fades what's drawn on top of it.
+    private let contentContainer = NSView()
     private var hasPositionedWindow = false
+    /// When true, this controller is the status-item's own transient
+    /// dropdown replacement rather than the persistent "항상 보기" panel: it
+    /// dismisses itself on an outside click or Escape, the same way an
+    /// `NSMenu` ends its tracking session, instead of staying open until the
+    /// user explicitly closes it.
+    private let isTransient: Bool
+    private var outsideClickMonitor: Any?
+    private var localClickMonitor: Any?
+    private var keyMonitor: Any?
+    /// The status-item button that opens this transient dropdown, so a click
+    /// back on that same button toggles the dropdown closed through
+    /// `AppDelegate`'s own action instead of the dismiss monitor closing it
+    /// first and `AppDelegate` immediately reopening it.
+    var dismissalExcludedView: NSView?
 
     var onClose: (() -> Void)?
     var onCodexRefreshIntervalChange: ((Int) -> Void)?
     var onClaudeRefreshIntervalChange: ((Int) -> Void)?
     var onGeminiRefreshIntervalChange: ((Int) -> Void)?
+    /// Same lower-control actions as the status menu, performed through
+    /// callbacks into `AppDelegate` rather than duplicating any business
+    /// logic here. "항상 보기" needs no callback of its own when this panel
+    /// itself *is* the persistent panel — closing this window already unpins
+    /// it via `onClose`. The transient dropdown instead uses
+    /// `onToggleAlwaysView` to hand off to that persistent panel.
+    var onOpacityChange: ((Double) -> Void)?
+    var onCheckForUpdates: (() -> Void)?
+    var onOpenDiagnosticLog: (() -> Void)?
+    var onOpenGitHub: (() -> Void)?
+    var onToggleLaunchAtLogin: (() -> Void)?
+    var onRestart: (() -> Void)?
+    var onQuit: (() -> Void)?
+    /// Only invoked when `isTransient` is true, from the "항상 보기" row.
+    var onToggleAlwaysView: (() -> Void)?
     var isVisible: Bool { window?.isVisible == true }
 
-    init() {
-        let width = UsagePanelLayout.viewWidth + Self.padding * 2
+    init(transient: Bool = false) {
+        self.isTransient = transient
+        let width = UsagePanelLayout.viewWidth + Self.horizontalPadding * 2
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: 300),
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.title = "CCMB 사용량 · 항상 보기"
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.titlebarAppearsTransparent = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isMovableByWindowBackground = true
+        panel.becomesKeyOnlyIfNeeded = true
 
-        containerView.material = .popover
-        containerView.blendingMode = .behindWindow
-        containerView.state = .active
-        panel.contentView = containerView
+        let rootView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+        containerView.frame = rootView.bounds
+        contentContainer.frame = rootView.bounds
+        contentContainer.autoresizingMask = [.width, .height]
+        rootView.addSubview(containerView)
+        rootView.addSubview(contentContainer)
+        panel.contentView = rootView
 
         super.init(window: panel)
         panel.delegate = self
-        containerView.addSubview(usageView)
-        containerView.addSubview(historyView)
-        containerView.addSubview(usagePageButtonsView)
-        containerView.addSubview(refreshIntervalControlsView)
+        contentContainer.addSubview(usageView)
+        contentContainer.addSubview(refreshIntervalControlsView)
+        contentContainer.addSubview(historyView)
+        contentContainer.addSubview(usagePageButtonsView)
+        contentContainer.addSubview(shareActionsView)
+        contentContainer.addSubview(updateVersionView)
+        contentContainer.addSubview(utilityActionsView)
+        contentContainer.addSubview(lifecycleActionsView)
 
         usagePageButtonsView.codexButton.target = self
         usagePageButtonsView.codexButton.action = #selector(openCodexUsagePage)
@@ -1460,6 +1603,35 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         refreshIntervalControlsView.onCodexChange = { [weak self] in self?.onCodexRefreshIntervalChange?($0) }
         refreshIntervalControlsView.onClaudeChange = { [weak self] in self?.onClaudeRefreshIntervalChange?($0) }
         refreshIntervalControlsView.onGeminiChange = { [weak self] in self?.onGeminiRefreshIntervalChange?($0) }
+
+        updateVersionView.updateButton.target = self
+        updateVersionView.updateButton.action = #selector(triggerCheckForUpdates)
+        updateVersionView.versionButton.isBordered = false
+        updateVersionView.versionButton.isEnabled = false
+        updateVersionView.versionButton.font = .systemFont(ofSize: 11, weight: .regular)
+        updateVersionView.versionButton.setAccessibilityRole(.staticText)
+        updateVersionView.opacitySlider.target = self
+        updateVersionView.opacitySlider.action = #selector(changeOpacity(_:))
+
+        // The persistent pinned panel only exists while it is visible, so
+        // "항상 보기" is always shown checked there; closing this window is
+        // itself the unpin action. The transient dropdown instead hands off
+        // to that persistent panel and closes itself.
+        utilityActionsView.buttons[0].target = self
+        utilityActionsView.buttons[0].action = isTransient
+            ? #selector(toggleAlwaysViewTapped)
+            : #selector(closeWindow)
+        utilityActionsView.buttons[1].target = self
+        utilityActionsView.buttons[1].action = #selector(triggerOpenDiagnosticLog)
+        utilityActionsView.buttons[2].target = self
+        utilityActionsView.buttons[2].action = #selector(triggerOpenGitHub)
+
+        lifecycleActionsView.buttons[0].target = self
+        lifecycleActionsView.buttons[0].action = #selector(triggerToggleLaunchAtLogin)
+        lifecycleActionsView.buttons[1].target = self
+        lifecycleActionsView.buttons[1].action = #selector(triggerRestart)
+        lifecycleActionsView.buttons[2].target = self
+        lifecycleActionsView.buttons[2].action = #selector(triggerQuit)
     }
 
     required init?(coder: NSCoder) {
@@ -1491,27 +1663,41 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         let historyHeight = showsHistory ? historyView.frame.height : 0
         let historyGap = showsHistory ? Self.sectionGap : 0
         let buttonsHeight = usagePageButtonsView.frame.height
+        let shareHeight = shareActionsView.frame.height
         let controlsHeight = refreshIntervalControlsView.frame.height
-        let contentHeight = Self.padding * 2
+        let versionHeight = updateVersionView.frame.height
+        let utilityHeight = utilityActionsView.frame.height
+        let lifecycleHeight = lifecycleActionsView.frame.height
+        let contentHeight = Self.topPadding + Self.bottomPadding
             + usageView.frame.height
+            + Self.sectionGap + controlsHeight
             + historyGap + historyHeight
             + Self.sectionGap + buttonsHeight
-            + Self.sectionGap + controlsHeight
-        let contentWidth = UsagePanelLayout.viewWidth + Self.padding * 2
+            + Self.sectionGap + shareHeight
+            + Self.sectionGap + versionHeight
+            + Self.sectionGap + utilityHeight
+            + Self.sectionGap + lifecycleHeight
+        let contentWidth = UsagePanelLayout.viewWidth + Self.horizontalPadding * 2
 
-        usagePageButtonsView.frame.origin = NSPoint(x: Self.padding, y: Self.padding)
-        historyView.frame.origin = NSPoint(
-            x: Self.padding,
-            y: Self.padding + buttonsHeight + Self.sectionGap
-        )
-        refreshIntervalControlsView.frame.origin = NSPoint(
-            x: Self.padding,
-            y: Self.padding + buttonsHeight + Self.sectionGap + historyHeight + historyGap
-        )
-        usageView.frame.origin = NSPoint(
-            x: Self.padding, y: Self.padding + buttonsHeight + Self.sectionGap
-                + historyHeight + historyGap + controlsHeight + Self.sectionGap
-        )
+        // Stacked bottom-up so the top-down reading order matches the status
+        // menu exactly: usage panel, refresh controls, history, usage-page
+        // buttons, version/opacity, utility, lifecycle.
+        var y = Self.bottomPadding
+        lifecycleActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += lifecycleHeight + Self.sectionGap
+        utilityActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += utilityHeight + Self.sectionGap
+        updateVersionView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += versionHeight + Self.sectionGap
+        shareActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += shareHeight + Self.sectionGap
+        usagePageButtonsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += buttonsHeight + Self.sectionGap
+        historyView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += historyHeight + historyGap
+        refreshIntervalControlsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += controlsHeight + Self.sectionGap
+        usageView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
 
         if let window {
             let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
@@ -1522,6 +1708,21 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// Syncs the parts of the lower controls that are not covered by `apply`
+    /// (dashboard content) but still need to mirror `AppDelegate`'s own
+    /// state: the version string and the "자동 실행" checkmark.
+    func applyLowerControlsState(
+        versionText: String,
+        launchAtLoginEnabled: Bool,
+        alwaysViewEnabled: Bool
+    ) {
+        updateVersionView.versionButton.title = versionText
+        utilityActionsView.buttons[0].title = (isTransient ? alwaysViewEnabled : true)
+            ? "✓ 항상 보기"
+            : "항상 보기"
+        lifecycleActionsView.buttons[0].title = launchAtLoginEnabled ? "✓ 자동 실행" : "자동 실행"
+    }
+
     func show() {
         if !hasPositionedWindow {
             window?.center()
@@ -1529,14 +1730,89 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         }
         showWindow(nil)
         window?.orderFrontRegardless()
+        if isTransient {
+            installDismissMonitors()
+        }
+    }
+
+    /// Sets this window's top-left corner directly, the same anchor point
+    /// `NSMenu.popUp` used to take, and marks the window as already
+    /// positioned so a later `apply(...)` height change keeps this corner
+    /// fixed instead of re-centering. Used by the transient status-item
+    /// dropdown, which must reopen at the status button every time rather
+    /// than remembering a dragged position the way the pinned panel does.
+    func positionTopLeft(_ point: NSPoint) {
+        window?.setFrameTopLeftPoint(point)
+        hasPositionedWindow = true
     }
 
     func updateRefreshCountdown(codex: Int?, claude: Int?, gemini: Int?) {
         refreshIntervalControlsView.updateCountdown(codex: codex, claude: claude, gemini: gemini)
     }
 
+    func setShareMenu(_ menu: NSMenu) {
+        shareActionsView.setMenu(menu)
+    }
+
+    /// Fades only `containerView`'s material background, so every row reads
+    /// at the same background opacity the user picked while every label,
+    /// chart, and button stays fully opaque. Also keeps this window's own
+    /// slider in sync when the opacity was changed from the other panel
+    /// instead (status dropdown vs. pinned "항상 보기").
+    func setOpacity(_ opacity: Double) {
+        containerView.setOpacity(opacity)
+        updateVersionView.setOpacity(opacity)
+    }
+
     func windowWillClose(_ notification: Notification) {
+        removeDismissMonitors()
         onClose?()
+    }
+
+    /// Ends the transient dropdown's tracking session the same way an
+    /// `NSMenu` does: any mouse click outside its own window, or Escape,
+    /// closes it. Installed only while visible and torn down on close, so a
+    /// stray monitor never outlives this window.
+    private func installDismissMonitors() {
+        guard outsideClickMonitor == nil else { return }
+        // AppKit always invokes event monitor handlers on the main thread,
+        // but their closure types aren't `@MainActor`-annotated, so accessing
+        // this `@MainActor` controller's own state inside them needs
+        // `assumeIsolated` rather than an `async` hop — the hop would make it
+        // impossible to synchronously decide the handler's `NSEvent?` result.
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.close() }
+        }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, let window = self.window, event.window !== window else { return }
+                if let excludedView = self.dismissalExcludedView, let excludedWindow = excludedView.window,
+                   event.window === excludedWindow {
+                    let locationInView = excludedView.convert(event.locationInWindow, from: nil)
+                    if excludedView.bounds.contains(locationInView) { return }
+                }
+                self.close()
+            }
+            return event
+        }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 /* Escape */ else { return event }
+            MainActor.assumeIsolated { self?.close() }
+            return nil
+        }
+    }
+
+    private func removeDismissMonitors() {
+        [outsideClickMonitor, localClickMonitor, keyMonitor].forEach { monitor in
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+        outsideClickMonitor = nil
+        localClickMonitor = nil
+        keyMonitor = nil
     }
 
     @objc private func openCodexUsagePage() {
@@ -1549,6 +1825,93 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func openGeminiUsagePage() {
         NSWorkspace.shared.open(UsageDashboardURLs.gemini)
+    }
+
+    @objc private func closeWindow() {
+        close()
+    }
+
+    /// Only wired up when `isTransient`: hands off to the persistent "항상
+    /// 보기" panel and closes this dropdown, mirroring how selecting any
+    /// item in the old `NSMenu`-based dropdown ended its tracking session.
+    @objc private func toggleAlwaysViewTapped() {
+        onToggleAlwaysView?()
+        close()
+    }
+
+    @objc private func triggerCheckForUpdates() {
+        onCheckForUpdates?()
+    }
+
+    @objc private func triggerOpenDiagnosticLog() {
+        onOpenDiagnosticLog?()
+    }
+
+    @objc private func triggerOpenGitHub() {
+        onOpenGitHub?()
+    }
+
+    @objc private func triggerToggleLaunchAtLogin() {
+        onToggleLaunchAtLogin?()
+    }
+
+    @objc private func triggerRestart() {
+        onRestart?()
+    }
+
+    @objc private func triggerQuit() {
+        onQuit?()
+    }
+
+    @objc private func changeOpacity(_ sender: NSSlider) {
+        onOpacityChange?(sender.doubleValue)
+    }
+}
+
+/// One full-width lower action row used where the status menu presents a
+/// native submenu item. The pinned panel uses the same label and opens that
+/// very same submenu through an AppDelegate callback.
+@MainActor
+final class SingleActionRowView: NSView {
+    private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
+    private let title: String
+    let button: NSPopUpButton
+
+    override var isFlipped: Bool { true }
+
+    init(title: String) {
+        self.title = title
+        button = NSPopUpButton(frame: .zero, pullsDown: true)
+        button.addItem(withTitle: title)
+        super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
+        button.bezelStyle = .rounded
+        button.font = .systemFont(ofSize: 12, weight: .regular)
+        button.alignment = .left
+        button.setAccessibilityLabel("사용량 공유")
+        addSubview(button)
+        let inset = UsagePanelLayout.controlVerticalInset
+        button.frame = NSRect(
+            x: UsagePanelLayout.columnX[0],
+            y: inset,
+            width: UsagePanelLayout.viewWidth - UsagePanelLayout.columnX[0] * 2,
+            height: Self.viewHeight - inset * 2
+        )
+    }
+
+    func setMenu(_ menu: NSMenu) {
+        // In pull-down mode AppKit uses the first item as the control's
+        // persistent title and handles menu tracking itself. This avoids
+        // trying to start a second manual tracking loop from an NSButton
+        // action inside a nonactivating panel.
+        let titleItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        menu.insertItem(titleItem, at: 0)
+        button.menu = menu
+        button.selectItem(at: 0)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }
 
@@ -1567,9 +1930,9 @@ final class UsagePageButtonsView: NSView {
     private static let viewWidth: CGFloat = UsagePanelLayout.viewWidth
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
 
-    let codexButton: NSButton
-    let claudeButton: NSButton
-    let geminiButton: NSButton
+    let codexButton: RolloverButton
+    let claudeButton: RolloverButton
+    let geminiButton: RolloverButton
     private let dividers: [NSView] = (0..<UsagePanelLayout.columnCount - 1).map { _ in
         let view = NSView()
         view.wantsLayer = true
@@ -1588,9 +1951,11 @@ final class UsagePageButtonsView: NSView {
         addSubview(codexButton)
         addSubview(claudeButton)
         addSubview(geminiButton)
-        codexButton.contentTintColor = UsageBrandColors.codex
-        claudeButton.contentTintColor = UsageBrandColors.claude
-        geminiButton.contentTintColor = UsageBrandColors.geminiText
+        // Quiet/neutral at rest; each button only takes on its provider's
+        // brand color while the pointer is over it.
+        codexButton.hoverTintColor = UsageBrandColors.codex
+        claudeButton.hoverTintColor = UsageBrandColors.claude
+        geminiButton.hoverTintColor = UsageBrandColors.geminiText
         dividers.forEach(addSubview)
         setAccessibilityElement(false)
         layoutButtons()
@@ -1600,7 +1965,7 @@ final class UsagePageButtonsView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private static func makeButton(title: String, accessibilityLabel: String) -> NSButton {
+    private static func makeButton(title: String, accessibilityLabel: String) -> RolloverButton {
         let button = RolloverButton(title: title, target: nil, action: nil)
         button.bezelStyle = .rounded
         button.font = .systemFont(ofSize: 11, weight: .regular)
@@ -1624,39 +1989,124 @@ final class UsagePageButtonsView: NSView {
     }
 }
 
-/// Three aligned countdown buttons. A plain button is intentional: AppKit's
-/// nested NSPopUpButton menu works in a regular window but is unreliable while
-/// the status menu itself owns mouse tracking. Clicking advances only that
-/// provider to its next supported cadence, identically in both presentations.
+/// Compact control button that shows a provider's live refresh countdown
+/// while closed and, on click, an explicit `NSMenu` listing every supported
+/// interval with the configured one checkmarked.
+///
+/// `NSPopUpButton` hosted inside a custom `NSMenuItem` view does not reliably
+/// open once the surrounding status-item `NSMenu` starts tracking, so this
+/// button builds and pops up its own top-level menu instead. When hosted
+/// inside a menu, the enclosing menu's tracking is cancelled first and the
+/// interval menu is shown on the next run-loop turn, using a screen-space
+/// origin captured before that menu's window goes away — the same mechanism
+/// therefore also works unchanged for the pinned panel's ordinary window.
+@MainActor
+private final class IntervalControlButton: RolloverButton {
+    var options: [Int] = []
+    var selectedSeconds: Int = 0
+    var providerLabel: String = ""
+    var onSelect: ((Int) -> Void)?
+
+    /// Updates the closed-state title/tooltip/accessibility value with the
+    /// live countdown, or an explicit "off" state when disabled.
+    func updateDisplay(remainingSeconds: Int?) {
+        let status = remainingSeconds.map { "\(Self.durationTitle($0)) 후" } ?? "끔"
+        title = "\(providerLabel) · \(status)"
+        toolTip = "\(status) · 클릭해 갱신 시간 목록 열기"
+        setAccessibilityValue(status)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        let frameInWindow = convert(bounds, to: nil)
+        let screenOrigin = window.convertToScreen(frameInWindow).origin
+        let hostMenu = enclosingMenuItem?.menu
+        hostMenu?.cancelTracking()
+        DispatchQueue.main.async { [weak self] in
+            self?.presentIntervalMenu(at: screenOrigin)
+        }
+    }
+
+    private func presentIntervalMenu(at screenOrigin: NSPoint) {
+        let menu = NSMenu()
+        for seconds in options {
+            let item = NSMenuItem(
+                title: seconds == 0 ? "끔" : Self.durationTitle(seconds),
+                action: #selector(selectInterval(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = seconds
+            item.state = seconds == selectedSeconds ? .on : .off
+            menu.addItem(item)
+        }
+        _ = menu.popUp(positioning: nil, at: screenOrigin, in: nil)
+    }
+
+    @objc private func selectInterval(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Int else { return }
+        selectedSeconds = seconds
+        onSelect?(seconds)
+    }
+
+    static func durationTitle(_ seconds: Int) -> String {
+        if seconds >= 3_600 {
+            let hours = seconds / 3_600
+            let minutes = (seconds % 3_600) / 60
+            return minutes == 0 ? "\(hours)시간" : "\(hours)시간 \(minutes)분"
+        }
+        if seconds >= 60 {
+            let minutes = seconds / 60
+            let remainder = seconds % 60
+            return remainder == 0 ? "\(minutes)분" : "\(minutes)분 \(remainder)초"
+        }
+        return "\(max(0, seconds))초"
+    }
+}
+
+/// Three aligned refresh-cadence controls shared by the status menu and the
+/// persistent panel. Each exposes every supported value in an explicit list
+/// instead of making the user cycle through them one click at a time, and
+/// shows a live per-second countdown while closed.
 @MainActor
 final class RefreshIntervalControlsView: NSView {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
 
-    let codexButton = NSButton(title: "", target: nil, action: nil)
-    let claudeButton = NSButton(title: "", target: nil, action: nil)
-    let geminiButton = NSButton(title: "", target: nil, action: nil)
+    private let codexButton = IntervalControlButton()
+    private let claudeButton = IntervalControlButton()
+    private let geminiButton = IntervalControlButton()
 
     var onCodexChange: ((Int) -> Void)?
     var onClaudeChange: ((Int) -> Void)?
     var onGeminiChange: ((Int) -> Void)?
-    private var selectedIntervals = [0, 0, 0]
-    private let options = [
-        UsageCore.refreshIntervalOptions,
-        UsageCore.claudeRefreshIntervalOptions,
-        UsageCore.geminiRefreshIntervalOptions
-    ]
 
     override var isFlipped: Bool { true }
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
-        configure(codexButton, action: #selector(changeCodex), accessibilityLabel: "Codex 갱신 시간 변경")
-        configure(claudeButton, action: #selector(changeClaude), accessibilityLabel: "Claude 갱신 시간 변경")
-        configure(geminiButton, action: #selector(changeGemini), accessibilityLabel: "Gemini 갱신 시간 변경")
-        [codexButton, claudeButton, geminiButton].forEach {
-            $0.alignment = .center
-            addSubview($0)
+        let controls = [codexButton, claudeButton, geminiButton]
+        let optionSets = [
+            UsageCore.refreshIntervalOptions,
+            UsageCore.claudeRefreshIntervalOptions,
+            UsageCore.geminiRefreshIntervalOptions
+        ]
+        let labels = ["Codex", "Claude", "Gemini"]
+        let accessibilityLabels = ["Codex 갱신 시간", "Claude 갱신 시간", "Gemini 갱신 시간"]
+        let callbacks: [(Int) -> Void] = [
+            { [weak self] in self?.onCodexChange?($0) },
+            { [weak self] in self?.onClaudeChange?($0) },
+            { [weak self] in self?.onGeminiChange?($0) }
+        ]
+        for index in controls.indices {
+            configure(
+                controls[index],
+                options: optionSets[index],
+                providerLabel: labels[index],
+                accessibilityLabel: accessibilityLabels[index],
+                onSelect: callbacks[index]
+            )
         }
+        controls.forEach { addSubview($0) }
         codexButton.contentTintColor = UsageBrandColors.codex
         claudeButton.contentTintColor = UsageBrandColors.claude
         geminiButton.contentTintColor = UsageBrandColors.geminiText
@@ -1668,32 +2118,34 @@ final class RefreshIntervalControlsView: NSView {
     }
 
     func apply(codex: Int, claude: Int, gemini: Int) {
-        selectedIntervals = [codex, claude, gemini]
-        let buttons = [codexButton, claudeButton, geminiButton]
-        for index in buttons.indices {
-            buttons[index].title = Self.title(selectedIntervals[index])
-        }
+        codexButton.selectedSeconds = codex
+        claudeButton.selectedSeconds = claude
+        geminiButton.selectedSeconds = gemini
     }
 
-    /// Updates only the visible selected titles. The underlying menu tags stay
-    /// equal to the configured intervals, so each live countdown remains a
-    /// clickable cadence editor rather than becoming a new interval value.
+    /// Drives the live per-second countdown shown on each closed button.
     func updateCountdown(codex: Int?, claude: Int?, gemini: Int?) {
-        let buttons = [codexButton, claudeButton, geminiButton]
-        let remaining = [codex, claude, gemini]
-        for index in buttons.indices {
-            buttons[index].title = remaining[index].map(Self.countdownTitle) ?? "자동 갱신 끔"
-        }
+        codexButton.updateDisplay(remainingSeconds: codex)
+        claudeButton.updateDisplay(remainingSeconds: claude)
+        geminiButton.updateDisplay(remainingSeconds: gemini)
     }
 
-    private func configure(_ button: NSButton, action: Selector, accessibilityLabel: String) {
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        button.target = self
-        button.action = action
-        button.setAccessibilityLabel(accessibilityLabel)
-        button.toolTip = "클릭하여 다음 갱신 주기로 변경"
+    private func configure(
+        _ control: IntervalControlButton,
+        options: [Int],
+        providerLabel: String,
+        accessibilityLabel: String,
+        onSelect: @escaping (Int) -> Void
+    ) {
+        control.options = options
+        control.providerLabel = providerLabel
+        control.onSelect = onSelect
+        control.bezelStyle = .rounded
+        control.controlSize = .small
+        control.font = .systemFont(ofSize: 11, weight: .regular)
+        control.alignment = .center
+        control.setAccessibilityLabel(accessibilityLabel)
+        control.updateDisplay(remainingSeconds: nil)
     }
 
     private func layoutControls() {
@@ -1708,27 +2160,6 @@ final class RefreshIntervalControlsView: NSView {
             )
         }
     }
-
-    private static func title(_ seconds: Int) -> String {
-        guard seconds > 0 else { return "자동 갱신 끔" }
-        return "\(seconds)초 후 갱신"
-    }
-
-    private static func countdownTitle(_ seconds: Int) -> String {
-        "\(max(0, seconds))초 후 갱신"
-    }
-
-    private func nextInterval(for index: Int) -> Int {
-        let values = options[index]
-        guard let current = values.firstIndex(of: selectedIntervals[index]) else {
-            return values.first ?? 0
-        }
-        return values[(current + 1) % values.count]
-    }
-
-    @objc private func changeCodex() { onCodexChange?(nextInterval(for: 0)) }
-    @objc private func changeClaude() { onClaudeChange?(nextInterval(for: 1)) }
-    @objc private func changeGemini() { onGeminiChange?(nextInterval(for: 2)) }
 }
 
 /// A compact action row used by the menu's lower controls. Keeping these
@@ -1814,6 +2245,116 @@ final class MenuActionRowView: NSView {
         for (index, divider) in dividers.enumerated() {
             divider.frame = NSRect(
                 x: sidePadding + width + gap / 2 + CGFloat(index) * (width + gap),
+                y: 5,
+                width: 1,
+                height: Self.viewHeight - 10
+            )
+        }
+    }
+}
+
+/// The row pairing "check for updates" with the current version string. A
+/// compact slider sits immediately to the right of the version text so both
+/// usage panels' opacity can be adjusted from the same row, per the same
+/// left/right button geometry `MenuActionRowView` uses elsewhere.
+@MainActor
+final class VersionOpacityRowView: NSView {
+    private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
+
+    let updateButton: NSButton
+    let versionButton: NSButton
+    let opacitySlider: NSSlider
+    private let opacityLabel = NSTextField(labelWithString: "투명도")
+    private let opacityValueLabel = NSTextField(labelWithString: "100%")
+    private let dividers: [NSView]
+
+    override var isFlipped: Bool { true }
+
+    init(updateTitle: String, versionTitle: String) {
+        updateButton = Self.makeButton(title: updateTitle)
+        versionButton = Self.makeButton(title: versionTitle)
+        opacitySlider = NSSlider(
+            value: 1,
+            minValue: UsageCore.minimumPanelOpacity,
+            maxValue: 1,
+            target: nil,
+            action: nil
+        )
+        dividers = (0..<2).map { _ in
+            let view = NSView()
+            view.wantsLayer = true
+            view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+            return view
+        }
+        super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
+        addSubview(updateButton)
+        addSubview(versionButton)
+        addSubview(opacityLabel)
+        addSubview(opacitySlider)
+        addSubview(opacityValueLabel)
+        dividers.forEach(addSubview)
+
+        opacitySlider.controlSize = .small
+        opacitySlider.isContinuous = true
+        opacitySlider.setAccessibilityLabel("패널 투명도")
+        opacityLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        opacityLabel.textColor = .secondaryLabelColor
+        opacityLabel.alignment = .left
+        opacityValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        opacityValueLabel.textColor = .secondaryLabelColor
+        opacityValueLabel.alignment = .right
+        setOpacity(1)
+        layoutSubviews()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private static func makeButton(title: String) -> NSButton {
+        let button = RolloverButton(title: title, target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.font = .systemFont(ofSize: 12, weight: .regular)
+        button.contentTintColor = .controlAccentColor
+        button.alignment = .center
+        return button
+    }
+
+    func setOpacity(_ opacity: Double) {
+        let normalizedOpacity = UsageCore.normalizedPanelOpacity(opacity)
+        opacitySlider.doubleValue = normalizedOpacity
+        let percent = Int((normalizedOpacity * 100).rounded())
+        opacityValueLabel.stringValue = "\(percent)%"
+        opacitySlider.setAccessibilityValueDescription("\(percent)%")
+    }
+
+    private func layoutSubviews() {
+        let verticalInset = UsagePanelLayout.controlVerticalInset
+        updateButton.frame = NSRect(
+            x: UsagePanelLayout.columnX[0],
+            y: verticalInset,
+            width: UsagePanelLayout.columnWidth,
+            height: Self.viewHeight - verticalInset * 2
+        )
+        versionButton.frame = NSRect(
+            x: UsagePanelLayout.columnX[1],
+            y: verticalInset,
+            width: UsagePanelLayout.columnWidth,
+            height: Self.viewHeight - verticalInset * 2
+        )
+        let thirdX = UsagePanelLayout.columnX[2]
+        opacityLabel.frame = NSRect(x: thirdX + 8, y: 8, width: 42, height: 16)
+        opacitySlider.frame = NSRect(
+            x: thirdX + 52,
+            y: (Self.viewHeight - 20) / 2,
+            width: 80,
+            height: 20
+        )
+        opacityValueLabel.frame = NSRect(x: thirdX + 138, y: 8, width: 32, height: 16)
+
+        for (index, divider) in dividers.enumerated() {
+            divider.frame = NSRect(
+                x: UsagePanelLayout.dividerX(after: index),
                 y: 5,
                 width: 1,
                 height: Self.viewHeight - 10
