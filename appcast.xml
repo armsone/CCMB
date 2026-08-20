@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.4.2</title>
+            <pubDate>Thu, 20 Aug 2026 15:00:25 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.4.2</link>
+            <sparkle:version>50</sparkle:version>
+            <sparkle:shortVersionString>0.4.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.4.2
+
+- Grok의 주간 사용량과 초기화 시각, 요금제, 월간 사용 크레딧, 추가 사용 크레딧 잔액을 표시합니다.
+- Codex·Claude·Gemini·Grok을 동일한 4열 패널과 갱신·사용량 페이지·기록 구성으로 통합했습니다.
+- Grok CLI의 기존 로그인 정보를 읽기 전용으로 사용하며 토큰을 로그나 공유 파일에 저장하지 않습니다.
+- 사용량 공유 아래의 설정 버튼을 두 줄로 정돈하고 `진단`과 `GitHub`를 한 칸 안에 나란히 배치했습니다.
+- 항상 보기 패널의 크기 조절, 투명도, 접근성 문구와 갱신 상태 표시를 다듬었습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.2/CCMB-0.4.2.dmg" length="2913469" type="application/octet-stream" sparkle:edSignature="r/aSuTOSFeGfZXkg1EFeLMEAYIJxE/GVpeusQxzfetIKK3A2BtrscWaa7ShLCxndEng4DXPMBbzuTwSHHYpAAg=="/>
+        </item>
+        <item>
             <title>0.4.1</title>
             <pubDate>Thu, 20 Aug 2026 12:00:32 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.4.1</link>
@@ -36,21 +53,6 @@
 - 메뉴 팝업 위치, 버튼 상태·롤오버·명도, 여백과 정렬을 다듬고 사용량 페이지 링크와 요금제 표시를 바로잡았습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.0/CCMB-0.4.0.dmg" length="2777654" type="application/octet-stream" sparkle:edSignature="ZESUbSJhUExX50pzFUc7WEBWKxVpRFOOistDk3nyoIvipG8BSoK47IK0fd9bQjvDvXfTY9Ey8nEJYUKIUIe0Ag=="/>
-        </item>
-        <item>
-            <title>0.3.30</title>
-            <pubDate>Wed, 19 Aug 2026 22:15:43 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.30</link>
-            <sparkle:version>47</sparkle:version>
-            <sparkle:shortVersionString>0.3.30</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.30
-
-- Claude의 5시간 세션 사용량과 주간 사용량을 상단에서 좌우 링으로 나란히 표시합니다.
-- 상단 주간 사용량과 중복되던 한 줄 패널을 제거해 정보를 더 간결하게 정리했습니다.
-- Codex와 Claude의 계정·갱신 정보 및 사용량 그래프 정렬은 그대로 유지합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.30/CCMB-0.3.30.dmg" length="2443974" type="application/octet-stream" sparkle:edSignature="jmfDXCuPKfCA2A3fbmOzqgXF5/W1HXRZNGPnjN2TJBIHDxnVNwvCfdEuHPBBnmZxEIfX4QgC88CEqAr1aJM3AQ=="/>
         </item>
     </channel>
 </rss>
