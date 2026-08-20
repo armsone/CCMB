@@ -1,15 +1,16 @@
 # CCMB — Codex & Claude Meter Bar
 
-CCMB (Codex & Claude Meter Bar) is an unofficial macOS menu bar app that displays Codex, Claude, and Gemini/Antigravity usage, reset times, account information, and available Codex and Gemini credits without requiring a terminal window.
+CCMB (Codex & Claude Meter Bar) is an unofficial macOS menu bar app that displays Codex, Claude, Gemini/Antigravity, and Grok usage, reset times, account information, and available Codex and Gemini credits without requiring a terminal window.
 
-> CCMB is a community project. It is not affiliated with or endorsed by OpenAI, Anthropic, or Google.
+> CCMB is a community project. It is not affiliated with or endorsed by OpenAI, Anthropic, Google, or xAI.
 
 ## Features
 
 - Codex weekly usage remaining, switching to the positive credit balance when the weekly allowance reaches zero
 - Claude five-hour session and weekly usage remaining
 - Gemini/Antigravity five-hour and weekly usage remaining, plus AI credit balance, read from the local `agy` CLI
-- A compact three-column Codex, Claude, and Gemini usage panel with exact reset times and account information
+- Grok plan, monthly credit usage, weekly reset time, and extra credit balance, read from the Grok CLI's own local OAuth credential
+- A compact four-column Codex, Claude, Gemini, and Grok usage panel with exact reset times and account information
 - Manual and configurable automatic refresh
 - Signed automatic updates through Sparkle and GitHub Releases
 - Local JSON sharing for other apps and Codex chats, with freshness evidence
@@ -23,8 +24,9 @@ CCMB (Codex & Claude Meter Bar) is an unofficial macOS menu bar app that display
 - Codex CLI installed and signed in for the current macOS user
 - Claude Code installed and signed in when Claude usage information is required
 - Antigravity's `agy` CLI installed and signed in when Gemini usage information is required
+- The Grok CLI signed in (`~/.grok/auth.json`, or `$GROK_HOME/auth.json`) when Grok usage information is required
 
-CCMB starts the local `codex app-server` process and uses the current user's existing Codex session. It does not bundle an API key or login credential. Gemini usage is read by launching the locally installed `agy` CLI in read-only plan/sandbox mode; CCMB never sends its own network requests for Gemini data.
+CCMB starts the local `codex app-server` process and uses the current user's existing Codex session. It does not bundle an API key or login credential. Gemini usage is read by launching the locally installed `agy` CLI in read-only plan/sandbox mode; CCMB never sends its own network requests for Gemini data. Grok usage is read by calling the Grok CLI's own billing endpoint with the OAuth token the `grok` CLI already stored locally; CCMB never signs in, refreshes credentials, or writes to that file itself — an expired credential simply asks you to run `grok` again.
 
 ## Share usage with other apps and chats
 
@@ -37,10 +39,12 @@ After every successful refresh, CCMB writes an owner-readable JSON snapshot to:
 CCMB also installs a small local command at `~/.codex/bin/ccmb-usage`. In another Codex chat, ask:
 
 ```text
-Run ~/.codex/bin/ccmb-usage and tell me the remaining weekly usage for Codex, Claude, and Gemini, plus the Codex and Gemini credit balances. If any fresh value is false, say that data is old.
+Run ~/.codex/bin/ccmb-usage and tell me the remaining weekly usage for Codex, Claude, Gemini, and Grok, plus the Codex and Gemini credit balances. If any fresh value is false, say that data is old.
 ```
 
-Use `~/.codex/bin/ccmb-usage --verify-live` when an independent `codex app-server` read should be compared with the saved CCMB value. The top-level fields describe Codex directly for backward compatibility; the nested `codex`, `claude`, and `gemini` objects mirror the same status/weekly remaining/reset/freshness shape for each service, with `codex` also carrying credit and window fields, `claude` also carrying session/model/extra-usage/account fields, and `gemini` also carrying its five-hour window and AI credit balance. Existing consumers reading only the top-level fields or the `codex`/`claude` objects keep working unchanged. It never includes login tokens or Gemini's account-specific upgrade link.
+Use `~/.codex/bin/ccmb-usage --verify-live` when an independent `codex app-server` read should be compared with the saved CCMB value. The top-level fields describe Codex directly for backward compatibility; the nested `codex`, `claude`, `gemini`, and `grok` objects mirror the same status/weekly remaining/reset/freshness shape for each service, with `codex` also carrying credit and window fields, `claude` also carrying session/model/extra-usage/account fields, `gemini` also carrying its five-hour window and AI credit balance, and `grok` also carrying its plan, monthly used credits, monthly reset, and extra credit balance. Existing consumers reading only the top-level fields or the `codex`/`claude` objects keep working unchanged. It never includes login tokens, Grok access tokens, or Gemini's account-specific upgrade link.
+
+`ccmb-usage` never makes a Claude network request, including with `--verify-live`; it only reads the Claude snapshot already brokered by the running CCMB app or the passive Claude Code statusLine cache. The Claude object reports `source`, `fetchedAt`, `freshForSeconds`, `fresh`, and—while a 429 circuit is open—`circuitState`, `nextEligibleAt`, and `staleReason`, so Codex can distinguish a current reading from an explicitly stale last-known value without increasing Anthropic request frequency.
 
 ## Run from source
 
@@ -101,7 +105,7 @@ The script creates and verifies a notarized Universal app and DMG, signs the upd
 
 ## Privacy and diagnostics
 
-CCMB reads account usage data from the locally installed Codex CLI, Claude Code session, and Antigravity `agy` CLI, and displays it on the Mac where it runs. It does not add its own analytics or telemetry. Diagnostic messages use macOS unified logging with private string fields; raw service responses and credentials are not logged. Gemini's account-specific upgrade link (`upgrade_uri`) is never read, persisted, or displayed.
+CCMB reads account usage data from the locally installed Codex CLI, Claude Code session, Antigravity `agy` CLI, and the Grok CLI's local OAuth credential, and displays it on the Mac where it runs. It does not add its own analytics or telemetry. Diagnostic messages use macOS unified logging with private string fields; raw service responses and credentials are not logged. Gemini's account-specific upgrade link (`upgrade_uri`) is never read, persisted, or displayed, and the Grok access token is never logged, displayed, or persisted by CCMB.
 
 ## Contributing
 
@@ -111,4 +115,4 @@ Issues and pull requests are welcome. Please do not include account details, cre
 
 CCMB is available under the [MIT License](LICENSE).
 
-OpenAI and Codex are trademarks of OpenAI. Claude is a trademark of Anthropic. Gemini and Antigravity are trademarks of Google. Their use here is solely to describe compatibility with Codex CLI, Claude Code, and the Antigravity `agy` CLI.
+OpenAI and Codex are trademarks of OpenAI. Claude is a trademark of Anthropic. Gemini and Antigravity are trademarks of Google. Grok is a trademark of xAI. Their use here is solely to describe compatibility with Codex CLI, Claude Code, the Antigravity `agy` CLI, and the Grok CLI.

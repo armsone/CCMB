@@ -40,7 +40,9 @@ enum ClaudeUsageStore {
         guard let raw = try? JSONDecoder().decode(CacheFile.self, from: data) else { return nil }
 
         let publishedAt = raw.publishedAt.flatMap { iso8601Formatter.date(from: $0) }
+        let hasQuota = raw.weeklyUsedPercent != nil || raw.fiveHourUsedPercent != nil
         return ClaudeUsageSnapshot(
+            quotaSource: hasQuota ? "claude-statusline" : nil,
             model: raw.model,
             weeklyUsedPercent: raw.weeklyUsedPercent,
             weeklyResetsAt: raw.weeklyResetsAtEpoch.map { Date(timeIntervalSince1970: $0) },
@@ -364,6 +366,7 @@ struct UsagePanelModel {
     let codex: UsagePanelColumn
     let claude: UsagePanelColumn
     let gemini: UsagePanelColumn
+    let grok: UsagePanelColumn
 }
 
 /// Compact circular progress indicator used for a column's primary quota.
@@ -624,12 +627,13 @@ private final class UsageMetricRowView: NSView {
 
 private final class ProviderTitleMarkView: NSView {
     enum Style {
-        case codex, claude, gemini
+        case codex, claude, gemini, grok
 
         init(providerTitle: String) {
             switch providerTitle {
             case "Claude": self = .claude
             case "Gemini": self = .gemini
+            case "Grok": self = .grok
             default: self = .codex
             }
         }
@@ -644,6 +648,7 @@ private final class ProviderTitleMarkView: NSView {
         case .codex: drawCodexMark()
         case .claude: drawClaudeMark()
         case .gemini: drawGeminiMark()
+        case .grok: drawGrokMark()
         }
     }
 
@@ -699,6 +704,32 @@ private final class ProviderTitleMarkView: NSView {
             UsageBrandColors.geminiGradient[index].setFill()
             path.fill()
         }
+    }
+
+    /// A plain code-native prompt chevron (`>`) plus a trailing cursor bar,
+    /// stroked in one restrained neutral ink so it reads as "terminal", not
+    /// as a copy of the X social-network mark or as one more colored logo.
+    private func drawGrokMark() {
+        let path = NSBezierPath()
+        path.lineWidth = 1.5
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        let top = NSPoint(x: 3.5, y: 3.5)
+        let mid = NSPoint(x: 8.5, y: bounds.midY)
+        let bottom = NSPoint(x: 3.5, y: bounds.maxY - 3.5)
+        path.move(to: top)
+        path.line(to: mid)
+        path.line(to: bottom)
+
+        let cursor = NSBezierPath()
+        cursor.lineWidth = 1.5
+        cursor.lineCapStyle = .round
+        cursor.move(to: NSPoint(x: 9, y: bounds.maxY - 3.5))
+        cursor.line(to: NSPoint(x: 13, y: bounds.maxY - 3.5))
+
+        GrokBrandColor.mark.setStroke()
+        path.stroke()
+        cursor.stroke()
     }
 }
 
@@ -1062,7 +1093,7 @@ private final class UsageColumnView: NSView {
 
 /// Shared column geometry for every fixed-width row in the usage menu
 /// (the split panel itself, the history chart, and the usage-page buttons)
-/// so their three columns and two dividers always land at the same x
+/// so their four columns and three dividers always land at the same x
 /// positions and the menu reads as one object end to end.
 enum UsagePanelLayout {
     static let columnWidth: CGFloat = 178
@@ -1070,10 +1101,10 @@ enum UsagePanelLayout {
     static let sidePadding: CGFloat = 12
     static let controlRowHeight: CGFloat = 30
     static let controlVerticalInset: CGFloat = 3
-    static let columnCount = 3
+    static let columnCount = 4
     static let viewWidth: CGFloat = sidePadding * 2 + columnWidth * CGFloat(columnCount) + columnGap * CGFloat(columnCount - 1)
 
-    /// Leading x of each of the three columns, left to right.
+    /// Leading x of each provider column, left to right.
     static let columnX: [CGFloat] = (0..<columnCount).map { index in
         sidePadding + CGFloat(index) * (columnWidth + columnGap)
     }
@@ -1179,8 +1210,8 @@ final class PanelBackgroundView: NSVisualEffectView {
     }
 }
 
-/// Three-column status panel — Codex, Claude, then Gemini — hosted as the
-/// `view` of a single NSMenuItem.
+/// Four-column status panel — Codex, Claude, Gemini, then Grok — hosted as
+/// the `view` of a single NSMenuItem.
 @MainActor
 final class SplitUsagePanelView: NSView {
     private let columnWidth = UsagePanelLayout.columnWidth
@@ -1190,6 +1221,7 @@ final class SplitUsagePanelView: NSView {
     private let codexColumnView = UsageColumnView()
     private let claudeColumnView = UsageColumnView()
     private let geminiColumnView = UsageColumnView()
+    private let grokColumnView = UsageColumnView()
     private let dividers: [NSView] = (0..<UsagePanelLayout.columnCount - 1).map { _ in
         let view = NSView()
         view.wantsLayer = true
@@ -1204,6 +1236,7 @@ final class SplitUsagePanelView: NSView {
         addSubview(codexColumnView)
         addSubview(claudeColumnView)
         addSubview(geminiColumnView)
+        addSubview(grokColumnView)
         dividers.forEach(addSubview)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -1214,8 +1247,8 @@ final class SplitUsagePanelView: NSView {
     }
 
     func apply(_ model: UsagePanelModel) {
-        let columnViews = [codexColumnView, claudeColumnView, geminiColumnView]
-        let columns = [model.codex, model.claude, model.gemini]
+        let columnViews = [codexColumnView, claudeColumnView, geminiColumnView, grokColumnView]
+        let columns = [model.codex, model.claude, model.gemini, model.grok]
 
         let bodyHeights = zip(columnViews, columns).map { view, column in view.apply(column, width: columnWidth) }
         let bodyHeight = max(bodyHeights.max() ?? 1, 1)
@@ -1256,8 +1289,9 @@ final class SplitUsagePanelView: NSView {
         let codexSummary = model.codex.quota?.accessibilityValue ?? model.codex.title
         let claudeSummary = model.claude.quota?.accessibilityValue ?? model.claude.title
         let geminiSummary = model.gemini.quota?.accessibilityValue ?? model.gemini.title
-        setAccessibilityLabel("Codex, Claude 및 Gemini 사용량 패널")
-        setAccessibilityValue("\(codexSummary), \(claudeSummary), \(geminiSummary)")
+        let grokSummary = model.grok.quota?.accessibilityValue ?? model.grok.title
+        setAccessibilityLabel("Codex, Claude, Gemini 및 Grok 사용량 패널")
+        setAccessibilityValue("\(codexSummary), \(claudeSummary), \(geminiSummary), \(grokSummary)")
     }
 }
 
@@ -1268,7 +1302,7 @@ final class SplitUsagePanelView: NSView {
 @MainActor
 final class UsageHistoryChartView: NSView {
     // Column geometry comes from the shared `UsagePanelLayout` on purpose:
-    // the three strips must sit exactly under the Codex, Claude and Gemini
+    // the four strips must sit exactly under their provider columns
     // columns above them, and the inner dividers must line up with that
     // panel's dividers. That alignment is what makes the whole menu read as
     // one object.
@@ -1301,13 +1335,16 @@ final class UsageHistoryChartView: NSView {
     private let codexCaption = UsageHistoryChartView.makeCaption()
     private let claudeCaption = UsageHistoryChartView.makeCaption()
     private let geminiCaption = UsageHistoryChartView.makeCaption()
+    private let grokCaption = UsageHistoryChartView.makeCaption()
     private let codexBars = UsageHistoryBarView()
     private let claudeBars = UsageHistoryBarView()
     private let geminiBars = UsageHistoryBarView()
+    private let grokBars = UsageHistoryBarView()
     /// The caption each column falls back to once the pointer leaves its strip.
     private var codexBaseCaption = ""
     private var claudeBaseCaption = ""
     private var geminiBaseCaption = ""
+    private var grokBaseCaption = ""
 
     override var isFlipped: Bool { true }
 
@@ -1319,6 +1356,8 @@ final class UsageHistoryChartView: NSView {
         addSubview(claudeBars)
         addSubview(geminiCaption)
         addSubview(geminiBars)
+        addSubview(grokCaption)
+        addSubview(grokBars)
         setAccessibilityElement(false)
 
         codexBars.onHover = { [weak self] sample in
@@ -1338,6 +1377,12 @@ final class UsageHistoryChartView: NSView {
             self.geminiCaption.stringValue = sample
                 .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.geminiBars.unitSuffix) }
                 ?? self.geminiBaseCaption
+        }
+        grokBars.onHover = { [weak self] sample in
+            guard let self else { return }
+            self.grokCaption.stringValue = sample
+                .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.grokBars.unitSuffix) }
+                ?? self.grokBaseCaption
         }
     }
 
@@ -1398,6 +1443,7 @@ final class UsageHistoryChartView: NSView {
         drawDot(color: codexBars.barColor, x: UsagePanelLayout.columnX[0] + Self.columnContentInset, visible: !codexCaption.isHidden)
         drawDot(color: claudeBars.barColor, x: UsagePanelLayout.columnX[1] + Self.columnContentInset, visible: !claudeCaption.isHidden)
         drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
+        drawDot(color: grokBars.barColor, x: UsagePanelLayout.columnX[3] + Self.columnContentInset, visible: !grokCaption.isHidden)
     }
 
     private func drawDot(color: NSColor, x: CGFloat, visible: Bool) {
@@ -1438,14 +1484,21 @@ final class UsageHistoryChartView: NSView {
     /// Returns false when no column has anything to draw, so the caller can
     /// hide the whole row instead of leaving an empty band in the menu.
     @discardableResult
-    func apply(codex: UsageHistoryStrip?, claude: UsageHistoryStrip?, gemini: UsageHistoryStrip?) -> Bool {
+    func apply(
+        codex: UsageHistoryStrip?,
+        claude: UsageHistoryStrip?,
+        gemini: UsageHistoryStrip?,
+        grok: UsageHistoryStrip?
+    ) -> Bool {
         codexBaseCaption = codex?.caption ?? ""
         claudeBaseCaption = claude?.caption ?? ""
         geminiBaseCaption = gemini?.caption ?? ""
+        grokBaseCaption = grok?.caption ?? ""
         let codexShown = configure(codex, caption: codexCaption, bars: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset)
         let claudeShown = configure(claude, caption: claudeCaption, bars: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset)
         let geminiShown = configure(gemini, caption: geminiCaption, bars: geminiBars, x: UsagePanelLayout.columnX[2] + Self.columnContentInset)
-        let anyShown = codexShown || claudeShown || geminiShown
+        let grokShown = configure(grok, caption: grokCaption, bars: grokBars, x: UsagePanelLayout.columnX[3] + Self.columnContentInset)
+        let anyShown = codexShown || claudeShown || geminiShown || grokShown
         needsDisplay = true
         return anyShown
     }
@@ -1504,20 +1557,36 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     private static let topPadding: CGFloat = 8
     private static let bottomPadding: CGFloat = 8
     private static let sectionGap: CGFloat = 0
+    private static let defaultContentScale: CGFloat = 0.80
+    private static let minimumContentScale: CGFloat = 0.40
+    private static let maximumContentScale: CGFloat = 1.00
+    private static let contentScaleDefaultsKey = "pinnedUsagePanelContentScale"
 
     private let usageView = SplitUsagePanelView()
     private let historyView = UsageHistoryChartView()
     private let usagePageButtonsView = UsagePageButtonsView()
     private let refreshIntervalControlsView = RefreshIntervalControlsView()
     private let shareActionsView = SingleActionRowView(title: "사용량 공유")
-    private let updateVersionView = VersionOpacityRowView(updateTitle: "업데이트 확인…", versionTitle: "")
-    private let utilityActionsView = MenuActionRowView(titles: ["✓ 항상 보기", "진단 로그", "GitHub 보기"])
-    private let lifecycleActionsView = MenuActionRowView(titles: ["자동 실행", "다시 시작", "종료"])
+    private let updateVersionView = VersionOpacityRowView(
+        alwaysTitle: "✓ 항상 보기",
+        updateTitle: "업데이트 확인…",
+        versionTitle: ""
+    )
+    private let lifecycleActionsView = LifecycleActionsRowView()
     private let containerView = PanelBackgroundView(blendingMode: .behindWindow)
     /// Holds every content view, layered on top of `containerView`, so fading
     /// the background never fades what's drawn on top of it.
     private let contentContainer = NSView()
     private var hasPositionedWindow = false
+    /// Children use the panel's fixed natural coordinate system. Resizing the
+    /// container's frame while preserving these bounds scales the complete UI
+    /// (drawing, hit testing and tracking areas) instead of growing empty space.
+    private var naturalContentSize = NSSize(
+        width: UsagePanelLayout.viewWidth,
+        height: 300
+    )
+    private var contentScale: CGFloat
+    private var isApplyingWindowSize = false
     /// When true, this controller is the status-item's own transient
     /// dropdown replacement rather than the persistent "항상 보기" panel: it
     /// dismisses itself on an outside click or Escape, the same way an
@@ -1537,6 +1606,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     var onCodexRefreshIntervalChange: ((Int) -> Void)?
     var onClaudeRefreshIntervalChange: ((Int) -> Void)?
     var onGeminiRefreshIntervalChange: ((Int) -> Void)?
+    var onGrokRefreshIntervalChange: ((Int) -> Void)?
     /// Same lower-control actions as the status menu, performed through
     /// callbacks into `AppDelegate` rather than duplicating any business
     /// logic here. "항상 보기" needs no callback of its own when this panel
@@ -1554,12 +1624,28 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     var onToggleAlwaysView: (() -> Void)?
     var isVisible: Bool { window?.isVisible == true }
 
+    static func normalizedContentScale(_ proposedScale: CGFloat) -> CGFloat {
+        min(max(proposedScale, minimumContentScale), maximumContentScale)
+    }
+
     init(transient: Bool = false) {
         self.isTransient = transient
+        if transient {
+            contentScale = 1
+        } else if let storedScale = UserDefaults.standard.object(
+            forKey: Self.contentScaleDefaultsKey
+        ) as? Double {
+            contentScale = Self.normalizedContentScale(CGFloat(storedScale))
+        } else {
+            contentScale = Self.defaultContentScale
+        }
         let width = UsagePanelLayout.viewWidth + Self.horizontalPadding * 2
+        let styleMask: NSWindow.StyleMask = transient
+            ? [.borderless, .nonactivatingPanel]
+            : [.borderless, .nonactivatingPanel, .resizable]
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: 300),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: styleMask,
             backing: .buffered,
             defer: false
         )
@@ -1576,6 +1662,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
         let rootView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
         containerView.frame = rootView.bounds
+        containerView.autoresizingMask = [.width, .height]
         contentContainer.frame = rootView.bounds
         contentContainer.autoresizingMask = [.width, .height]
         rootView.addSubview(containerView)
@@ -1590,7 +1677,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         contentContainer.addSubview(usagePageButtonsView)
         contentContainer.addSubview(shareActionsView)
         contentContainer.addSubview(updateVersionView)
-        contentContainer.addSubview(utilityActionsView)
         contentContainer.addSubview(lifecycleActionsView)
 
         usagePageButtonsView.codexButton.target = self
@@ -1599,10 +1685,13 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         usagePageButtonsView.claudeButton.action = #selector(openClaudeUsagePage)
         usagePageButtonsView.geminiButton.target = self
         usagePageButtonsView.geminiButton.action = #selector(openGeminiUsagePage)
+        usagePageButtonsView.grokButton.target = self
+        usagePageButtonsView.grokButton.action = #selector(openGrokUsagePage)
 
         refreshIntervalControlsView.onCodexChange = { [weak self] in self?.onCodexRefreshIntervalChange?($0) }
         refreshIntervalControlsView.onClaudeChange = { [weak self] in self?.onClaudeRefreshIntervalChange?($0) }
         refreshIntervalControlsView.onGeminiChange = { [weak self] in self?.onGeminiRefreshIntervalChange?($0) }
+        refreshIntervalControlsView.onGrokChange = { [weak self] in self?.onGrokRefreshIntervalChange?($0) }
 
         updateVersionView.updateButton.target = self
         updateVersionView.updateButton.action = #selector(triggerCheckForUpdates)
@@ -1617,21 +1706,20 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         // "항상 보기" is always shown checked there; closing this window is
         // itself the unpin action. The transient dropdown instead hands off
         // to that persistent panel and closes itself.
-        utilityActionsView.buttons[0].target = self
-        utilityActionsView.buttons[0].action = isTransient
+        updateVersionView.alwaysViewButton.target = self
+        updateVersionView.alwaysViewButton.action = isTransient
             ? #selector(toggleAlwaysViewTapped)
             : #selector(closeWindow)
-        utilityActionsView.buttons[1].target = self
-        utilityActionsView.buttons[1].action = #selector(triggerOpenDiagnosticLog)
-        utilityActionsView.buttons[2].target = self
-        utilityActionsView.buttons[2].action = #selector(triggerOpenGitHub)
-
-        lifecycleActionsView.buttons[0].target = self
-        lifecycleActionsView.buttons[0].action = #selector(triggerToggleLaunchAtLogin)
-        lifecycleActionsView.buttons[1].target = self
-        lifecycleActionsView.buttons[1].action = #selector(triggerRestart)
-        lifecycleActionsView.buttons[2].target = self
-        lifecycleActionsView.buttons[2].action = #selector(triggerQuit)
+        lifecycleActionsView.launchButton.target = self
+        lifecycleActionsView.launchButton.action = #selector(triggerToggleLaunchAtLogin)
+        lifecycleActionsView.diagnosticButton.target = self
+        lifecycleActionsView.diagnosticButton.action = #selector(triggerOpenDiagnosticLog)
+        lifecycleActionsView.githubButton.target = self
+        lifecycleActionsView.githubButton.action = #selector(triggerOpenGitHub)
+        lifecycleActionsView.restartButton.target = self
+        lifecycleActionsView.restartButton.action = #selector(triggerRestart)
+        lifecycleActionsView.quitButton.target = self
+        lifecycleActionsView.quitButton.action = #selector(triggerQuit)
     }
 
     required init?(coder: NSCoder) {
@@ -1643,21 +1731,25 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         codexHistory: UsageHistoryStrip?,
         claudeHistory: UsageHistoryStrip?,
         geminiHistory: UsageHistoryStrip?,
+        grokHistory: UsageHistoryStrip?,
         codexRefreshInterval: Int,
         claudeRefreshInterval: Int,
-        geminiRefreshInterval: Int
+        geminiRefreshInterval: Int,
+        grokRefreshInterval: Int
     ) {
         usageView.apply(model)
         let showsHistory = historyView.apply(
             codex: codexHistory,
             claude: claudeHistory,
-            gemini: geminiHistory
+            gemini: geminiHistory,
+            grok: grokHistory
         )
         historyView.isHidden = !showsHistory
         refreshIntervalControlsView.apply(
             codex: codexRefreshInterval,
             claude: claudeRefreshInterval,
-            gemini: geminiRefreshInterval
+            gemini: geminiRefreshInterval,
+            grok: grokRefreshInterval
         )
 
         let historyHeight = showsHistory ? historyView.frame.height : 0
@@ -1666,7 +1758,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         let shareHeight = shareActionsView.frame.height
         let controlsHeight = refreshIntervalControlsView.frame.height
         let versionHeight = updateVersionView.frame.height
-        let utilityHeight = utilityActionsView.frame.height
         let lifecycleHeight = lifecycleActionsView.frame.height
         let contentHeight = Self.topPadding + Self.bottomPadding
             + usageView.frame.height
@@ -1675,18 +1766,15 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
             + Self.sectionGap + buttonsHeight
             + Self.sectionGap + shareHeight
             + Self.sectionGap + versionHeight
-            + Self.sectionGap + utilityHeight
             + Self.sectionGap + lifecycleHeight
         let contentWidth = UsagePanelLayout.viewWidth + Self.horizontalPadding * 2
 
         // Stacked bottom-up so the top-down reading order matches the status
         // menu exactly: usage panel, refresh controls, history, usage-page
-        // buttons, version/opacity, utility, lifecycle.
+        // buttons, primary settings, lifecycle/support actions.
         var y = Self.bottomPadding
         lifecycleActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
         y += lifecycleHeight + Self.sectionGap
-        utilityActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += utilityHeight + Self.sectionGap
         updateVersionView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
         y += versionHeight + Self.sectionGap
         shareActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
@@ -1701,7 +1789,15 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
         if let window {
             let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
-            window.setContentSize(NSSize(width: contentWidth, height: contentHeight))
+            naturalContentSize = NSSize(width: contentWidth, height: contentHeight)
+            let scale = isTransient ? 1 : contentScale
+            window.aspectRatio = naturalContentSize
+            window.contentMinSize = scaledContentSize(scale: isTransient ? 1 : Self.minimumContentScale)
+            window.contentMaxSize = scaledContentSize(scale: isTransient ? 1 : Self.maximumContentScale)
+            isApplyingWindowSize = true
+            window.setContentSize(scaledContentSize(scale: scale))
+            isApplyingWindowSize = false
+            updateScaledContentLayout()
             if hasPositionedWindow {
                 window.setFrameTopLeftPoint(topLeft)
             }
@@ -1717,10 +1813,10 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         alwaysViewEnabled: Bool
     ) {
         updateVersionView.versionButton.title = versionText
-        utilityActionsView.buttons[0].title = (isTransient ? alwaysViewEnabled : true)
+        updateVersionView.alwaysViewButton.title = (isTransient ? alwaysViewEnabled : true)
             ? "✓ 항상 보기"
             : "항상 보기"
-        lifecycleActionsView.buttons[0].title = launchAtLoginEnabled ? "✓ 자동 실행" : "자동 실행"
+        lifecycleActionsView.launchButton.title = launchAtLoginEnabled ? "✓ 자동 실행" : "자동 실행"
     }
 
     func show() {
@@ -1746,8 +1842,8 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         hasPositionedWindow = true
     }
 
-    func updateRefreshCountdown(codex: Int?, claude: Int?, gemini: Int?) {
-        refreshIntervalControlsView.updateCountdown(codex: codex, claude: claude, gemini: gemini)
+    func updateRefreshCountdown(codex: Int?, claude: Int?, gemini: Int?, grok: Int?) {
+        refreshIntervalControlsView.updateCountdown(codex: codex, claude: claude, gemini: gemini, grok: grok)
     }
 
     func setShareMenu(_ menu: NSMenu) {
@@ -1767,6 +1863,35 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         removeDismissMonitors()
         onClose?()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard !isTransient, !isApplyingWindowSize,
+              let contentView = window?.contentView,
+              naturalContentSize.width > 0 else { return }
+        contentScale = Self.normalizedContentScale(
+            contentView.bounds.width / naturalContentSize.width
+        )
+        updateScaledContentLayout()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard !isTransient else { return }
+        UserDefaults.standard.set(Double(contentScale), forKey: Self.contentScaleDefaultsKey)
+    }
+
+    private func scaledContentSize(scale: CGFloat) -> NSSize {
+        NSSize(
+            width: naturalContentSize.width * scale,
+            height: naturalContentSize.height * scale
+        )
+    }
+
+    private func updateScaledContentLayout() {
+        guard let rootView = window?.contentView else { return }
+        containerView.frame = rootView.bounds
+        contentContainer.frame = rootView.bounds
+        contentContainer.bounds = NSRect(origin: .zero, size: naturalContentSize)
     }
 
     /// Ends the transient dropdown's tracking session the same way an
@@ -1825,6 +1950,10 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func openGeminiUsagePage() {
         NSWorkspace.shared.open(UsageDashboardURLs.gemini)
+    }
+
+    @objc private func openGrokUsagePage() {
+        NSWorkspace.shared.open(UsageDashboardURLs.grok)
     }
 
     @objc private func closeWindow() {
@@ -1919,9 +2048,10 @@ enum UsageDashboardURLs {
     static let codex = URL(string: "https://chatgpt.com/codex/settings/usage")!
     static let claude = URL(string: "https://claude.ai/settings/usage")!
     static let gemini = URL(string: "https://gemini.google.com/usage")!
+    static let grok = URL(string: "https://grok.com/?_s=billing")!
 }
 
-/// Compact three-button row linking to the Codex, Claude, and Gemini usage
+/// Compact four-button row linking to each provider's usage page
 /// web pages, replacing separate vertical menu rows with one native view
 /// hosted as a single `NSMenuItem`, directly above the refresh item. Shares
 /// the split usage panel's own column geometry.
@@ -1933,6 +2063,7 @@ final class UsagePageButtonsView: NSView {
     let codexButton: RolloverButton
     let claudeButton: RolloverButton
     let geminiButton: RolloverButton
+    let grokButton: RolloverButton
     private let dividers: [NSView] = (0..<UsagePanelLayout.columnCount - 1).map { _ in
         let view = NSView()
         view.wantsLayer = true
@@ -1946,16 +2077,19 @@ final class UsagePageButtonsView: NSView {
         codexButton = Self.makeButton(title: "Codex 사용량 페이지", accessibilityLabel: "Codex 사용량 페이지 열기")
         claudeButton = Self.makeButton(title: "Claude 사용량 페이지", accessibilityLabel: "Claude 사용량 페이지 열기")
         geminiButton = Self.makeButton(title: "Gemini 사용량 페이지", accessibilityLabel: "Gemini 사용량 페이지 열기")
+        grokButton = Self.makeButton(title: "Grok 사용량 페이지", accessibilityLabel: "Grok 사용량 페이지 열기")
         super.init(frame: NSRect(x: 0, y: 0, width: Self.viewWidth, height: Self.viewHeight))
 
         addSubview(codexButton)
         addSubview(claudeButton)
         addSubview(geminiButton)
+        addSubview(grokButton)
         // Quiet/neutral at rest; each button only takes on its provider's
         // brand color while the pointer is over it.
         codexButton.hoverTintColor = UsageBrandColors.codex
         claudeButton.hoverTintColor = UsageBrandColors.claude
         geminiButton.hoverTintColor = UsageBrandColors.geminiText
+        grokButton.hoverTintColor = GrokBrandColor.mark
         dividers.forEach(addSubview)
         setAccessibilityElement(false)
         layoutButtons()
@@ -1978,7 +2112,7 @@ final class UsagePageButtonsView: NSView {
         let inset = UsagePanelLayout.controlVerticalInset
         let buttonHeight = Self.viewHeight - inset * 2
         let y = inset
-        let buttons = [codexButton, claudeButton, geminiButton]
+        let buttons = [codexButton, claudeButton, geminiButton, grokButton]
 
         for (index, button) in buttons.enumerated() {
             button.frame = NSRect(x: UsagePanelLayout.columnX[index], y: y, width: UsagePanelLayout.columnWidth, height: buttonHeight)
@@ -2064,7 +2198,7 @@ private final class IntervalControlButton: RolloverButton {
     }
 }
 
-/// Three aligned refresh-cadence controls shared by the status menu and the
+/// Four aligned refresh-cadence controls shared by the status menu and the
 /// persistent panel. Each exposes every supported value in an explicit list
 /// instead of making the user cycle through them one click at a time, and
 /// shows a live per-second countdown while closed.
@@ -2075,27 +2209,31 @@ final class RefreshIntervalControlsView: NSView {
     private let codexButton = IntervalControlButton()
     private let claudeButton = IntervalControlButton()
     private let geminiButton = IntervalControlButton()
+    private let grokButton = IntervalControlButton()
 
     var onCodexChange: ((Int) -> Void)?
     var onClaudeChange: ((Int) -> Void)?
     var onGeminiChange: ((Int) -> Void)?
+    var onGrokChange: ((Int) -> Void)?
 
     override var isFlipped: Bool { true }
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
-        let controls = [codexButton, claudeButton, geminiButton]
+        let controls = [codexButton, claudeButton, geminiButton, grokButton]
         let optionSets = [
             UsageCore.refreshIntervalOptions,
             UsageCore.claudeRefreshIntervalOptions,
-            UsageCore.geminiRefreshIntervalOptions
+            UsageCore.geminiRefreshIntervalOptions,
+            UsageCore.grokRefreshIntervalOptions
         ]
-        let labels = ["Codex", "Claude", "Gemini"]
-        let accessibilityLabels = ["Codex 갱신 시간", "Claude 갱신 시간", "Gemini 갱신 시간"]
+        let labels = ["Codex", "Claude", "Gemini", "Grok"]
+        let accessibilityLabels = ["Codex 갱신 시간", "Claude 갱신 시간", "Gemini 갱신 시간", "Grok 갱신 시간"]
         let callbacks: [(Int) -> Void] = [
             { [weak self] in self?.onCodexChange?($0) },
             { [weak self] in self?.onClaudeChange?($0) },
-            { [weak self] in self?.onGeminiChange?($0) }
+            { [weak self] in self?.onGeminiChange?($0) },
+            { [weak self] in self?.onGrokChange?($0) }
         ]
         for index in controls.indices {
             configure(
@@ -2110,6 +2248,7 @@ final class RefreshIntervalControlsView: NSView {
         codexButton.contentTintColor = UsageBrandColors.codex
         claudeButton.contentTintColor = UsageBrandColors.claude
         geminiButton.contentTintColor = UsageBrandColors.geminiText
+        grokButton.contentTintColor = GrokBrandColor.mark
         layoutControls()
     }
 
@@ -2117,17 +2256,19 @@ final class RefreshIntervalControlsView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func apply(codex: Int, claude: Int, gemini: Int) {
+    func apply(codex: Int, claude: Int, gemini: Int, grok: Int) {
         codexButton.selectedSeconds = codex
         claudeButton.selectedSeconds = claude
         geminiButton.selectedSeconds = gemini
+        grokButton.selectedSeconds = grok
     }
 
     /// Drives the live per-second countdown shown on each closed button.
-    func updateCountdown(codex: Int?, claude: Int?, gemini: Int?) {
+    func updateCountdown(codex: Int?, claude: Int?, gemini: Int?, grok: Int?) {
         codexButton.updateDisplay(remainingSeconds: codex)
         claudeButton.updateDisplay(remainingSeconds: claude)
         geminiButton.updateDisplay(remainingSeconds: gemini)
+        grokButton.updateDisplay(remainingSeconds: grok)
     }
 
     private func configure(
@@ -2149,7 +2290,7 @@ final class RefreshIntervalControlsView: NSView {
     }
 
     private func layoutControls() {
-        let controls = [codexButton, claudeButton, geminiButton]
+        let controls = [codexButton, claudeButton, geminiButton, grokButton]
         let inset = UsagePanelLayout.controlVerticalInset
         for (index, button) in controls.enumerated() {
             button.frame = NSRect(
@@ -2212,7 +2353,7 @@ final class MenuActionRowView: NSView {
         let sidePadding = UsagePanelLayout.sidePadding
         let verticalInset = UsagePanelLayout.controlVerticalInset
 
-        if buttons.count == UsagePanelLayout.columnCount {
+        if buttons.count <= UsagePanelLayout.columnCount {
             for (index, button) in buttons.enumerated() {
                 button.frame = NSRect(
                     x: UsagePanelLayout.columnX[index],
@@ -2253,14 +2394,100 @@ final class MenuActionRowView: NSView {
     }
 }
 
-/// The row pairing "check for updates" with the current version string. A
-/// compact slider sits immediately to the right of the version text so both
-/// usage panels' opacity can be adjusted from the same row, per the same
-/// left/right button geometry `MenuActionRowView` uses elsewhere.
+/// Four-column lifecycle row. The second provider-width cell is split evenly
+/// between the closely related support destinations, keeping the outer grid
+/// aligned with every row above it.
+@MainActor
+final class LifecycleActionsRowView: NSView {
+    private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
+    private static let innerGap: CGFloat = 2
+
+    let launchButton = LifecycleActionsRowView.makeButton(title: "자동 실행")
+    let diagnosticButton = LifecycleActionsRowView.makeButton(title: "진단")
+    let githubButton = LifecycleActionsRowView.makeButton(title: "GitHub")
+    let restartButton = LifecycleActionsRowView.makeButton(title: "다시 시작")
+    let quitButton = LifecycleActionsRowView.makeButton(title: "종료")
+    private let columnDividers: [NSView] = (0..<UsagePanelLayout.columnCount - 1).map { _ in
+        LifecycleActionsRowView.makeDivider()
+    }
+    private let supportDivider = LifecycleActionsRowView.makeDivider()
+
+    override var isFlipped: Bool { true }
+
+    init() {
+        super.init(frame: NSRect(
+            x: 0,
+            y: 0,
+            width: UsagePanelLayout.viewWidth,
+            height: Self.viewHeight
+        ))
+        [launchButton, diagnosticButton, githubButton, restartButton, quitButton].forEach(addSubview)
+        columnDividers.forEach(addSubview)
+        addSubview(supportDivider)
+        layoutButtons()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private static func makeButton(title: String) -> NSButton {
+        let button = RolloverButton(title: title, target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.font = .systemFont(ofSize: 12, weight: .regular)
+        button.contentTintColor = .controlAccentColor
+        button.alignment = .center
+        return button
+    }
+
+    private static func makeDivider() -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        return view
+    }
+
+    private func layoutButtons() {
+        let inset = UsagePanelLayout.controlVerticalInset
+        let buttonHeight = Self.viewHeight - inset * 2
+        let columnWidth = UsagePanelLayout.columnWidth
+        launchButton.frame = NSRect(x: UsagePanelLayout.columnX[0], y: inset, width: columnWidth, height: buttonHeight)
+
+        let supportX = UsagePanelLayout.columnX[1]
+        let halfWidth = (columnWidth - Self.innerGap) / 2
+        diagnosticButton.frame = NSRect(x: supportX, y: inset, width: halfWidth, height: buttonHeight)
+        githubButton.frame = NSRect(
+            x: supportX + halfWidth + Self.innerGap,
+            y: inset,
+            width: halfWidth,
+            height: buttonHeight
+        )
+        restartButton.frame = NSRect(x: UsagePanelLayout.columnX[2], y: inset, width: columnWidth, height: buttonHeight)
+        quitButton.frame = NSRect(x: UsagePanelLayout.columnX[3], y: inset, width: columnWidth, height: buttonHeight)
+
+        for (index, divider) in columnDividers.enumerated() {
+            divider.frame = NSRect(
+                x: UsagePanelLayout.dividerX(after: index),
+                y: 5,
+                width: 1,
+                height: Self.viewHeight - 10
+            )
+        }
+        supportDivider.frame = NSRect(
+            x: supportX + columnWidth / 2,
+            y: 7,
+            width: 1,
+            height: Self.viewHeight - 14
+        )
+    }
+}
+
+/// Four-column settings row: always-on-top, update, current version, opacity.
 @MainActor
 final class VersionOpacityRowView: NSView {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
 
+    let alwaysViewButton: NSButton
     let updateButton: NSButton
     let versionButton: NSButton
     let opacitySlider: NSSlider
@@ -2270,7 +2497,8 @@ final class VersionOpacityRowView: NSView {
 
     override var isFlipped: Bool { true }
 
-    init(updateTitle: String, versionTitle: String) {
+    init(alwaysTitle: String, updateTitle: String, versionTitle: String) {
+        alwaysViewButton = Self.makeButton(title: alwaysTitle)
         updateButton = Self.makeButton(title: updateTitle)
         versionButton = Self.makeButton(title: versionTitle)
         opacitySlider = NSSlider(
@@ -2280,13 +2508,14 @@ final class VersionOpacityRowView: NSView {
             target: nil,
             action: nil
         )
-        dividers = (0..<2).map { _ in
+        dividers = (0..<UsagePanelLayout.columnCount - 1).map { _ in
             let view = NSView()
             view.wantsLayer = true
             view.layer?.backgroundColor = NSColor.separatorColor.cgColor
             return view
         }
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
+        addSubview(alwaysViewButton)
         addSubview(updateButton)
         addSubview(versionButton)
         addSubview(opacityLabel)
@@ -2330,27 +2559,33 @@ final class VersionOpacityRowView: NSView {
 
     private func layoutSubviews() {
         let verticalInset = UsagePanelLayout.controlVerticalInset
-        updateButton.frame = NSRect(
+        alwaysViewButton.frame = NSRect(
             x: UsagePanelLayout.columnX[0],
             y: verticalInset,
             width: UsagePanelLayout.columnWidth,
             height: Self.viewHeight - verticalInset * 2
         )
-        versionButton.frame = NSRect(
+        updateButton.frame = NSRect(
             x: UsagePanelLayout.columnX[1],
             y: verticalInset,
             width: UsagePanelLayout.columnWidth,
             height: Self.viewHeight - verticalInset * 2
         )
-        let thirdX = UsagePanelLayout.columnX[2]
-        opacityLabel.frame = NSRect(x: thirdX + 8, y: 8, width: 42, height: 16)
+        versionButton.frame = NSRect(
+            x: UsagePanelLayout.columnX[2],
+            y: verticalInset,
+            width: UsagePanelLayout.columnWidth,
+            height: Self.viewHeight - verticalInset * 2
+        )
+        let opacityX = UsagePanelLayout.columnX[3]
+        opacityLabel.frame = NSRect(x: opacityX + 8, y: 8, width: 42, height: 16)
         opacitySlider.frame = NSRect(
-            x: thirdX + 52,
+            x: opacityX + 52,
             y: (Self.viewHeight - 20) / 2,
             width: 80,
             height: 20
         )
-        opacityValueLabel.frame = NSRect(x: thirdX + 138, y: 8, width: 32, height: 16)
+        opacityValueLabel.frame = NSRect(x: opacityX + 138, y: 8, width: 32, height: 16)
 
         for (index, divider) in dividers.enumerated() {
             divider.frame = NSRect(
@@ -2459,6 +2694,7 @@ enum ClaudeUsageFetchOutcome {
 enum ClaudeOAuthUsageClient {
     private static let lastFetchDefaultsKey = "claudeUsageLastFetchAt"
     private static let rateLimitRetryDefaultsKey = "claudeUsageRateLimitRetryAt"
+    private static let consecutiveRateLimitsDefaultsKey = "claudeUsageConsecutiveRateLimits"
     private static let tokenURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library")
         .appendingPathComponent("Application Support")
@@ -2497,6 +2733,10 @@ enum ClaudeOAuthUsageClient {
     /// retrying into another rate limit.
     @MainActor private static var rateLimitRetryAt: Date? =
         UserDefaults.standard.object(forKey: rateLimitRetryDefaultsKey) as? Date
+    /// Persist the breaker step alongside its deadline so relaunching CCMB
+    /// cannot collapse a multi-hour circuit back to the first one-hour step.
+    @MainActor private static var consecutiveRateLimits =
+        min(max(UserDefaults.standard.integer(forKey: consecutiveRateLimitsDefaultsKey), 0), 4)
 
     /// - Parameter minimumInterval: Floor on how often this endpoint is
     ///   actually hit, independent of how often the caller asks. The caller
@@ -2531,12 +2771,16 @@ enum ClaudeOAuthUsageClient {
     private static func performFetch(token: String, completion: @escaping (ClaudeUsageFetchOutcome) -> Void) {
         isFetchInFlight = true
         let fetchDate = Date()
+        let nextRateLimitCount = min(consecutiveRateLimits + 1, 4)
         lastFetchDate = fetchDate
         UserDefaults.standard.set(fetchDate, forKey: lastFetchDefaultsKey)
 
         var request = URLRequest(url: usageURL, cachePolicy: .reloadIgnoringLocalCacheData)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "development"
+        request.setValue("CCMB/\(appVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
         URLSession.shared.dataTask(with: request) { data, response, _ in
@@ -2552,6 +2796,7 @@ enum ClaudeOAuthUsageClient {
                 } else if http.statusCode == 429 {
                     let backoffSeconds = ClaudeUsageCore.rateLimitBackoffSeconds(
                         retryAfterHeader: http.value(forHTTPHeaderField: "Retry-After"),
+                        consecutiveRateLimits: nextRateLimitCount,
                         now: now
                     )
                     outcome = .rateLimited(retryAt: now.addingTimeInterval(backoffSeconds))
@@ -2567,6 +2812,8 @@ enum ClaudeOAuthUsageClient {
                 case .success(let snapshot):
                     rateLimitRetryAt = nil
                     UserDefaults.standard.removeObject(forKey: rateLimitRetryDefaultsKey)
+                    consecutiveRateLimits = 0
+                    UserDefaults.standard.removeObject(forKey: consecutiveRateLimitsDefaultsKey)
                     fetchProfileIfNeeded(token: token) { accountInfo in
                         completion(.success(accountInfo.map(snapshot.withAccount) ?? snapshot))
                     }
@@ -2576,6 +2823,12 @@ enum ClaudeOAuthUsageClient {
                 case .rateLimited(let retryAt):
                     rateLimitRetryAt = retryAt
                     UserDefaults.standard.set(retryAt, forKey: rateLimitRetryDefaultsKey)
+                    consecutiveRateLimits = nextRateLimitCount
+                    UserDefaults.standard.set(nextRateLimitCount, forKey: consecutiveRateLimitsDefaultsKey)
+                    // The CLI may rotate its token while the circuit is open.
+                    // Re-resolve it for the single half-open probe instead of
+                    // pinning the token that received the 429.
+                    cachedAccessToken = nil
                     completion(outcome)
                 default:
                     completion(outcome)
@@ -2887,7 +3140,8 @@ enum ClaudeOAuthUsageClient {
     /// via `@testable import` without a live network fetch.
     static func parse(_ data: Data) -> ClaudeUsageSnapshot? {
         guard let response = try? JSONDecoder().decode(UsageResponse.self, from: data) else { return nil }
-        return ClaudeUsageSnapshot(
+        let snapshot = ClaudeUsageSnapshot(
+            quotaSource: "anthropic-oauth-usage",
             model: nil,
             weeklyUsedPercent: response.sevenDay?.value,
             weeklyResetsAt: parseResetsAt(response.sevenDay?.resetsAt),
@@ -2900,5 +3154,9 @@ enum ClaudeOAuthUsageClient {
             modelWeeklyLimits: parseModelWeeklyLimits(response),
             extraUsage: parseExtraUsage(response.extraUsage)
         )
+        // A syntactically valid 200 with no core quota is not a successful
+        // usage observation. Treat it as a decode failure so it cannot close
+        // an open 429 circuit or make an older value look freshly verified.
+        return snapshot.hasRateLimitUsage ? snapshot : nil
     }
 }

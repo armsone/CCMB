@@ -106,19 +106,22 @@ struct UsageConsumptionHistoryStore: Codable, Equatable {
     var codex: UsageConsumptionTracker
     var claude: UsageConsumptionTracker
     var gemini: UsageConsumptionTracker
+    var grok: UsageConsumptionTracker
 
     enum CodingKeys: String, CodingKey {
-        case codex, claude, gemini
+        case codex, claude, gemini, grok
     }
 
     init(
         codex: UsageConsumptionTracker = UsageConsumptionTracker(),
         claude: UsageConsumptionTracker = UsageConsumptionTracker(),
-        gemini: UsageConsumptionTracker = UsageConsumptionTracker()
+        gemini: UsageConsumptionTracker = UsageConsumptionTracker(),
+        grok: UsageConsumptionTracker = UsageConsumptionTracker()
     ) {
         self.codex = codex
         self.claude = claude
         self.gemini = gemini
+        self.grok = grok
     }
 
     init(from decoder: Decoder) throws {
@@ -126,6 +129,7 @@ struct UsageConsumptionHistoryStore: Codable, Equatable {
         codex = try container.decode(UsageConsumptionTracker.self, forKey: .codex)
         claude = try container.decode(UsageConsumptionTracker.self, forKey: .claude)
         gemini = (try? container.decodeIfPresent(UsageConsumptionTracker.self, forKey: .gemini)) ?? UsageConsumptionTracker()
+        grok = (try? container.decodeIfPresent(UsageConsumptionTracker.self, forKey: .grok)) ?? UsageConsumptionTracker()
     }
 }
 
@@ -267,14 +271,16 @@ enum UsageCore {
     /// the persistence normalizer, and the tests all read this one list so a
     /// new cadence cannot be added in one place and forgotten in another.
     static let refreshIntervalOptions: [Int] = [0, 30, 60, 180, 300, 600]
-    static let claudeRefreshIntervalOptions: [Int] = [0, 300, 600, 900, 1_800, 3_600]
+    static let claudeRefreshIntervalOptions: [Int] = [0, 600, 900, 1_800, 3_600]
     static let geminiRefreshIntervalOptions: [Int] = [0, 120, 300, 600, 900, 1_800]
+    static let grokRefreshIntervalOptions: [Int] = [0, 120, 300, 600, 900, 1_800]
 
     /// Provider-specific defaults balance freshness with each source's cost.
     /// Applies to a fresh install only; a stored valid choice always wins.
     static let defaultRefreshIntervalSeconds = 30
     static let defaultClaudeRefreshIntervalSeconds = 600
     static let defaultGeminiRefreshIntervalSeconds = 300
+    static let defaultGrokRefreshIntervalSeconds = 300
 
     static func normalizedRefreshInterval(_ seconds: Int?) -> TimeInterval {
         guard let seconds, refreshIntervalOptions.contains(seconds) else {
@@ -293,6 +299,13 @@ enum UsageCore {
     static func normalizedGeminiRefreshInterval(_ seconds: Int?) -> TimeInterval {
         guard let seconds, geminiRefreshIntervalOptions.contains(seconds) else {
             return TimeInterval(defaultGeminiRefreshIntervalSeconds)
+        }
+        return TimeInterval(seconds)
+    }
+
+    static func normalizedGrokRefreshInterval(_ seconds: Int?) -> TimeInterval {
+        guard let seconds, grokRefreshIntervalOptions.contains(seconds) else {
+            return TimeInterval(defaultGrokRefreshIntervalSeconds)
         }
         return TimeInterval(seconds)
     }
@@ -732,6 +745,9 @@ struct ClaudeAccountInfo: Sendable, Equatable {
 /// Mirrors the JSON that `claude-statusline.sh` writes from Claude Code's
 /// official statusLine payload (`rate_limits`, `context_window`, `cost`).
 struct ClaudeUsageSnapshot {
+    /// Source of the quota percentages and their `publishedAt` timestamp.
+    /// Other optional metadata may have been backfilled from an older source.
+    let quotaSource: String?
     let model: String?
     let weeklyUsedPercent: Double?
     let weeklyResetsAt: Date?
@@ -746,6 +762,7 @@ struct ClaudeUsageSnapshot {
     let account: ClaudeAccountInfo?
 
     init(
+        quotaSource: String? = nil,
         model: String? = nil,
         weeklyUsedPercent: Double? = nil,
         weeklyResetsAt: Date? = nil,
@@ -759,6 +776,7 @@ struct ClaudeUsageSnapshot {
         extraUsage: ClaudeExtraUsage? = nil,
         account: ClaudeAccountInfo? = nil
     ) {
+        self.quotaSource = quotaSource
         self.model = model
         self.weeklyUsedPercent = weeklyUsedPercent
         self.weeklyResetsAt = weeklyResetsAt
@@ -777,6 +795,7 @@ struct ClaudeUsageSnapshot {
     /// fetch's result without reconstructing every other field by hand.
     func withAccount(_ account: ClaudeAccountInfo?) -> ClaudeUsageSnapshot {
         ClaudeUsageSnapshot(
+            quotaSource: quotaSource,
             model: model,
             weeklyUsedPercent: weeklyUsedPercent,
             weeklyResetsAt: weeklyResetsAt,
@@ -798,8 +817,12 @@ struct ClaudeUsageSnapshot {
 }
 
 enum ClaudeUsageCore {
-    static let sharedFreshForSeconds: TimeInterval = 300
-    static let minimumRequestIntervalSeconds: TimeInterval = 90
+    /// OAuth is intentionally slower than UI refresh. Its freshness window
+    /// includes one minute of timer leeway so a healthy ten-minute cadence
+    /// does not look stale immediately before the next scheduled read.
+    static let sharedFreshForSeconds: TimeInterval = 660
+    static let statusLineFreshForSeconds: TimeInterval = 300
+    static let minimumRequestIntervalSeconds: TimeInterval = 600
 
     static func remainingPercent(from usedPercent: Double?) -> Double? {
         guard let usedPercent else { return nil }
@@ -838,11 +861,18 @@ enum ClaudeUsageCore {
         return now.timeIntervalSince(lastFetchDate) < minimumInterval - timerTolerance
     }
 
-    /// Conservative fallback when a 429 response omits (or sends an
-    /// unparseable) `Retry-After` — long enough to stop hammering the
-    /// endpoint, short enough to recover within a couple of Codex's own
-    /// refresh cycles.
-    static let defaultRateLimitBackoffSeconds: TimeInterval = 90
+    /// The OAuth usage endpoint is undocumented and has produced persistent
+    /// 429s with missing or zero Retry-After values. Open a real circuit on
+    /// the first 429 instead of turning the normal ten-minute cadence into a
+    /// tight retry loop.
+    static let defaultRateLimitBackoffSeconds: TimeInterval = 3_600
+    static let maximumInternalRateLimitBackoffSeconds: TimeInterval = 21_600
+
+    static func circuitBreakerBackoffSeconds(consecutiveRateLimits: Int) -> TimeInterval {
+        let step = max(1, min(consecutiveRateLimits, 4))
+        let multiplier = pow(2.0, Double(step - 1))
+        return min(defaultRateLimitBackoffSeconds * multiplier, maximumInternalRateLimitBackoffSeconds)
+    }
 
     private static let httpDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -872,10 +902,14 @@ enum ClaudeUsageCore {
     /// Retry-After value to actually back off by. A shorter server hint is
     /// raised to the same conservative floor so the client never resumes an
     /// already-limited endpoint too aggressively.
-    static func rateLimitBackoffSeconds(retryAfterHeader: String?, now: Date) -> TimeInterval {
+    static func rateLimitBackoffSeconds(
+        retryAfterHeader: String?,
+        consecutiveRateLimits: Int = 1,
+        now: Date
+    ) -> TimeInterval {
         max(
-            parseRetryAfterSeconds(retryAfterHeader, now: now) ?? defaultRateLimitBackoffSeconds,
-            defaultRateLimitBackoffSeconds
+            parseRetryAfterSeconds(retryAfterHeader, now: now) ?? 0,
+            circuitBreakerBackoffSeconds(consecutiveRateLimits: consecutiveRateLimits)
         )
     }
 
@@ -910,6 +944,7 @@ enum ClaudeUsageCore {
         guard let snapshot else {
             return [
                 "status": "unavailable",
+                "source": "unavailable",
                 "weeklyRemainingPercent": NSNull(),
                 "weeklyUsedPercent": NSNull(),
                 "weeklyResetsAt": NSNull(),
@@ -928,8 +963,12 @@ enum ClaudeUsageCore {
         }
 
         let ageSeconds = snapshot.publishedAt.map { max(0, Int(now.timeIntervalSince($0))) }
+        let freshForSeconds = snapshot.quotaSource == "claude-statusline"
+            ? statusLineFreshForSeconds
+            : sharedFreshForSeconds
         return [
             "status": snapshot.weeklyUsedPercent == nil && snapshot.fiveHourUsedPercent == nil ? "partial" : "ok",
+            "source": snapshot.quotaSource ?? "unknown",
             "weeklyRemainingPercent": remainingPercent(from: snapshot.weeklyUsedPercent) ?? NSNull(),
             "weeklyUsedPercent": snapshot.weeklyUsedPercent ?? NSNull(),
             "weeklyResetsAt": snapshot.weeklyResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
@@ -939,11 +978,11 @@ enum ClaudeUsageCore {
             "model": snapshot.model ?? NSNull(),
             "fetchedAt": snapshot.publishedAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
             "ageSeconds": ageSeconds ?? NSNull(),
-            "freshForSeconds": Int(sharedFreshForSeconds),
+            "freshForSeconds": Int(freshForSeconds),
             "fresh": isFresh(
                 publishedAt: snapshot.publishedAt,
                 now: now,
-                freshForSeconds: sharedFreshForSeconds
+                freshForSeconds: freshForSeconds
             ),
             "modelWeeklyLimits": snapshot.modelWeeklyLimits.map { limit -> [String: Any] in
                 [
@@ -972,6 +1011,9 @@ enum ClaudeUsageCore {
 
     static func refreshedSharedPayload(_ payload: [String: Any], now: Date = Date()) -> [String: Any] {
         var output = payload
+        if payload["source"] == nil {
+            output["source"] = "legacy-ccmb-cache"
+        }
         let fetchedAt = (payload["fetchedAt"] as? String).flatMap(sharedISO8601Formatter.date(from:))
         let freshForSeconds = (payload["freshForSeconds"] as? NSNumber)?.doubleValue
             ?? sharedFreshForSeconds
@@ -1020,7 +1062,12 @@ enum ClaudeUsageCore {
             )
         }
 
+        let storedSource = payload["source"] as? String
+        let restoredSource = storedSource == nil || storedSource == "unknown"
+            ? "legacy-ccmb-cache"
+            : storedSource
         let snapshot = ClaudeUsageSnapshot(
+            quotaSource: restoredSource,
             model: payload["model"] as? String,
             weeklyUsedPercent: number("weeklyUsedPercent"),
             weeklyResetsAt: date("weeklyResetsAt"),
@@ -1055,6 +1102,7 @@ enum ClaudeUsageCore {
     static func merge(preferred: ClaudeUsageSnapshot, fallback: ClaudeUsageSnapshot?) -> ClaudeUsageSnapshot {
         guard let fallback else { return preferred }
         return ClaudeUsageSnapshot(
+            quotaSource: preferred.quotaSource ?? fallback.quotaSource,
             model: preferred.model ?? fallback.model,
             weeklyUsedPercent: preferred.weeklyUsedPercent ?? fallback.weeklyUsedPercent,
             weeklyResetsAt: preferred.weeklyResetsAt ?? fallback.weeklyResetsAt,
@@ -1093,6 +1141,7 @@ enum ClaudeUsageCore {
             // it is newer. Do not make an old missing quota look freshly
             // updated by backfilling it from a prior OAuth snapshot.
             return ClaudeUsageSnapshot(
+                quotaSource: cache.quotaSource ?? current.quotaSource,
                 model: cache.model ?? current.model,
                 weeklyUsedPercent: cache.weeklyUsedPercent,
                 weeklyResetsAt: cache.weeklyResetsAt,
@@ -1112,6 +1161,7 @@ enum ClaudeUsageCore {
         // first Claude response. Adopt that metadata without refreshing the
         // timestamp attached to older quota values.
         return ClaudeUsageSnapshot(
+            quotaSource: current.quotaSource,
             model: cache.model ?? current.model,
             weeklyUsedPercent: current.weeklyUsedPercent,
             weeklyResetsAt: current.weeklyResetsAt,
@@ -1126,4 +1176,350 @@ enum ClaudeUsageCore {
             account: current.account
         )
     }
+}
+
+/// Combines Grok's weekly `creditUsagePercent` window with its optional
+/// monthly fallback into one snapshot, mirroring `GeminiUsageSnapshot`'s
+/// shape so the shared-file and panel code can follow the same conventions
+/// for a fourth provider.
+struct GrokUsageSnapshot: Sendable, Equatable {
+    let weeklyUsedPercent: Double?
+    let weeklyResetsAt: Date?
+    let monthlyUsedPercent: Double?
+    let monthlyResetsAt: Date?
+    /// Grok's billing API reports these monetary credit values in cents.
+    /// CCMB normalizes them to display credits (for example, 280 -> 2.80).
+    let monthlyUsedCredits: Double?
+    let extraCreditBalance: Double?
+    let subscriptionTier: String?
+    let publishedAt: Date?
+    /// Non-secret identity read from the local `auth.json` entry. The access
+    /// token itself never becomes part of this snapshot.
+    let accountEmail: String?
+
+    init(
+        weeklyUsedPercent: Double? = nil,
+        weeklyResetsAt: Date? = nil,
+        monthlyUsedPercent: Double? = nil,
+        monthlyResetsAt: Date? = nil,
+        monthlyUsedCredits: Double? = nil,
+        extraCreditBalance: Double? = nil,
+        subscriptionTier: String? = nil,
+        publishedAt: Date? = nil,
+        accountEmail: String? = nil
+    ) {
+        self.weeklyUsedPercent = weeklyUsedPercent
+        self.weeklyResetsAt = weeklyResetsAt
+        self.monthlyUsedPercent = monthlyUsedPercent
+        self.monthlyResetsAt = monthlyResetsAt
+        self.monthlyUsedCredits = monthlyUsedCredits
+        self.extraCreditBalance = extraCreditBalance
+        self.subscriptionTier = subscriptionTier
+        self.publishedAt = publishedAt
+        self.accountEmail = accountEmail
+    }
+
+    var hasUsage: Bool {
+        weeklyUsedPercent != nil
+            || monthlyUsedPercent != nil
+            || monthlyUsedCredits != nil
+            || extraCreditBalance != nil
+            || subscriptionTier != nil
+    }
+}
+
+/// Pure parsing and shared-payload logic for the Grok CLI's `/v1/billing`
+/// proxy endpoint. Has no knowledge of how the request is issued or how the
+/// local OAuth token is read, so it is fully testable without a live fetch
+/// or a real `auth.json`.
+enum GrokUsageCore {
+    static let sharedFreshForSeconds: TimeInterval = 300
+    static let minimumRequestIntervalSeconds: TimeInterval = 120
+    static let weeklyPeriodType = "USAGE_PERIOD_TYPE_WEEKLY"
+
+    static func remainingPercent(from usedPercent: Double?) -> Double? {
+        guard let usedPercent else { return nil }
+        return min(max(100 - usedPercent, 0), 100)
+    }
+
+    static func isFresh(publishedAt: Date?, now: Date, freshForSeconds: TimeInterval) -> Bool {
+        guard let publishedAt else { return false }
+        return now.timeIntervalSince(publishedAt) <= freshForSeconds
+    }
+
+    static func shouldThrottleFetch(minimumInterval: TimeInterval, lastFetchDate: Date?, now: Date) -> Bool {
+        guard minimumInterval > 0, let lastFetchDate else { return false }
+        let timerTolerance = min(1, minimumInterval * 0.05)
+        return now.timeIntervalSince(lastFetchDate) < minimumInterval - timerTolerance
+    }
+
+    /// True only when `currentPeriod` is an exact-bounds match for the
+    /// account's own weekly billing period. This is the one confirmed shape
+    /// in which the live endpoint omits `creditUsagePercent` entirely to mean
+    /// zero used, rather than the field being merely missing/unreliable.
+    static func isConfirmedWeeklyPeriod(
+        periodType: String?,
+        periodStart: String?,
+        periodEnd: String?,
+        billingPeriodStart: String?,
+        billingPeriodEnd: String?
+    ) -> Bool {
+        guard periodType == weeklyPeriodType,
+              let periodStart, !periodStart.isEmpty,
+              let periodEnd, !periodEnd.isEmpty,
+              let billingPeriodStart, let billingPeriodEnd
+        else { return false }
+        return periodStart == billingPeriodStart && periodEnd == billingPeriodEnd
+    }
+
+    /// A present `creditUsagePercent` is always trusted (clamped). When it is
+    /// omitted, usage is zero only in the confirmed-weekly-bounds shape;
+    /// every other omission stays unavailable rather than inventing a value.
+    static func weeklyUsedPercent(
+        creditUsagePercent: Double?,
+        periodType: String?,
+        periodStart: String?,
+        periodEnd: String?,
+        billingPeriodStart: String?,
+        billingPeriodEnd: String?
+    ) -> Double? {
+        if let creditUsagePercent {
+            return min(max(creditUsagePercent, 0), 100)
+        }
+        return isConfirmedWeeklyPeriod(
+            periodType: periodType,
+            periodStart: periodStart,
+            periodEnd: periodEnd,
+            billingPeriodStart: billingPeriodStart,
+            billingPeriodEnd: billingPeriodEnd
+        ) ? 0 : nil
+    }
+
+    /// A zero or missing monthly limit (the proxy's own default response
+    /// shape) must never be displayed as a percentage; only a finite,
+    /// positive limit paired with a finite used value yields one.
+    static func monthlyUsedPercent(limit: Double?, used: Double?) -> Double? {
+        guard let limit, limit.isFinite, limit > 0,
+              let used, used.isFinite
+        else { return nil }
+        return min(max((used / limit) * 100, 0), 100)
+    }
+
+    private struct BillingResponse: Decodable {
+        struct Period: Decodable {
+            let type: String?
+            let start: String?
+            let end: String?
+        }
+        struct ValueField: Decodable {
+            let val: Double?
+        }
+        struct Config: Decodable {
+            let currentPeriod: Period?
+            let billingPeriodStart: String?
+            let billingPeriodEnd: String?
+            let creditUsagePercent: Double?
+            let monthlyLimit: ValueField?
+            let used: ValueField?
+            let prepaidBalance: ValueField?
+        }
+        let config: Config?
+        let currentPeriod: Period?
+        let billingPeriodStart: String?
+        let billingPeriodEnd: String?
+        let creditUsagePercent: Double?
+        let monthlyLimit: ValueField?
+        let used: ValueField?
+        let prepaidBalance: ValueField?
+
+        var effectiveConfig: Config {
+            config ?? Config(
+                currentPeriod: currentPeriod,
+                billingPeriodStart: billingPeriodStart,
+                billingPeriodEnd: billingPeriodEnd,
+                creditUsagePercent: creditUsagePercent,
+                monthlyLimit: monthlyLimit,
+                used: used,
+                prepaidBalance: prepaidBalance
+            )
+        }
+    }
+
+    private struct SettingsResponse: Decodable {
+        let subscriptionTierDisplay: String?
+        let subscriptionTier: String?
+
+        enum CodingKeys: String, CodingKey {
+            case subscriptionTierDisplay = "subscription_tier_display"
+            case subscriptionTier = "subscription_tier"
+        }
+    }
+
+    /// Internal (not `private`) so unit tests can exercise response parsing
+    /// via `@testable import` without a live network fetch.
+    static func parse(_ data: Data, accountEmail: String?, now: Date = Date()) -> GrokUsageSnapshot? {
+        guard let response = try? JSONDecoder().decode(BillingResponse.self, from: data) else { return nil }
+        let config = response.effectiveConfig
+
+        let weeklyUsed = weeklyUsedPercent(
+            creditUsagePercent: config.creditUsagePercent,
+            periodType: config.currentPeriod?.type,
+            periodStart: config.currentPeriod?.start,
+            periodEnd: config.currentPeriod?.end,
+            billingPeriodStart: config.billingPeriodStart,
+            billingPeriodEnd: config.billingPeriodEnd
+        )
+        let monthlyUsed = monthlyUsedPercent(limit: config.monthlyLimit?.val, used: config.used?.val)
+        guard weeklyUsed != nil || monthlyUsed != nil else { return nil }
+
+        return GrokUsageSnapshot(
+            weeklyUsedPercent: weeklyUsed,
+            weeklyResetsAt: parseDate(config.currentPeriod?.end),
+            monthlyUsedPercent: monthlyUsed,
+            monthlyResetsAt: nil,
+            extraCreditBalance: config.prepaidBalance?.val.map { $0 / 100 },
+            publishedAt: now,
+            accountEmail: accountEmail
+        )
+    }
+
+    /// Combines the three read-only Grok endpoints used by the official CLI:
+    /// weekly/credit-period billing, legacy monthly billing, and settings.
+    static func parseCombined(
+        creditsData: Data,
+        billingData: Data,
+        settingsData: Data,
+        accountEmail: String?,
+        now: Date = Date()
+    ) -> GrokUsageSnapshot? {
+        guard let credits = parse(creditsData, accountEmail: accountEmail, now: now),
+              let billing = try? JSONDecoder().decode(BillingResponse.self, from: billingData),
+              let settings = try? JSONDecoder().decode(SettingsResponse.self, from: settingsData)
+        else { return nil }
+
+        let billingConfig = billing.effectiveConfig
+        let tier = settings.subscriptionTierDisplay ?? settings.subscriptionTier
+        return GrokUsageSnapshot(
+            weeklyUsedPercent: credits.weeklyUsedPercent,
+            weeklyResetsAt: credits.weeklyResetsAt,
+            monthlyUsedPercent: monthlyUsedPercent(
+                limit: billingConfig.monthlyLimit?.val,
+                used: billingConfig.used?.val
+            ),
+            monthlyResetsAt: parseDate(billingConfig.billingPeriodEnd),
+            monthlyUsedCredits: billingConfig.used?.val.map { $0 / 100 },
+            extraCreditBalance: credits.extraCreditBalance,
+            subscriptionTier: tier,
+            publishedAt: now,
+            accountEmail: accountEmail
+        )
+    }
+
+    /// Nested `grok` object mirroring `gemini`'s shape in the shared
+    /// `usage-v1.json` file: status/weekly/monthly/reset/freshness.
+    static func sharedPayload(from snapshot: GrokUsageSnapshot?, now: Date = Date()) -> [String: Any] {
+        guard let snapshot else {
+            return [
+                "status": "unavailable",
+                "weeklyRemainingPercent": NSNull(),
+                "weeklyUsedPercent": NSNull(),
+                "weeklyResetsAt": NSNull(),
+                "monthlyRemainingPercent": NSNull(),
+                "monthlyUsedPercent": NSNull(),
+                "monthlyResetsAt": NSNull(),
+                "monthlyUsedCredits": NSNull(),
+                "extraCreditBalance": NSNull(),
+                "subscriptionTier": NSNull(),
+                "account": NSNull(),
+                "fetchedAt": NSNull(),
+                "ageSeconds": NSNull(),
+                "freshForSeconds": Int(sharedFreshForSeconds),
+                "fresh": false
+            ]
+        }
+
+        let ageSeconds = snapshot.publishedAt.map { max(0, Int(now.timeIntervalSince($0))) }
+        return [
+            "status": snapshot.hasUsage ? "ok" : "partial",
+            "weeklyRemainingPercent": remainingPercent(from: snapshot.weeklyUsedPercent) ?? NSNull(),
+            "weeklyUsedPercent": snapshot.weeklyUsedPercent ?? NSNull(),
+            "weeklyResetsAt": snapshot.weeklyResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "monthlyRemainingPercent": remainingPercent(from: snapshot.monthlyUsedPercent) ?? NSNull(),
+            "monthlyUsedPercent": snapshot.monthlyUsedPercent ?? NSNull(),
+            "monthlyResetsAt": snapshot.monthlyResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "monthlyUsedCredits": snapshot.monthlyUsedCredits ?? NSNull(),
+            "extraCreditBalance": snapshot.extraCreditBalance ?? NSNull(),
+            "subscriptionTier": snapshot.subscriptionTier ?? NSNull(),
+            "account": snapshot.accountEmail ?? NSNull(),
+            "fetchedAt": snapshot.publishedAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "ageSeconds": ageSeconds ?? NSNull(),
+            "freshForSeconds": Int(sharedFreshForSeconds),
+            "fresh": isFresh(publishedAt: snapshot.publishedAt, now: now, freshForSeconds: sharedFreshForSeconds)
+        ]
+    }
+
+    /// Recomputes a stored `grok` payload's `ageSeconds`/`fresh` from its own
+    /// `fetchedAt`, the same role `refreshedSharedPayload` plays for Gemini.
+    static func refreshedSharedPayload(_ payload: [String: Any], now: Date = Date()) -> [String: Any] {
+        var output = payload
+        let fetchedAt = (payload["fetchedAt"] as? String).flatMap(sharedISO8601Formatter.date(from:))
+        let freshForSeconds = (payload["freshForSeconds"] as? NSNumber)?.doubleValue ?? sharedFreshForSeconds
+        output["ageSeconds"] = fetchedAt.map { max(0, Int(now.timeIntervalSince($0))) } ?? NSNull()
+        output["fresh"] = isFresh(publishedAt: fetchedAt, now: now, freshForSeconds: freshForSeconds)
+        return output
+    }
+
+    /// Restores the last successful Grok snapshot from CCMB's own shared
+    /// JSON so an app restart does not momentarily show "정보 없음" for data
+    /// fetched minutes ago.
+    static func snapshot(fromSharedPayload payload: [String: Any]) -> GrokUsageSnapshot? {
+        func percent(_ key: String) -> Double? {
+            (payload[key] as? NSNumber)?.doubleValue
+        }
+        func date(_ key: String) -> Date? {
+            (payload[key] as? String).flatMap(sharedISO8601Formatter.date(from:))
+        }
+
+        let snapshot = GrokUsageSnapshot(
+            weeklyUsedPercent: percent("weeklyUsedPercent"),
+            weeklyResetsAt: date("weeklyResetsAt"),
+            monthlyUsedPercent: percent("monthlyUsedPercent"),
+            monthlyResetsAt: date("monthlyResetsAt"),
+            monthlyUsedCredits: percent("monthlyUsedCredits"),
+            extraCreditBalance: percent("extraCreditBalance"),
+            subscriptionTier: payload["subscriptionTier"] as? String,
+            publishedAt: date("fetchedAt"),
+            accountEmail: payload["account"] as? String
+        )
+
+        guard snapshot.publishedAt != nil
+            || snapshot.weeklyUsedPercent != nil
+            || snapshot.monthlyUsedPercent != nil
+            || snapshot.monthlyUsedCredits != nil
+            || snapshot.extraCreditBalance != nil
+            || snapshot.subscriptionTier != nil
+            || snapshot.accountEmail != nil
+        else { return nil }
+        return snapshot
+    }
+
+    /// The billing endpoint's own period boundaries are not guaranteed to
+    /// carry fractional seconds, so both forms are tried the same way
+    /// Gemini's `reset_time` is parsed.
+    private static func parseDate(_ string: String?) -> Date? {
+        guard let string else { return nil }
+        return sharedISO8601Formatter.date(from: string) ?? sharedISO8601FormatterWholeSeconds.date(from: string)
+    }
+
+    private static let sharedISO8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let sharedISO8601FormatterWholeSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }

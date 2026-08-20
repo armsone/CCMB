@@ -25,12 +25,22 @@ private enum SharedUsageStore {
     static func publish(
         _ snapshot: RateLimitSnapshot,
         claudeSnapshot: ClaudeUsageSnapshot?,
+        claudeRetryAt: Date?,
+        claudeFailureLabel: String?,
         geminiSnapshot: GeminiUsageSnapshot?,
+        grokSnapshot: GrokUsageSnapshot?,
         refreshInterval: TimeInterval
     ) throws {
         let remainingPercent = snapshot.usedPercent.map(UsageCore.remainingPercent)
         let freshForSeconds = max(45, Int(refreshInterval) + 15)
         let sequence = Int64((snapshot.updatedAt.timeIntervalSince1970 * 1_000).rounded())
+
+        var claudePayload = ClaudeUsageCore.sharedPayload(from: claudeSnapshot)
+        let circuitOpen = claudeRetryAt.map { $0 > Date() } ?? false
+        claudePayload["circuitState"] = circuitOpen ? "open" : "closed"
+        claudePayload["nextEligibleAt"] = claudeRetryAt.map(iso8601Formatter.string(from:)) ?? NSNull()
+        let staleReason: Any = circuitOpen ? "rate-limited" : (claudeFailureLabel as Any? ?? NSNull())
+        claudePayload["staleReason"] = staleReason
 
         let payload: [String: Any] = [
             "schemaVersion": 1,
@@ -50,9 +60,10 @@ private enum SharedUsageStore {
             "ccmbProcessID": ProcessInfo.processInfo.processIdentifier,
             "ccmbBundleIdentifier": Bundle.main.bundleIdentifier ?? "",
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
-            "claude": ClaudeUsageCore.sharedPayload(from: claudeSnapshot),
+            "claude": claudePayload,
             "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: freshForSeconds),
-            "gemini": GeminiUsageCore.sharedPayload(from: geminiSnapshot)
+            "gemini": GeminiUsageCore.sharedPayload(from: geminiSnapshot),
+            "grok": GrokUsageCore.sharedPayload(from: grokSnapshot)
         ]
 
         try FileManager.default.createDirectory(
@@ -121,6 +132,13 @@ private enum SharedUsageStore {
         return GeminiUsageCore.snapshot(fromSharedPayload: gemini)
     }
 
+    static func readGrokSnapshot() -> GrokUsageSnapshot? {
+        guard let payload = try? readPayload(),
+              let grok = payload["grok"] as? [String: Any]
+        else { return nil }
+        return GrokUsageCore.snapshot(fromSharedPayload: grok)
+    }
+
     private static var iso8601Formatter: ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -170,6 +188,10 @@ private enum UsageCommand {
                 // simply reported unavailable rather than blocking this
                 // command on a live `agy` launch.
                 direct["gemini"] = cached?["gemini"] ?? GeminiUsageCore.sharedPayload(from: nil)
+                // No passive local cache exists for Grok either — the local
+                // `auth.json` carries no usage numbers of its own — so a
+                // stale CCMB cache is likewise the only source here.
+                direct["grok"] = cached?["grok"] ?? GrokUsageCore.sharedPayload(from: nil)
                 if let cached {
                     direct["ccmbCache"] = cached
                 }
@@ -191,6 +213,8 @@ private enum UsageCommand {
             ?? UsageCore.codexPayload(from: nil, freshForSeconds: freshForSeconds)
         let storedGemini = payload["gemini"] as? [String: Any]
             ?? GeminiUsageCore.sharedPayload(from: nil)
+        let storedGrok = payload["grok"] as? [String: Any]
+            ?? GrokUsageCore.sharedPayload(from: nil)
         var output: [String: Any] = [
             "weeklyRemainingPercent": payload["weeklyRemainingPercent"] ?? NSNull(),
             "creditBalance": payload["creditBalance"] ?? NSNull(),
@@ -201,7 +225,8 @@ private enum UsageCommand {
             "fetchedAt": payload["fetchedAt"] ?? NSNull(),
             "claude": ClaudeUsageCore.refreshedSharedPayload(storedClaude),
             "codex": UsageCore.refreshedCodexPayload(storedCodex),
-            "gemini": GeminiUsageCore.refreshedSharedPayload(storedGemini)
+            "gemini": GeminiUsageCore.refreshedSharedPayload(storedGemini),
+            "grok": GrokUsageCore.refreshedSharedPayload(storedGrok)
         ]
 
         let fetchedAt = (payload["fetchedAt"] as? String).flatMap(iso8601Formatter.date(from:))
@@ -281,6 +306,7 @@ private enum UsageCommand {
             "claude": ClaudeUsageCore.sharedPayload(from: ClaudeUsageStore.read()),
             "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: 15, now: snapshot.updatedAt),
             "gemini": GeminiUsageCore.sharedPayload(from: nil),
+            "grok": GrokUsageCore.sharedPayload(from: nil),
             "evidence": [
                 "status": "ok",
                 "source": "codex app-server",
@@ -1158,10 +1184,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var refreshInterval: TimeInterval = AppDelegate.savedRefreshInterval()
     private var claudeRefreshInterval: TimeInterval = AppDelegate.savedClaudeRefreshInterval()
     private var geminiRefreshInterval: TimeInterval = AppDelegate.savedGeminiRefreshInterval()
+    private var grokRefreshInterval: TimeInterval = AppDelegate.savedGrokRefreshInterval()
     private var nextAutoRefreshAt = Date()
     private var nextCodexRefreshAt = Date()
     private var nextClaudeRefreshAt = Date()
     private var nextGeminiRefreshAt = Date()
+    private var nextGrokRefreshAt = Date()
     private var activity: NSObjectProtocol?
     private var instanceLockFileDescriptor: Int32 = -1
 
@@ -1203,9 +1231,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         item.representedObject = seconds
         return item
     }
+    private lazy var grokRefreshIntervalItems: [NSMenuItem] = UsageCore.grokRefreshIntervalOptions.map { seconds in
+        let item = NSMenuItem(
+            title: seconds == 0 ? "끔" : Self.durationTitle(seconds: seconds),
+            action: #selector(AppDelegate.setGrokRefreshInterval(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = seconds
+        return item
+    }
     private let codexIntervalItem = NSMenuItem(title: "Codex · 30초", action: nil, keyEquivalent: "")
     private let claudeIntervalItem = NSMenuItem(title: "Claude · 10분", action: nil, keyEquivalent: "")
     private let geminiIntervalItem = NSMenuItem(title: "Gemini · 5분", action: nil, keyEquivalent: "")
+    private let grokIntervalItem = NSMenuItem(title: "Grok · 5분", action: nil, keyEquivalent: "")
     private let pinnedUsageWindowItem = NSMenuItem(
         title: "항상 보기",
         action: #selector(togglePinnedUsageWindow),
@@ -1216,7 +1254,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중…", action: nil, keyEquivalent: "")
     private let shareFolderItem = NSMenuItem(title: "저장 위치 열기", action: #selector(openSharedUsageFolder), keyEquivalent: "")
     private let copySharePromptCombinedItem = NSMenuItem(
-        title: "전체(Codex+Claude+Gemini) 요청문 복사",
+        title: "전체(Codex+Claude+Gemini+Grok) 요청문 복사",
         action: #selector(copySharePromptCombined),
         keyEquivalent: ""
     )
@@ -1235,15 +1273,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         action: #selector(copySharePromptGemini),
         keyEquivalent: ""
     )
+    private let copySharePromptGrokItem = NSMenuItem(
+        title: "Grok 전용 요청문 복사",
+        action: #selector(copySharePromptGrok),
+        keyEquivalent: ""
+    )
     private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
     private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
     private let usagePageLinksView = UsagePageButtonsView()
     private let usagePageLinksItem = NSMenuItem()
     private let menuRefreshControlsView = RefreshIntervalControlsView()
     private let menuRefreshControlsItem = NSMenuItem()
-    private let utilityActionsView = MenuActionRowView(titles: ["항상 보기", "진단 로그", "GitHub 보기"])
-    private let utilityActionsItem = NSMenuItem()
-    private let lifecycleActionsView = MenuActionRowView(titles: ["자동 실행", "다시 시작", "종료"])
+    private let lifecycleActionsView = LifecycleActionsRowView()
     private let lifecycleActionsItem = NSMenuItem()
     private let historyChartView = UsageHistoryChartView()
     private let historyChartItem = NSMenuItem()
@@ -1252,19 +1293,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var codexConsumption = UsageConsumptionTracker()
     private var claudeConsumption = UsageConsumptionTracker()
     private var geminiConsumption = UsageConsumptionTracker()
+    private var grokConsumption = UsageConsumptionTracker()
     private let checkForUpdatesItem = NSMenuItem(
         title: "업데이트 확인…",
         action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
         keyEquivalent: ""
     )
     private lazy var updateVersionView = VersionOpacityRowView(
+        alwaysTitle: "항상 보기",
         updateTitle: "업데이트 확인…",
         versionTitle: "현재 버전 \(appVersion)"
     )
     private var panelOpacity: Double = AppDelegate.savedPanelOpacity()
     private let updateVersionItem = NSMenuItem()
     private let restartItem = NSMenuItem(title: "CCMB 다시 시작", action: #selector(restartApp), keyEquivalent: "")
-    private let diagnosticsItem = NSMenuItem(title: "진단 로그", action: nil, keyEquivalent: "")
+    private let diagnosticsItem = NSMenuItem(title: "진단", action: nil, keyEquivalent: "")
     private let copyDiagnosticReportItem = NSMenuItem(title: "진단 리포트 복사", action: #selector(copyDiagnosticReport), keyEquivalent: "")
     private let openDiagnosticLogItem = NSMenuItem(title: "진단 로그 폴더 열기", action: #selector(openDiagnosticLogFolder), keyEquivalent: "")
     private let footerLinkItem = NSMenuItem(title: "GitHub에서 armsone 보기…", action: #selector(openFooterLink), keyEquivalent: "")
@@ -1286,6 +1329,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         controller.onCodexRefreshIntervalChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
         controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
         controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+        controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
         controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
         controller.setShareMenu(makeShareMenu())
         controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
@@ -1309,6 +1353,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastClaudeRateLimitRetryAt: Date?
     private var lastGeminiSnapshot: GeminiUsageSnapshot?
     private var lastGeminiFetchFailureLabel: String?
+    private var lastGrokSnapshot: GrokUsageSnapshot?
+    private var lastGrokFetchFailureLabel: String?
     private var lastSharedUsageAt: Date?
     private var lastShareError: String?
     private var helperInstallError: String?
@@ -1335,7 +1381,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
-            reason: "Keep Codex, Claude, and Gemini usage auto-refresh running"
+            reason: "Keep Codex, Claude, Gemini, and Grok usage auto-refresh running"
         )
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -1355,6 +1401,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         restartAutoRefreshTimer()
         refreshClaudeUsage()
         refreshGeminiUsage()
+        refreshGrokUsage()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -1544,7 +1591,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let refreshCodex = refreshInterval > 0 && now >= nextCodexRefreshAt
         let refreshClaude = claudeRefreshInterval > 0 && now >= nextClaudeRefreshAt
         let refreshGemini = geminiRefreshInterval > 0 && now >= nextGeminiRefreshAt
-        guard refreshCodex || refreshClaude || refreshGemini else {
+        let refreshGrok = grokRefreshInterval > 0 && now >= nextGrokRefreshAt
+        guard refreshCodex || refreshClaude || refreshGemini || refreshGrok else {
             updateNextAutoRefreshAt()
             scheduleNextAutoRefresh()
             updateCountdown()
@@ -1553,13 +1601,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if refreshCodex { nextCodexRefreshAt = now.addingTimeInterval(refreshInterval) }
         if refreshClaude { nextClaudeRefreshAt = now.addingTimeInterval(claudeRefreshInterval) }
         if refreshGemini { nextGeminiRefreshAt = now.addingTimeInterval(geminiRefreshInterval) }
+        if refreshGrok { nextGrokRefreshAt = now.addingTimeInterval(grokRefreshInterval) }
         updateNextAutoRefreshAt()
         scheduleNextAutoRefresh()
-        appLog("auto refresh perform codex=\(refreshCodex) claude=\(refreshClaude) gemini=\(refreshGemini)")
+        appLog("auto refresh perform codex=\(refreshCodex) claude=\(refreshClaude) gemini=\(refreshGemini) grok=\(refreshGrok)")
         diagnosticLog.log("auto_refresh_timer_fire", [
             "codex": .bool(refreshCodex),
             "claude": .bool(refreshClaude),
-            "gemini": .bool(refreshGemini)
+            "gemini": .bool(refreshGemini),
+            "grok": .bool(refreshGrok)
         ])
         guard !isOffline else {
             showOfflineStatus()
@@ -1573,6 +1623,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if refreshCodex { client.refreshRateLimits() }
         if refreshClaude { refreshClaudeUsage() }
         if refreshGemini { refreshGeminiUsage() }
+        if refreshGrok { refreshGrokUsage() }
     }
 
     private func resetCountdown() {
@@ -1586,6 +1637,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         nextCodexRefreshAt = refreshInterval > 0 ? now.addingTimeInterval(refreshInterval) : .distantFuture
         nextClaudeRefreshAt = claudeRefreshInterval > 0 ? now.addingTimeInterval(claudeRefreshInterval) : .distantFuture
         nextGeminiRefreshAt = geminiRefreshInterval > 0 ? now.addingTimeInterval(geminiRefreshInterval) : .distantFuture
+        nextGrokRefreshAt = grokRefreshInterval > 0 ? now.addingTimeInterval(grokRefreshInterval) : .distantFuture
         if let retryAt = lastClaudeRateLimitRetryAt, retryAt > nextClaudeRefreshAt {
             nextClaudeRefreshAt = retryAt
         }
@@ -1593,7 +1645,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func updateNextAutoRefreshAt() {
-        nextAutoRefreshAt = [nextCodexRefreshAt, nextClaudeRefreshAt, nextGeminiRefreshAt].min() ?? .distantFuture
+        nextAutoRefreshAt = [nextCodexRefreshAt, nextClaudeRefreshAt, nextGeminiRefreshAt, nextGrokRefreshAt].min() ?? .distantFuture
     }
 
     private func updateCountdown() {
@@ -1605,20 +1657,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let codexRemaining = remaining(nextCodexRefreshAt, refreshInterval)
         let claudeRemaining = remaining(nextClaudeRefreshAt, claudeRefreshInterval)
         let geminiRemaining = remaining(nextGeminiRefreshAt, geminiRefreshInterval)
+        let grokRemaining = remaining(nextGrokRefreshAt, grokRefreshInterval)
         menuRefreshControlsView.updateCountdown(
             codex: codexRemaining,
             claude: claudeRemaining,
-            gemini: geminiRemaining
+            gemini: geminiRemaining,
+            grok: grokRemaining
         )
         pinnedUsageWindowController?.updateRefreshCountdown(
             codex: codexRemaining,
             claude: claudeRemaining,
-            gemini: geminiRemaining
+            gemini: geminiRemaining,
+            grok: grokRemaining
         )
         statusDropdownController.updateRefreshCountdown(
             codex: codexRemaining,
             claude: claudeRemaining,
-            gemini: geminiRemaining
+            gemini: geminiRemaining,
+            grok: grokRemaining
         )
         guard nextAutoRefreshAt != .distantFuture else {
             setDetailTitle("새로 고침", for: refreshItem)
@@ -1646,13 +1702,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             let seconds = (item.representedObject as? Int) ?? -1
             item.state = Int(geminiRefreshInterval) == seconds ? .on : .off
         }
+        for item in grokRefreshIntervalItems {
+            let seconds = (item.representedObject as? Int) ?? -1
+            item.state = Int(grokRefreshInterval) == seconds ? .on : .off
+        }
         codexIntervalItem.title = "Codex · \(Self.intervalTitle(refreshInterval))"
         claudeIntervalItem.title = "Claude · \(Self.intervalTitle(claudeRefreshInterval))"
         geminiIntervalItem.title = "Gemini · \(Self.intervalTitle(geminiRefreshInterval))"
+        grokIntervalItem.title = "Grok · \(Self.intervalTitle(grokRefreshInterval))"
         menuRefreshControlsView.apply(
             codex: Int(refreshInterval),
             claude: Int(claudeRefreshInterval),
-            gemini: Int(geminiRefreshInterval)
+            gemini: Int(geminiRefreshInterval),
+            grok: Int(grokRefreshInterval)
         )
         setDetailTitle("자동 새로 고침 · 앱별 설정", for: intervalItem)
     }
@@ -1678,9 +1740,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func configureStatusItem() {
         statusItem.button?.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        statusItem.button?.toolTip = "Codex, Claude, Gemini 남은 사용량과 크레딧"
+        statusItem.button?.toolTip = "Codex, Claude, Gemini, Grok 남은 사용량과 크레딧"
         statusItem.button?.imageHugsTitle = true
-        statusItem.button?.setAccessibilityLabel("Codex, Claude, Gemini 사용량")
+        statusItem.button?.setAccessibilityLabel("Codex, Claude, Gemini, Grok 사용량")
 
         if #available(macOS 11.0, *) {
             if let image = NSImage(systemSymbolName: "bolt.circle", accessibilityDescription: "CCMB 사용량") {
@@ -1695,7 +1757,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let menu = NSMenu()
         menu.autoenablesItems = false
         // Status-item menus anchor their trailing edge beneath the status
-        // button. Matching the dashboard width keeps the rightmost Gemini
+        // button. Matching the dashboard width keeps the rightmost Grok
         // column directly below that button instead of leaving a side gutter.
         menu.minimumWidth = UsagePanelLayout.viewWidth
         accountItem.isEnabled = true
@@ -1723,6 +1785,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menuRefreshControlsView.onCodexChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
         menuRefreshControlsView.onClaudeChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
         menuRefreshControlsView.onGeminiChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+        menuRefreshControlsView.onGrokChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
         menuRefreshControlsItem.view = menuRefreshControlsView
         menuRefreshControlsItem.isEnabled = true
         menu.addItem(menuRefreshControlsItem)
@@ -1746,6 +1809,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         usagePageLinksView.claudeButton.action = #selector(openClaudeDashboard)
         usagePageLinksView.geminiButton.target = self
         usagePageLinksView.geminiButton.action = #selector(openGeminiDashboard)
+        usagePageLinksView.grokButton.target = self
+        usagePageLinksView.grokButton.action = #selector(openGrokDashboard)
         usagePageLinksItem.view = usagePageLinksView
         usagePageLinksItem.isEnabled = true
         menu.addItem(usagePageLinksItem)
@@ -1768,10 +1833,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         geminiIntervalItem.submenu = geminiIntervalMenu
 
+        let grokIntervalMenu = NSMenu()
+        for item in grokRefreshIntervalItems {
+            grokIntervalMenu.addItem(item)
+        }
+        grokIntervalItem.submenu = grokIntervalMenu
+
         let intervalMenu = NSMenu()
         intervalMenu.addItem(codexIntervalItem)
         intervalMenu.addItem(claudeIntervalItem)
         intervalMenu.addItem(geminiIntervalItem)
+        intervalMenu.addItem(grokIntervalItem)
         intervalItem.submenu = intervalMenu
         menu.addItem(accountItem)
         menu.addItem(accountSeparatorItem)
@@ -1794,22 +1866,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         applyPanelOpacity()
 
         configureDiagnosticsMenu()
-        utilityActionsView.buttons[0].target = self
-        utilityActionsView.buttons[0].action = #selector(togglePinnedUsageWindow)
-        utilityActionsView.buttons[1].target = self
-        utilityActionsView.buttons[1].action = #selector(openDiagnosticLogFolder)
-        utilityActionsView.buttons[2].target = self
-        utilityActionsView.buttons[2].action = #selector(openFooterLink)
-        utilityActionsItem.view = utilityActionsView
-        utilityActionsItem.isEnabled = true
-        menu.addItem(utilityActionsItem)
-
-        lifecycleActionsView.buttons[0].target = self
-        lifecycleActionsView.buttons[0].action = #selector(toggleLaunchAtLogin)
-        lifecycleActionsView.buttons[1].target = self
-        lifecycleActionsView.buttons[1].action = #selector(restartApp)
-        lifecycleActionsView.buttons[2].target = self
-        lifecycleActionsView.buttons[2].action = #selector(quit)
+        updateVersionView.alwaysViewButton.target = self
+        updateVersionView.alwaysViewButton.action = #selector(togglePinnedUsageWindow)
+        lifecycleActionsView.launchButton.target = self
+        lifecycleActionsView.launchButton.action = #selector(toggleLaunchAtLogin)
+        lifecycleActionsView.diagnosticButton.target = self
+        lifecycleActionsView.diagnosticButton.action = #selector(openDiagnosticLogFolder)
+        lifecycleActionsView.githubButton.target = self
+        lifecycleActionsView.githubButton.action = #selector(openFooterLink)
+        lifecycleActionsView.restartButton.target = self
+        lifecycleActionsView.restartButton.action = #selector(restartApp)
+        lifecycleActionsView.quitButton.target = self
+        lifecycleActionsView.quitButton.action = #selector(quit)
         lifecycleActionsItem.view = lifecycleActionsView
         lifecycleActionsItem.isEnabled = true
         menu.addItem(lifecycleActionsItem)
@@ -1840,6 +1908,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         for item in geminiRefreshIntervalItems {
             item.target = self
         }
+        for item in grokRefreshIntervalItems {
+            item.target = self
+        }
         launchAtLoginItem.target = self
         pinnedUsageWindowItem.target = self
         shareFolderItem.target = self
@@ -1847,6 +1918,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         copySharePromptCodexItem.target = self
         copySharePromptClaudeItem.target = self
         copySharePromptGeminiItem.target = self
+        copySharePromptGrokItem.target = self
         copyShareCommandItem.target = self
         copyErrorItem.target = self
         restartItem.target = self
@@ -2036,7 +2108,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             try SharedUsageStore.publish(
                 snapshot,
                 claudeSnapshot: lastClaudeSnapshot,
+                claudeRetryAt: lastClaudeRateLimitRetryAt,
+                claudeFailureLabel: lastClaudeFetchFailureLabel,
                 geminiSnapshot: lastGeminiSnapshot,
+                grokSnapshot: lastGrokSnapshot,
                 refreshInterval: refreshInterval
             )
             lastSharedUsageAt = snapshot.updatedAt
@@ -2070,6 +2145,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         refreshStatusTitle()
         updateSplitPanel()
+
+        // A complete, recent statusLine observation came from Claude Code's
+        // own response path. Prefer it over an extra request to the
+        // undocumented OAuth endpoint.
+        if let snapshot = lastClaudeSnapshot,
+           snapshot.quotaSource == "claude-statusline",
+           snapshot.hasRateLimitUsage,
+           ClaudeUsageCore.isFresh(
+               publishedAt: snapshot.publishedAt,
+               now: Date(),
+               freshForSeconds: ClaudeUsageCore.statusLineFreshForSeconds
+           ) {
+            return
+        }
 
         let claudeFetchInterval = max(claudeRefreshInterval, ClaudeUsageCore.minimumRequestIntervalSeconds)
         ClaudeOAuthUsageClient.fetchIfDue(minimumInterval: claudeFetchInterval) { [weak self] outcome in
@@ -2143,6 +2232,42 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
+    /// Restores the last successful Grok snapshot from CCMB's own shared
+    /// file first, then asks the billing endpoint for a fresh read on the
+    /// same throttled cadence Gemini uses. CCMB never launches `grok` and
+    /// never performs a login/refresh flow of its own.
+    private func refreshGrokUsage() {
+        if lastGrokSnapshot == nil, let cached = SharedUsageStore.readGrokSnapshot() {
+            lastGrokSnapshot = cached
+            recordGrokConsumption()
+            refreshStatusTitle()
+            updateSplitPanel()
+        }
+
+        let minimumInterval = max(grokRefreshInterval, GrokUsageCore.minimumRequestIntervalSeconds)
+        GrokUsageClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case .success(let snapshot):
+                self.lastGrokSnapshot = snapshot
+                self.recordGrokConsumption()
+                self.lastGrokFetchFailureLabel = nil
+            case .skippedInFlight, .skippedThrottled:
+                break
+            case .notSignedIn, .expiredCredential, .httpFailure, .transportFailure, .decodeFailure:
+                self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("grok usage fetch failed: \(diagnostic)")
+                }
+            }
+            if let lastSnapshot = self.lastSnapshot {
+                self.publishSharedUsage(lastSnapshot, origin: "cache-republish")
+            }
+            self.refreshStatusTitle()
+            self.updateSplitPanel()
+        }
+    }
+
     // MARK: - Per-refresh consumption chart
     //
     // Everything below is plain data bookkeeping plus a view update. It runs on
@@ -2155,7 +2280,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// so it refreshes alongside the panel rather than as part of a column.
     private func updateHistoryChart() {
         let codexStrip = lastSnapshot.flatMap { codexHistoryStrip(from: $0) }
-        let hasContent = historyChartView.apply(codex: codexStrip, claude: claudeHistoryStrip(), gemini: geminiHistoryStrip())
+        let hasContent = historyChartView.apply(
+            codex: codexStrip,
+            claude: claudeHistoryStrip(),
+            gemini: geminiHistoryStrip(),
+            grok: grokHistoryStrip()
+        )
         historyChartItem.isHidden = !hasContent
     }
 
@@ -2258,25 +2388,61 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         )
     }
 
+    /// Records Grok's per-refresh consumption. The billing endpoint reports a
+    /// *used* percentage that counts up (weekly, or the monthly fallback when
+    /// no weekly figure is available), the same increasing-metric shape
+    /// Claude's own weekly percentage uses.
+    private func recordGrokConsumption() {
+        guard let snapshot = lastGrokSnapshot, let publishedAt = snapshot.publishedAt else { return }
+        let usesWeekly = snapshot.weeklyUsedPercent != nil
+        grokConsumption.record(
+            reading: usesWeekly ? snapshot.weeklyUsedPercent : snapshot.monthlyUsedPercent,
+            at: publishedAt,
+            isDecreasing: false,
+            metricKey: usesWeekly ? "grok.weekly" : "grok.monthly"
+        )
+        persistConsumptionTrackers()
+    }
+
+    private func grokHistoryStrip() -> UsageHistoryStrip? {
+        let samples = grokConsumption.samples
+        let usesWeekly = lastGrokSnapshot?.weeklyUsedPercent != nil
+        let latest = UsageConsumptionCore.amountTitle(samples.last?.amount ?? 0, unit: "%")
+        return UsageHistoryStrip(
+            caption: "Grok · 갱신당 \(usesWeekly ? "주간" : "월간") \(latest)",
+            samples: samples,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: "%",
+            color: GrokBrandColor.mark,
+            accessibilityValue: "최근 \(samples.count)회 갱신 소비 기록, 마지막 갱신 \(latest)"
+        )
+    }
+
     private func loadConsumptionTrackers() {
         guard let data = UserDefaults.standard.data(forKey: Self.consumptionHistoryDefaultsKey),
               let store = try? JSONDecoder().decode(UsageConsumptionHistoryStore.self, from: data) else { return }
         codexConsumption = store.codex
         claudeConsumption = store.claude
         geminiConsumption = store.gemini
+        grokConsumption = store.grok
     }
 
     private func persistConsumptionTrackers() {
-        let store = UsageConsumptionHistoryStore(codex: codexConsumption, claude: claudeConsumption, gemini: geminiConsumption)
+        let store = UsageConsumptionHistoryStore(
+            codex: codexConsumption,
+            claude: claudeConsumption,
+            gemini: geminiConsumption,
+            grok: grokConsumption
+        )
         guard let data = try? JSONEncoder().encode(store) else { return }
         UserDefaults.standard.set(data, forKey: Self.consumptionHistoryDefaultsKey)
     }
 
     private func refreshStatusTitle() {
         guard let snapshot = lastSnapshot else { return }
-        setStatusTitle(Self.statusTitle(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot))
+        setStatusTitle(Self.statusTitle(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, grok: lastGrokSnapshot))
         statusItem.button?.setAccessibilityValue(
-            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot)
+            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, grok: lastGrokSnapshot)
         )
     }
 
@@ -2297,6 +2463,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             gemini: Self.geminiColumn(
                 from: lastGeminiSnapshot,
                 fetchFailureLabel: lastGeminiFetchFailureLabel
+            ),
+            grok: Self.grokColumn(
+                from: lastGrokSnapshot,
+                fetchFailureLabel: lastGrokFetchFailureLabel
             )
         )
         splitPanelView.apply(model)
@@ -2640,6 +2810,85 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         )
     }
 
+    /// Grok's weekly ring remains the primary quota. The compact detail list
+    /// deliberately uses the same four labels the other provider columns use.
+    private static func grokColumn(
+        from snapshot: GrokUsageSnapshot?,
+        fetchFailureLabel: String?
+    ) -> UsagePanelColumn {
+        let accent = GrokBrandColor.mark
+
+        guard let snapshot else {
+            var statusLines: [String] = []
+            if let fetchFailureLabel {
+                statusLines.append("갱신 실패: \(fetchFailureLabel)")
+            } else {
+                statusLines.append("Grok 실행 후 로그인하세요")
+            }
+            return UsagePanelColumn(
+                title: "Grok",
+                accentColor: accent,
+                quota: nil,
+                secondaryQuota: nil,
+                rows: [UsagePanelRow(label: "Grok", value: "정보 없음")],
+                accountLines: ["계정 정보 없음"],
+                refreshLine: nil,
+                statusLines: statusLines,
+                statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+            )
+        }
+
+        var quota: UsagePanelQuota?
+        var rows: [UsagePanelRow] = []
+
+        if let remaining = GrokUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
+            quota = UsagePanelQuota(
+                caption: "주간 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Grok 주간 사용량 \(percentTitle(from: remaining))"
+            )
+        } else {
+            rows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
+        }
+        rows.append(UsagePanelRow(label: "요금제", value: snapshot.subscriptionTier ?? "정보 없음"))
+        rows.append(UsagePanelRow(
+            label: "월간",
+            value: snapshot.monthlyUsedCredits.map { "\(creditDetailTitle(from: $0)) 크레딧 사용" } ?? "정보 없음"
+        ))
+        rows.append(UsagePanelRow(
+            label: "주간",
+            value: snapshot.weeklyResetsAt.map(resetDateTimeFormatter.string(from:)) ?? "정보 없음",
+            isEmphasized: true
+        ))
+        rows.append(UsagePanelRow(
+            label: "크레딧",
+            value: snapshot.extraCreditBalance.map { "\(creditDetailTitle(from: $0)) 크레딧" } ?? "정보 없음"
+        ))
+
+        var statusLines: [String] = []
+        if let fetchFailureLabel {
+            statusLines.append("갱신 실패: \(fetchFailureLabel)")
+        }
+
+        let accountLines = [snapshot.accountEmail.map { "계정 \($0)" } ?? "계정 정보 없음"]
+
+        return UsagePanelColumn(
+            title: "Grok",
+            accentColor: accent,
+            quota: quota,
+            secondaryQuota: nil,
+            rows: rows,
+            accountLines: accountLines,
+            refreshLine: snapshot.publishedAt.map {
+                "업데이트 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
+            },
+            statusLines: statusLines,
+            statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+        )
+    }
+
     /// `extraUsage`'s `limitCents`/`usedCents` are cents-denominated
     /// regardless of which API field variant populated them.
     private static func extraUsageTitle(_ extraUsage: ClaudeExtraUsage) -> String {
@@ -2703,6 +2952,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(copyItem(copySharePromptCodexItem))
         menu.addItem(copyItem(copySharePromptClaudeItem))
         menu.addItem(copyItem(copySharePromptGeminiItem))
+        menu.addItem(copyItem(copySharePromptGrokItem))
         menu.addItem(.separator())
         menu.addItem(copyItem(copyShareCommandItem))
         return menu
@@ -2775,7 +3025,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     @objc private func copySharePromptCombined() {
         copySharePrompt(
-            "~/.codex/bin/ccmb-usage를 실행해서 Codex·Claude·Gemini의 남은 주간 사용량과 Codex·Gemini 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.",
+            "~/.codex/bin/ccmb-usage를 실행해서 Codex·Claude·Gemini·Grok의 남은 주간 사용량과 Codex·Gemini 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.",
             label: "전체"
         )
     }
@@ -2798,6 +3048,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         copySharePrompt(
             "~/.codex/bin/ccmb-usage를 실행해서 gemini 항목의 남은 주간·5시간 사용량과 AI 크레딧을 알려줘. gemini.fresh가 false면 오래된 데이터라고 말해줘.",
             label: "Gemini"
+        )
+    }
+
+    @objc private func copySharePromptGrok() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 grok 항목의 남은 주간·월간 사용량을 알려줘. grok.fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "Grok"
         )
     }
 
@@ -2856,6 +3113,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         client.refreshRateLimits()
         refreshClaudeUsage()
         refreshGeminiUsage()
+        refreshGrokUsage()
     }
 
     @objc private func setCodexRefreshInterval(_ sender: NSMenuItem) {
@@ -2871,7 +3129,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 try SharedUsageStore.publish(
                     lastSnapshot,
                     claudeSnapshot: lastClaudeSnapshot,
+                    claudeRetryAt: lastClaudeRateLimitRetryAt,
+                    claudeFailureLabel: lastClaudeFetchFailureLabel,
                     geminiSnapshot: lastGeminiSnapshot,
+                    grokSnapshot: lastGrokSnapshot,
                     refreshInterval: refreshInterval
                 )
                 lastShareError = nil
@@ -2935,6 +3196,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         updateSplitPanel()
     }
 
+    @objc private func setGrokRefreshInterval(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Int else { return }
+        applyGrokRefreshInterval(seconds)
+    }
+
+    private func applyGrokRefreshInterval(_ seconds: Int) {
+        grokRefreshInterval = TimeInterval(seconds)
+        UserDefaults.standard.set(seconds, forKey: Self.grokRefreshIntervalDefaultsKey)
+        updateRefreshIntervalMenu()
+        restartAutoRefreshTimer()
+        setDetailTitle(
+            seconds > 0 ? "Grok 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Grok 자동 갱신 꺼짐",
+            for: updatedItem
+        )
+        if seconds > 0, !isOffline {
+            refreshGrokUsage()
+        }
+        updateSplitPanel()
+    }
+
     @objc private func togglePinnedUsageWindow() {
         if pinnedUsageWindowController?.isVisible == true {
             pinnedUsageWindowController?.close()
@@ -2959,6 +3240,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             controller.onCodexRefreshIntervalChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
             controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
             controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+            controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
             controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
             controller.setShareMenu(makeShareMenu())
             controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
@@ -2975,9 +3257,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             codexHistory: lastSnapshot.flatMap { codexHistoryStrip(from: $0) },
             claudeHistory: claudeHistoryStrip(),
             geminiHistory: geminiHistoryStrip(),
+            grokHistory: grokHistoryStrip(),
             codexRefreshInterval: Int(refreshInterval),
             claudeRefreshInterval: Int(claudeRefreshInterval),
-            geminiRefreshInterval: Int(geminiRefreshInterval)
+            geminiRefreshInterval: Int(geminiRefreshInterval),
+            grokRefreshInterval: Int(grokRefreshInterval)
         )
         controller.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
@@ -3001,9 +3285,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             codexHistory: lastSnapshot.flatMap { codexHistoryStrip(from: $0) },
             claudeHistory: claudeHistoryStrip(),
             geminiHistory: geminiHistoryStrip(),
+            grokHistory: grokHistoryStrip(),
             codexRefreshInterval: Int(refreshInterval),
             claudeRefreshInterval: Int(claudeRefreshInterval),
-            geminiRefreshInterval: Int(geminiRefreshInterval)
+            geminiRefreshInterval: Int(geminiRefreshInterval),
+            grokRefreshInterval: Int(grokRefreshInterval)
         )
         statusDropdownController.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
@@ -3016,7 +3302,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func updatePinnedUsageWindowMenu() {
         let enabled = UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
         pinnedUsageWindowItem.state = enabled ? .on : .off
-        utilityActionsView.buttons[0].title = enabled ? "✓ 항상 보기" : "항상 보기"
+        updateVersionView.alwaysViewButton.title = enabled ? "✓ 항상 보기" : "항상 보기"
         statusDropdownController.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: isLaunchAtLoginEnabled,
@@ -3062,6 +3348,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         NSWorkspace.shared.open(UsageDashboardURLs.gemini)
     }
 
+    @objc private func openGrokDashboard() {
+        NSWorkspace.shared.open(UsageDashboardURLs.grok)
+    }
+
     @objc private func openFooterLink() {
         guard let url = URL(string: Self.footerLinkURLString) else { return }
         NSWorkspace.shared.open(url)
@@ -3088,7 +3378,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func updateLaunchAtLoginMenu() {
         let enabled = isLaunchAtLoginEnabled
         launchAtLoginItem.state = enabled ? .on : .off
-        lifecycleActionsView.buttons[0].title = enabled ? "✓ 자동 실행" : "자동 실행"
+        lifecycleActionsView.launchButton.title = enabled ? "✓ 자동 실행" : "자동 실행"
         setDetailTitle(launchAtLoginItem.title, for: launchAtLoginItem)
         pinnedUsageWindowController?.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
@@ -3162,7 +3452,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func statusTitle(
         from snapshot: RateLimitSnapshot,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?
+        gemini: GeminiUsageSnapshot?,
+        grok: GrokUsageSnapshot?
     ) -> String {
         var parts: [String] = []
 
@@ -3181,6 +3472,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append(percentTitle(from: geminiRemaining))
         }
 
+        if let grokRemaining = GrokUsageCore.remainingPercent(from: grok?.weeklyUsedPercent) {
+            parts.append(percentTitle(from: grokRemaining))
+        }
+
         return parts.isEmpty ? "—" : parts.joined(separator: "·")
     }
 
@@ -3191,7 +3486,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func accessibilityStatus(
         from snapshot: RateLimitSnapshot,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?
+        gemini: GeminiUsageSnapshot?,
+        grok: GrokUsageSnapshot?
     ) -> String {
         var parts: [String] = []
         if let usedPercent = snapshot.usedPercent {
@@ -3202,6 +3498,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         if let geminiRemaining = GeminiUsageCore.remainingPercent(from: gemini?.fiveHourRemainingFraction) {
             parts.append("남은 Gemini 5시간 사용량 \(percentTitle(from: geminiRemaining))")
+        }
+        if let grokRemaining = GrokUsageCore.remainingPercent(from: grok?.weeklyUsedPercent) {
+            parts.append("남은 Grok 주간 사용량 \(percentTitle(from: grokRemaining))")
         }
         return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
     }
@@ -3255,6 +3554,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static let refreshIntervalDefaultsKey = "codexAutomaticRefreshIntervalSeconds"
     private static let claudeRefreshIntervalDefaultsKey = "claudeAutomaticRefreshIntervalSeconds"
     private static let geminiRefreshIntervalDefaultsKey = "geminiAutomaticRefreshIntervalSeconds"
+    private static let grokRefreshIntervalDefaultsKey = "grokAutomaticRefreshIntervalSeconds"
     private static let pinnedUsageWindowDefaultsKey = "pinnedUsageWindowEnabled"
     private static let consumptionHistoryDefaultsKey = "usageConsumptionHistoryV1"
     private static let panelOpacityDefaultsKey = "usagePanelOpacity"
@@ -3285,6 +3585,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             ? nil
             : UserDefaults.standard.integer(forKey: geminiRefreshIntervalDefaultsKey)
         return UsageCore.normalizedGeminiRefreshInterval(saved)
+    }
+
+    private static func savedGrokRefreshInterval() -> TimeInterval {
+        let saved = UserDefaults.standard.object(forKey: grokRefreshIntervalDefaultsKey) == nil
+            ? nil
+            : UserDefaults.standard.integer(forKey: grokRefreshIntervalDefaultsKey)
+        return UsageCore.normalizedGrokRefreshInterval(saved)
     }
 
     private static let launchAgentURL: URL = {
