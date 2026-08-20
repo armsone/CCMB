@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.4.1</title>
+            <pubDate>Thu, 20 Aug 2026 12:00:32 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.4.1</link>
+            <sparkle:version>49</sparkle:version>
+            <sparkle:shortVersionString>0.4.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.4.1
+
+- 상태 메뉴와 항상 보기 패널을 같은 전체 레이아웃과 설정 구성으로 통합했습니다.
+- 패널 전체 배경의 불투명도를 95%~100% 범위에서 조절하고 현재 수치를 표시합니다.
+- 앱별 자동 갱신 시간을 목록에서 선택하고 다음 갱신까지 남은 시간을 확인할 수 있습니다.
+- 사용량 페이지 버튼의 브랜드 색상 롤오버와 사용량 공유 메뉴 동작을 개선했습니다.
+- 주간 Codex 사용량 소진 후 남은 크레딧을 크게 표시하면서 상세 크레딧 행은 유지합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.1/CCMB-0.4.1.dmg" length="2805737" type="application/octet-stream" sparkle:edSignature="OAOlFNMr4qAuw/SQYtztDnvlDMRp7Ynj0hGsJq40M9UnC5ausA8YJ+wr5GUpLxvzXJCBGXWBEmeZDPJttt9KCg=="/>
+        </item>
+        <item>
             <title>0.4.0</title>
             <pubDate>Thu, 20 Aug 2026 03:52:50 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.4.0</link>
@@ -34,21 +51,6 @@
 - Codex와 Claude의 계정·갱신 정보 및 사용량 그래프 정렬은 그대로 유지합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.30/CCMB-0.3.30.dmg" length="2443974" type="application/octet-stream" sparkle:edSignature="jmfDXCuPKfCA2A3fbmOzqgXF5/W1HXRZNGPnjN2TJBIHDxnVNwvCfdEuHPBBnmZxEIfX4QgC88CEqAr1aJM3AQ=="/>
-        </item>
-        <item>
-            <title>0.3.29</title>
-            <pubDate>Wed, 19 Aug 2026 21:36:07 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.3.29</link>
-            <sparkle:version>46</sparkle:version>
-            <sparkle:shortVersionString>0.3.29</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.3.29
-
-- Codex와 Claude의 계정 정보와 최근 갱신 시각을 그래프 바로 위의 정렬된 하단 영역에 배치했습니다.
-- Codex와 Claude의 갱신 시각을 동일한 상대 시간 형식으로 통일했습니다.
-- 갱신별 사용량 그래프로 최근 Codex 크레딧·주간 사용량과 Claude 세션·주간 사용량 변화를 확인할 수 있습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.3.29/CCMB-0.3.29.dmg" length="2440328" type="application/octet-stream" sparkle:edSignature="jSTKQFWl/yVhTuybDTwTguErpXxodxyONogxf3vi2vIw65cVq1JO0BMQH3npdM62HrJ/sPe67LL9I99ihqzxBQ=="/>
         </item>
     </channel>
 </rss>
