@@ -2440,9 +2440,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func refreshStatusTitle() {
         guard let snapshot = lastSnapshot else { return }
-        setStatusTitle(Self.statusTitle(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, grok: lastGrokSnapshot))
+        setStatusTitle(Self.statusTitle(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot))
         statusItem.button?.setAccessibilityValue(
-            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, grok: lastGrokSnapshot)
+            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot)
         )
     }
 
@@ -3452,8 +3452,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func statusTitle(
         from snapshot: RateLimitSnapshot,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?,
-        grok: GrokUsageSnapshot?
+        gemini: GeminiUsageSnapshot?
     ) -> String {
         var parts: [String] = []
 
@@ -3472,10 +3471,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append(percentTitle(from: geminiRemaining))
         }
 
-        if let grokRemaining = GrokUsageCore.remainingPercent(from: grok?.weeklyUsedPercent) {
-            parts.append(percentTitle(from: grokRemaining))
-        }
-
         return parts.isEmpty ? "—" : parts.joined(separator: "·")
     }
 
@@ -3486,8 +3481,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func accessibilityStatus(
         from snapshot: RateLimitSnapshot,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?,
-        grok: GrokUsageSnapshot?
+        gemini: GeminiUsageSnapshot?
     ) -> String {
         var parts: [String] = []
         if let usedPercent = snapshot.usedPercent {
@@ -3498,9 +3492,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         if let geminiRemaining = GeminiUsageCore.remainingPercent(from: gemini?.fiveHourRemainingFraction) {
             parts.append("남은 Gemini 5시간 사용량 \(percentTitle(from: geminiRemaining))")
-        }
-        if let grokRemaining = GrokUsageCore.remainingPercent(from: grok?.weeklyUsedPercent) {
-            parts.append("남은 Grok 주간 사용량 \(percentTitle(from: grokRemaining))")
         }
         return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
     }
