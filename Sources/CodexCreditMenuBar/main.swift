@@ -2975,7 +2975,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         var quota: UsagePanelQuota?
         var rows: [UsagePanelRow] = []
 
-        if let remaining = GrokUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
+        if let estimate = snapshot.rollingTokenUsage {
+            quota = UsagePanelQuota(
+                caption: "24시간 추정 남음",
+                percentText: percentTitle(from: estimate.remainingPercent),
+                fraction: estimate.remainingPercent / 100,
+                color: accent,
+                accessibilityValue: "이 Mac 기록으로 추정한 남은 Grok 24시간 사용량 \(percentTitle(from: estimate.remainingPercent))"
+            )
+        } else if let remaining = GrokUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
             quota = UsagePanelQuota(
                 caption: "주간 남음",
                 percentText: percentTitle(from: remaining),
@@ -2993,6 +3001,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             )
         }
         rows.append(UsagePanelRow(label: "요금제", value: snapshot.subscriptionTier ?? "정보 없음"))
+        if let estimate = snapshot.rollingTokenUsage {
+            let used = NumberFormatter.localizedString(from: NSNumber(value: estimate.usedTokens), number: .decimal)
+            let limit = NumberFormatter.localizedString(from: NSNumber(value: estimate.limitTokens), number: .decimal)
+            rows.append(UsagePanelRow(label: "토큰 추정", value: "\(used) / \(limit)"))
+            if let recoveryAt = estimate.recoveryAt {
+                rows.append(UsagePanelRow(
+                    label: "회복 예상",
+                    value: resetDateTimeFormatter.string(from: recoveryAt),
+                    isEmphasized: true
+                ))
+            }
+        }
         rows.append(UsagePanelRow(
             label: "월간",
             value: snapshot.monthlyUsedCredits.map { "\(creditDetailTitle(from: $0)) 크레딧 사용" } ?? "정보 없음"
@@ -3008,7 +3028,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         ))
 
         var statusLines: [String] = []
-        if snapshot.weeklyUsedPercent == nil {
+        if snapshot.weeklyUsedPercent == nil, snapshot.rollingTokenUsage != nil {
+            statusLines.append("추정 · 이 Mac의 최근 Grok 기록 기준")
+        } else if snapshot.weeklyUsedPercent == nil {
             statusLines.append("주간 잔량: Grok에서 수치를 제공하지 않음")
         }
         if let fetchFailureLabel {

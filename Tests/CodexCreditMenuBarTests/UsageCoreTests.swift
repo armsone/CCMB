@@ -603,6 +603,50 @@ final class GrokUsageCoreTests: XCTestCase {
         XCTAssertNil(GrokUsageCore.weeklyUsedPercent(creditUsagePercent: nil))
     }
 
+    func testParsesCompletedTurnTokenUsageOnly() {
+        let jsonLines = """
+        {"timestamp":1000,"params":{"update":{"sessionUpdate":"agent_message_chunk","usage":{"totalTokens":999}}}}
+        {"timestamp":1100,"params":{"update":{"sessionUpdate":"turn_completed","usage":{"totalTokens":12000}}}}
+        {"timestamp":1200,"params":{"update":{"sessionUpdate":"turn_completed","usage":{"totalTokens":8000}}}}
+        """
+
+        XCTAssertEqual(
+            GrokUsageCore.parseTokenUsageRecords(data(jsonLines)),
+            [
+                GrokTokenUsageRecord(completedAt: Date(timeIntervalSince1970: 1_100), totalTokens: 12_000),
+                GrokTokenUsageRecord(completedAt: Date(timeIntervalSince1970: 1_200), totalTokens: 8_000)
+            ]
+        )
+    }
+
+    func testRollingTokenUsageDropsOldRecordsAndPredictsRecovery() throws {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let records = [
+            GrokTokenUsageRecord(completedAt: now.addingTimeInterval(-90_000), totalTokens: 400_000),
+            GrokTokenUsageRecord(completedAt: now.addingTimeInterval(-80_000), totalTokens: 300_000),
+            GrokTokenUsageRecord(completedAt: now.addingTimeInterval(-1_000), totalTokens: 205_000)
+        ]
+
+        let estimate = try XCTUnwrap(GrokUsageCore.rollingTokenUsage(records: records, now: now))
+
+        XCTAssertEqual(estimate.usedTokens, 505_000)
+        XCTAssertEqual(estimate.limitTokens, 500_000)
+        XCTAssertEqual(estimate.remainingPercent, 0)
+        XCTAssertEqual(estimate.recoveryAt, now.addingTimeInterval(6_400))
+    }
+
+    func testRollingTokenUsageShowsRemainingEstimateWhenBelowLimit() throws {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let estimate = try XCTUnwrap(GrokUsageCore.rollingTokenUsage(
+            records: [GrokTokenUsageRecord(completedAt: now.addingTimeInterval(-1_000), totalTokens: 20_000)],
+            now: now
+        ))
+
+        XCTAssertEqual(estimate.usedTokens, 20_000)
+        XCTAssertEqual(estimate.remainingPercent, 96)
+        XCTAssertNil(estimate.recoveryAt)
+    }
+
     /// The default `/v1/billing` shape: `monthlyLimit.val == 0`,
     /// `used.val == 280`. A zero (or absent) limit must never render a
     /// monthly percentage.
@@ -673,6 +717,11 @@ final class GrokUsageCoreTests: XCTestCase {
             monthlyUsedCredits: 2.8,
             extraCreditBalance: 5,
             subscriptionTier: "SuperGrok",
+            rollingTokenUsage: GrokRollingTokenUsage(
+                usedTokens: 20_000,
+                limitTokens: 500_000,
+                recoveryAt: nil
+            ),
             publishedAt: Date(timeIntervalSince1970: 1_000),
             accountEmail: "person@example.com"
         )
@@ -684,6 +733,7 @@ final class GrokUsageCoreTests: XCTestCase {
         XCTAssertEqual(restored.monthlyUsedCredits, 2.8)
         XCTAssertEqual(restored.extraCreditBalance, 5)
         XCTAssertEqual(restored.subscriptionTier, "SuperGrok")
+        XCTAssertEqual(restored.rollingTokenUsage, original.rollingTokenUsage)
         XCTAssertEqual(restored.accountEmail, original.accountEmail)
         XCTAssertEqual(restored.publishedAt, original.publishedAt)
     }

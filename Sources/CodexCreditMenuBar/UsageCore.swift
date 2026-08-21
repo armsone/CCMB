@@ -1232,6 +1232,22 @@ enum ClaudeUsageCore {
 /// monthly fallback into one snapshot, mirroring `GeminiUsageSnapshot`'s
 /// shape so the shared-file and panel code can follow the same conventions
 /// for a fourth provider.
+struct GrokRollingTokenUsage: Sendable, Equatable {
+    let usedTokens: Int
+    let limitTokens: Int
+    let recoveryAt: Date?
+
+    var remainingPercent: Double {
+        guard limitTokens > 0 else { return 0 }
+        return min(max((1 - (Double(usedTokens) / Double(limitTokens))) * 100, 0), 100)
+    }
+}
+
+struct GrokTokenUsageRecord: Sendable, Equatable {
+    let completedAt: Date
+    let totalTokens: Int
+}
+
 struct GrokUsageSnapshot: Sendable, Equatable {
     let weeklyUsedPercent: Double?
     let weeklyResetsAt: Date?
@@ -1242,6 +1258,9 @@ struct GrokUsageSnapshot: Sendable, Equatable {
     let monthlyUsedCredits: Double?
     let extraCreditBalance: Double?
     let subscriptionTier: String?
+    /// Best-effort total from successful Grok CLI turns recorded on this Mac.
+    /// It cannot include Grok web usage or calls made on another device.
+    let rollingTokenUsage: GrokRollingTokenUsage?
     let publishedAt: Date?
     /// Non-secret identity read from the local `auth.json` entry. The access
     /// token itself never becomes part of this snapshot.
@@ -1255,6 +1274,7 @@ struct GrokUsageSnapshot: Sendable, Equatable {
         monthlyUsedCredits: Double? = nil,
         extraCreditBalance: Double? = nil,
         subscriptionTier: String? = nil,
+        rollingTokenUsage: GrokRollingTokenUsage? = nil,
         publishedAt: Date? = nil,
         accountEmail: String? = nil
     ) {
@@ -1265,6 +1285,7 @@ struct GrokUsageSnapshot: Sendable, Equatable {
         self.monthlyUsedCredits = monthlyUsedCredits
         self.extraCreditBalance = extraCreditBalance
         self.subscriptionTier = subscriptionTier
+        self.rollingTokenUsage = rollingTokenUsage
         self.publishedAt = publishedAt
         self.accountEmail = accountEmail
     }
@@ -1275,6 +1296,7 @@ struct GrokUsageSnapshot: Sendable, Equatable {
             || monthlyUsedCredits != nil
             || extraCreditBalance != nil
             || subscriptionTier != nil
+            || rollingTokenUsage != nil
     }
 }
 
@@ -1285,6 +1307,78 @@ struct GrokUsageSnapshot: Sendable, Equatable {
 enum GrokUsageCore {
     static let sharedFreshForSeconds: TimeInterval = 300
     static let minimumRequestIntervalSeconds: TimeInterval = 120
+    static let freeRollingTokenLimit = 500_000
+    static let rollingTokenWindowSeconds: TimeInterval = 24 * 60 * 60
+
+    static func parseTokenUsageRecords(_ data: Data) -> [GrokTokenUsageRecord] {
+        data.split(separator: 0x0A).compactMap { line in
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  let timestamp = (object["timestamp"] as? NSNumber)?.doubleValue,
+                  let params = object["params"] as? [String: Any],
+                  let update = params["update"] as? [String: Any],
+                  update["sessionUpdate"] as? String == "turn_completed",
+                  let usage = update["usage"] as? [String: Any],
+                  let totalTokens = (usage["totalTokens"] as? NSNumber)?.intValue,
+                  totalTokens > 0
+            else { return nil }
+            return GrokTokenUsageRecord(
+                completedAt: Date(timeIntervalSince1970: timestamp),
+                totalTokens: totalTokens
+            )
+        }
+    }
+
+    static func rollingTokenUsage(
+        records: [GrokTokenUsageRecord],
+        now: Date,
+        limitTokens: Int = freeRollingTokenLimit
+    ) -> GrokRollingTokenUsage? {
+        let cutoff = now.addingTimeInterval(-rollingTokenWindowSeconds)
+        let active = records
+            .filter { $0.completedAt > cutoff && $0.completedAt <= now && $0.totalTokens > 0 }
+            .sorted { $0.completedAt < $1.completedAt }
+        guard !active.isEmpty, limitTokens > 0 else { return nil }
+
+        let usedTokens = active.reduce(0) { partial, record in
+            partial.addingReportingOverflow(record.totalTokens).overflow
+                ? Int.max
+                : partial + record.totalTokens
+        }
+        var recoveryAt: Date?
+        if usedTokens >= limitTokens {
+            var remaining = usedTokens
+            for record in active {
+                remaining -= record.totalTokens
+                if remaining < limitTokens {
+                    recoveryAt = record.completedAt.addingTimeInterval(rollingTokenWindowSeconds)
+                    break
+                }
+            }
+        }
+        return GrokRollingTokenUsage(
+            usedTokens: usedTokens,
+            limitTokens: limitTokens,
+            recoveryAt: recoveryAt
+        )
+    }
+
+    static func addingRollingTokenUsage(
+        _ rollingTokenUsage: GrokRollingTokenUsage?,
+        to snapshot: GrokUsageSnapshot
+    ) -> GrokUsageSnapshot {
+        GrokUsageSnapshot(
+            weeklyUsedPercent: snapshot.weeklyUsedPercent,
+            weeklyResetsAt: snapshot.weeklyResetsAt,
+            monthlyUsedPercent: snapshot.monthlyUsedPercent,
+            monthlyResetsAt: snapshot.monthlyResetsAt,
+            monthlyUsedCredits: snapshot.monthlyUsedCredits,
+            extraCreditBalance: snapshot.extraCreditBalance,
+            subscriptionTier: snapshot.subscriptionTier,
+            rollingTokenUsage: rollingTokenUsage,
+            publishedAt: snapshot.publishedAt,
+            accountEmail: snapshot.accountEmail
+        )
+    }
 
     static func remainingPercent(from usedPercent: Double?) -> Double? {
         guard let usedPercent else { return nil }
@@ -1439,6 +1533,10 @@ enum GrokUsageCore {
                 "monthlyUsedCredits": NSNull(),
                 "extraCreditBalance": NSNull(),
                 "subscriptionTier": NSNull(),
+                "rollingTokenUsedEstimate": NSNull(),
+                "rollingTokenLimit": NSNull(),
+                "rollingTokenRemainingPercentEstimate": NSNull(),
+                "rollingTokenRecoveryAtEstimate": NSNull(),
                 "account": NSNull(),
                 "fetchedAt": NSNull(),
                 "ageSeconds": NSNull(),
@@ -1460,6 +1558,10 @@ enum GrokUsageCore {
             "monthlyUsedCredits": snapshot.monthlyUsedCredits ?? NSNull(),
             "extraCreditBalance": snapshot.extraCreditBalance ?? NSNull(),
             "subscriptionTier": snapshot.subscriptionTier ?? NSNull(),
+            "rollingTokenUsedEstimate": snapshot.rollingTokenUsage?.usedTokens ?? NSNull(),
+            "rollingTokenLimit": snapshot.rollingTokenUsage?.limitTokens ?? NSNull(),
+            "rollingTokenRemainingPercentEstimate": snapshot.rollingTokenUsage?.remainingPercent ?? NSNull(),
+            "rollingTokenRecoveryAtEstimate": snapshot.rollingTokenUsage?.recoveryAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
             "account": snapshot.accountEmail ?? NSNull(),
             "fetchedAt": snapshot.publishedAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
             "ageSeconds": ageSeconds ?? NSNull(),
@@ -1504,6 +1606,17 @@ enum GrokUsageCore {
             monthlyUsedCredits: percent("monthlyUsedCredits"),
             extraCreditBalance: percent("extraCreditBalance"),
             subscriptionTier: payload["subscriptionTier"] as? String,
+            rollingTokenUsage: {
+                guard let used = (payload["rollingTokenUsedEstimate"] as? NSNumber)?.intValue,
+                      let limit = (payload["rollingTokenLimit"] as? NSNumber)?.intValue,
+                      used >= 0, limit > 0
+                else { return nil }
+                return GrokRollingTokenUsage(
+                    usedTokens: used,
+                    limitTokens: limit,
+                    recoveryAt: date("rollingTokenRecoveryAtEstimate")
+                )
+            }(),
             publishedAt: date("fetchedAt"),
             accountEmail: payload["account"] as? String
         )
@@ -1514,6 +1627,7 @@ enum GrokUsageCore {
             || snapshot.monthlyUsedCredits != nil
             || snapshot.extraCreditBalance != nil
             || snapshot.subscriptionTier != nil
+            || snapshot.rollingTokenUsage != nil
             || snapshot.accountEmail != nil
         else { return nil }
         return snapshot

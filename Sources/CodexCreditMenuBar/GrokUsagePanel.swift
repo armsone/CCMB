@@ -260,7 +260,10 @@ enum GrokUsageClient {
                                     settingsData: settingsData,
                                     accountEmail: credential.email
                                 ) {
-                                    finish(.success(snapshot))
+                                    let rollingUsage = snapshot.subscriptionTier?.lowercased() == "free"
+                                        ? GrokLocalUsageStore.rollingTokenUsage()
+                                        : nil
+                                    finish(.success(GrokUsageCore.addingRollingTokenUsage(rollingUsage, to: snapshot)))
                                 } else {
                                     finish(.decodeFailure)
                                 }
@@ -270,6 +273,34 @@ enum GrokUsageClient {
                 }
             }
         }
+    }
+}
+
+/// Reads only completed-turn usage metadata from the official Grok CLI's
+/// local session files. No prompt or response text is retained or published.
+enum GrokLocalUsageStore {
+    private static let sessionsURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".grok")
+        .appendingPathComponent("sessions")
+
+    static func rollingTokenUsage(now: Date = Date()) -> GrokRollingTokenUsage? {
+        guard let enumerator = FileManager.default.enumerator(
+            at: sessionsURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        let cutoff = now.addingTimeInterval(-GrokUsageCore.rollingTokenWindowSeconds)
+        var records: [GrokTokenUsageRecord] = []
+        for case let url as URL in enumerator where url.lastPathComponent == "updates.jsonl" {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
+                  values.isRegularFile == true,
+                  values.contentModificationDate.map({ $0 > cutoff }) != false,
+                  let data = try? Data(contentsOf: url, options: .mappedIfSafe)
+            else { continue }
+            records.append(contentsOf: GrokUsageCore.parseTokenUsageRecords(data))
+        }
+        return GrokUsageCore.rollingTokenUsage(records: records, now: now)
     }
 }
 
