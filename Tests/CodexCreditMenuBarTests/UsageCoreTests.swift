@@ -22,6 +22,38 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertEqual(UsageCore.remainingPercent(from: 120), 0)
     }
 
+    func testSparkWeeklyWindowReadsSecondaryAppServerBucket() throws {
+        let buckets: [String: Any] = [
+            "codex": [
+                "limitId": "codex",
+                "primary": ["usedPercent": 47, "windowDurationMins": 10_080]
+            ],
+            "codex_bengalfox": [
+                "limitId": "codex_bengalfox",
+                "limitName": "GPT-5.3-Codex-Spark",
+                "primary": ["usedPercent": 47, "windowDurationMins": 300],
+                "secondary": ["usedPercent": 21, "windowDurationMins": 10_080, "resetsAt": 1_787_904_744]
+            ]
+        ]
+
+        let weekly = try XCTUnwrap(UsageCore.sparkWeeklyWindow(from: buckets))
+
+        XCTAssertEqual(weekly.usedPercent, 21)
+        XCTAssertEqual(weekly.windowDurationMinutes, 10_080)
+        XCTAssertEqual(weekly.resetsAt, Date(timeIntervalSince1970: 1_787_904_744))
+    }
+
+    func testSparkWeeklyWindowDoesNotMistakePrimaryCodexBucketForSpark() {
+        let buckets: [String: Any] = [
+            "codex": [
+                "limitId": "codex",
+                "primary": ["usedPercent": 47, "windowDurationMins": 10_080]
+            ]
+        ]
+
+        XCTAssertNil(UsageCore.sparkWeeklyWindow(from: buckets))
+    }
+
     func testPositiveSubunitCreditRemainsVisible() {
         XCTAssertEqual(UsageCore.creditTitle(from: 0.49), "0.49")
         XCTAssertEqual(UsageCore.creditTitle(from: 0.1), "0.1")
@@ -131,6 +163,9 @@ final class UsageCoreTests: XCTestCase {
         resetsAt: Date? = nil,
         resetCredits: Int? = nil,
         creditBalance: Double? = nil,
+        sparkUsedPercent: Double? = nil,
+        sparkWindowDurationMinutes: Int? = nil,
+        sparkResetsAt: Date? = nil,
         detailedCreditsReturned: Bool = false,
         updatedAt: Date
     ) -> RateLimitSnapshot {
@@ -142,6 +177,9 @@ final class UsageCoreTests: XCTestCase {
             resetsAt: resetsAt,
             resetCredits: resetCredits,
             creditBalance: creditBalance,
+            sparkUsedPercent: sparkUsedPercent,
+            sparkWindowDurationMinutes: sparkWindowDurationMinutes,
+            sparkResetsAt: sparkResetsAt,
             detailedCreditsReturned: detailedCreditsReturned,
             updatedAt: updatedAt
         )
@@ -161,9 +199,37 @@ final class UsageCoreTests: XCTestCase {
 
         XCTAssertEqual(payload["status"] as? String, "unavailable")
         XCTAssertTrue(payload["weeklyRemainingPercent"] is NSNull)
+        XCTAssertTrue(payload["sparkRemainingPercent"] is NSNull)
+        XCTAssertTrue(payload["sparkUsedPercent"] is NSNull)
+        XCTAssertTrue(payload["sparkResetsAt"] is NSNull)
+        XCTAssertTrue(payload["sparkWindowDurationMins"] is NSNull)
         XCTAssertTrue(payload["account"] is NSNull)
         XCTAssertEqual(payload["fresh"] as? Bool, false)
         XCTAssertEqual(payload["freshForSeconds"] as? Int, 45)
+    }
+
+    func testCodexPayloadIncludesSparkWeeklyUsage() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let sparkResetsAt = Date(timeIntervalSince1970: 1_250)
+        let snapshot = makeRateLimitSnapshot(
+            accountID: "user@example.com",
+            usedPercent: 30,
+            resetCredits: 5,
+            creditBalance: 12.5,
+            sparkUsedPercent: 20,
+            sparkWindowDurationMinutes: 1_440,
+            sparkResetsAt: sparkResetsAt,
+            updatedAt: Date(timeIntervalSince1970: 970)
+        )
+
+        let payload = UsageCore.codexPayload(from: snapshot, freshForSeconds: 45, now: now)
+
+        XCTAssertEqual(payload["sparkRemainingPercent"] as? Double, 80)
+        XCTAssertEqual(payload["sparkUsedPercent"] as? Double, 20)
+        XCTAssertEqual(payload["sparkWindowDurationMins"] as? Int, 1_440)
+        XCTAssertEqual(payload["sparkResetsAt"] as? String, formatter.string(from: sparkResetsAt))
     }
 
     func testCodexPayloadIncludesWeeklyCreditAccountAndFreshness() {
@@ -209,6 +275,27 @@ final class UsageCoreTests: XCTestCase {
 
         XCTAssertEqual(refreshed["ageSeconds"] as? Int, 100)
         XCTAssertEqual(refreshed["fresh"] as? Bool, false)
+    }
+
+    func testRefreshedCodexPayloadPreservesSparkFields() {
+        let stored = UsageCore.codexPayload(
+            from: makeRateLimitSnapshot(
+                usedPercent: 10,
+                sparkUsedPercent: 20,
+                sparkWindowDurationMinutes: 1_440,
+                sparkResetsAt: Date(timeIntervalSince1970: 1_200),
+                updatedAt: Date(timeIntervalSince1970: 1_000)
+            ),
+            freshForSeconds: 45,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+
+        let refreshed = UsageCore.refreshedCodexPayload(stored, now: Date(timeIntervalSince1970: 1_100))
+
+        XCTAssertEqual(refreshed["sparkRemainingPercent"] as? Double, 80)
+        XCTAssertEqual(refreshed["sparkUsedPercent"] as? Double, 20)
+        XCTAssertEqual(refreshed["sparkWindowDurationMins"] as? Int, 1_440)
+        XCTAssertTrue((refreshed["sparkResetsAt"] as? String)?.contains("1970-01-01T00:20:00") == true)
     }
 }
 
@@ -503,75 +590,17 @@ final class GrokUsageCoreTests: XCTestCase {
     }
 
     func testWeeklyPercentIsUsedWhenPresent() {
-        let percent = GrokUsageCore.weeklyUsedPercent(
-            creditUsagePercent: 42.5,
-            periodType: "USAGE_PERIOD_TYPE_WEEKLY",
-            periodStart: "2026-08-15T00:00:00Z",
-            periodEnd: "2026-08-22T00:00:00Z",
-            billingPeriodStart: "2026-08-01T00:00:00Z",
-            billingPeriodEnd: "2026-08-31T00:00:00Z"
-        )
+        let percent = GrokUsageCore.weeklyUsedPercent(creditUsagePercent: 42.5)
         XCTAssertEqual(percent, 42.5)
     }
 
     func testWeeklyPercentClamps() {
-        XCTAssertEqual(GrokUsageCore.weeklyUsedPercent(
-            creditUsagePercent: 150,
-            periodType: nil, periodStart: nil, periodEnd: nil,
-            billingPeriodStart: nil, billingPeriodEnd: nil
-        ), 100)
-        XCTAssertEqual(GrokUsageCore.weeklyUsedPercent(
-            creditUsagePercent: -10,
-            periodType: nil, periodStart: nil, periodEnd: nil,
-            billingPeriodStart: nil, billingPeriodEnd: nil
-        ), 0)
+        XCTAssertEqual(GrokUsageCore.weeklyUsedPercent(creditUsagePercent: 150), 100)
+        XCTAssertEqual(GrokUsageCore.weeklyUsedPercent(creditUsagePercent: -10), 0)
     }
 
-    /// The live account shape: `currentPeriod` is weekly and its bounds
-    /// exactly match the account's own billing period, with
-    /// `creditUsagePercent` omitted entirely. This must resolve to zero used
-    /// (100% remaining), never to "unavailable".
-    func testOmittedPercentWithConfirmedWeeklyBoundsMeansZeroUsed() {
-        let percent = GrokUsageCore.weeklyUsedPercent(
-            creditUsagePercent: nil,
-            periodType: "USAGE_PERIOD_TYPE_WEEKLY",
-            periodStart: "2026-08-15T00:00:00Z",
-            periodEnd: "2026-08-22T00:00:00Z",
-            billingPeriodStart: "2026-08-15T00:00:00Z",
-            billingPeriodEnd: "2026-08-22T00:00:00Z"
-        )
-        XCTAssertEqual(percent, 0)
-        XCTAssertEqual(GrokUsageCore.remainingPercent(from: percent), 100)
-    }
-
-    /// Any other omission shape — wrong period type, or bounds that don't
-    /// match the billing period — must stay unavailable rather than being
-    /// treated as zero.
-    func testOmittedPercentWithoutConfirmedWeeklyBoundsIsUnavailable() {
-        XCTAssertNil(GrokUsageCore.weeklyUsedPercent(
-            creditUsagePercent: nil,
-            periodType: "USAGE_PERIOD_TYPE_MONTHLY",
-            periodStart: "2026-08-15T00:00:00Z",
-            periodEnd: "2026-08-22T00:00:00Z",
-            billingPeriodStart: "2026-08-15T00:00:00Z",
-            billingPeriodEnd: "2026-08-22T00:00:00Z"
-        ))
-        XCTAssertNil(GrokUsageCore.weeklyUsedPercent(
-            creditUsagePercent: nil,
-            periodType: "USAGE_PERIOD_TYPE_WEEKLY",
-            periodStart: "2026-08-15T00:00:00Z",
-            periodEnd: "2026-08-22T00:00:00Z",
-            billingPeriodStart: "2026-08-01T00:00:00Z",
-            billingPeriodEnd: "2026-08-31T00:00:00Z"
-        ))
-        XCTAssertNil(GrokUsageCore.weeklyUsedPercent(
-            creditUsagePercent: nil,
-            periodType: "USAGE_PERIOD_TYPE_WEEKLY",
-            periodStart: nil,
-            periodEnd: nil,
-            billingPeriodStart: nil,
-            billingPeriodEnd: nil
-        ))
+    func testOmittedWeeklyPercentIsUnavailable() {
+        XCTAssertNil(GrokUsageCore.weeklyUsedPercent(creditUsagePercent: nil))
     }
 
     /// The default `/v1/billing` shape: `monthlyLimit.val == 0`,
@@ -608,18 +637,20 @@ final class GrokUsageCoreTests: XCTestCase {
         XCTAssertNotNil(snapshot.weeklyResetsAt)
     }
 
-    func testParseHandlesLiveAccountShapeWithOmittedPercent() throws {
+    func testParseKeepsOmittedLivePercentUnavailable() throws {
         let json = """
         {
             "config": {
                 "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-08-15T00:00:00+00:00", "end": "2026-08-22T00:00:00+00:00"},
                 "billingPeriodStart": "2026-08-15T00:00:00+00:00",
-                "billingPeriodEnd": "2026-08-22T00:00:00+00:00"
+                "billingPeriodEnd": "2026-08-22T00:00:00+00:00",
+                "prepaidBalance": {"val": 0}
             }
         }
         """
         let snapshot = try XCTUnwrap(GrokUsageCore.parse(data(json), accountEmail: nil))
-        XCTAssertEqual(snapshot.weeklyUsedPercent, 0)
+        XCTAssertNil(snapshot.weeklyUsedPercent)
+        XCTAssertEqual(snapshot.extraCreditBalance, 0)
     }
 
     func testParseReturnsNilForMalformedJSON() {
@@ -691,7 +722,7 @@ final class GrokUsageCoreTests: XCTestCase {
 
         XCTAssertEqual(snapshot.subscriptionTier, "Free")
         XCTAssertEqual(snapshot.monthlyUsedCredits, 2.8)
-        XCTAssertEqual(snapshot.weeklyUsedPercent, 0)
+        XCTAssertNil(snapshot.weeklyUsedPercent)
         XCTAssertNotNil(snapshot.weeklyResetsAt)
         XCTAssertEqual(snapshot.extraCreditBalance, 5.25)
     }
@@ -700,7 +731,22 @@ final class GrokUsageCoreTests: XCTestCase {
         let payload = GrokUsageCore.sharedPayload(from: nil)
         XCTAssertEqual(payload["status"] as? String, "unavailable")
         XCTAssertTrue(payload["weeklyRemainingPercent"] is NSNull)
+        XCTAssertEqual(payload["weeklyUsageConfirmed"] as? Bool, false)
         XCTAssertEqual(payload["fresh"] as? Bool, false)
+    }
+
+    func testLegacyInferredZeroDoesNotRestoreAsOneHundredPercentRemaining() throws {
+        let payload: [String: Any] = [
+            "weeklyUsedPercent": 0.0,
+            "monthlyUsedCredits": 6.62,
+            "subscriptionTier": "Free",
+            "fetchedAt": "2026-08-21T13:27:56.286Z"
+        ]
+
+        let restored = try XCTUnwrap(GrokUsageCore.snapshot(fromSharedPayload: payload))
+
+        XCTAssertNil(restored.weeklyUsedPercent)
+        XCTAssertTrue(GrokUsageCore.sharedPayload(from: restored)["weeklyRemainingPercent"] is NSNull)
     }
 
     func testRestartSnapshotRejectsEmptySharedPayload() {
@@ -746,6 +792,7 @@ final class GrokAuthCoreTests: XCTestCase {
                 "user_id": "user-1",
                 "email": "person@example.com",
                 "team_id": "team-1",
+                "refresh_token": "refresh-secret",
                 "expires_at": 2000000000
             },
             "https://auth.example.com::other": {
@@ -758,6 +805,7 @@ final class GrokAuthCoreTests: XCTestCase {
         XCTAssertEqual(credential.email, "person@example.com")
         XCTAssertEqual(credential.userID, "user-1")
         XCTAssertEqual(credential.teamID, "team-1")
+        XCTAssertTrue(credential.hasRefreshToken)
         XCTAssertNotNil(credential.expiresAt)
     }
 
@@ -779,9 +827,9 @@ final class GrokAuthCoreTests: XCTestCase {
     }
 
     func testExpiryIsComparedAgainstNow() {
-        let expired = GrokAuthCredential(accessToken: "t", email: nil, userID: nil, teamID: nil, expiresAt: Date(timeIntervalSince1970: 1_000))
-        let notExpired = GrokAuthCredential(accessToken: "t", email: nil, userID: nil, teamID: nil, expiresAt: Date(timeIntervalSince1970: 3_000))
-        let noExpiry = GrokAuthCredential(accessToken: "t", email: nil, userID: nil, teamID: nil, expiresAt: nil)
+        let expired = GrokAuthCredential(accessToken: "t", email: nil, userID: nil, teamID: nil, expiresAt: Date(timeIntervalSince1970: 1_000), hasRefreshToken: false)
+        let notExpired = GrokAuthCredential(accessToken: "t", email: nil, userID: nil, teamID: nil, expiresAt: Date(timeIntervalSince1970: 3_000), hasRefreshToken: false)
+        let noExpiry = GrokAuthCredential(accessToken: "t", email: nil, userID: nil, teamID: nil, expiresAt: nil, hasRefreshToken: false)
         let now = Date(timeIntervalSince1970: 2_000)
 
         XCTAssertTrue(GrokAuthCore.isExpired(expired, now: now))
@@ -820,8 +868,8 @@ final class GrokUsageFetchOutcomeTests: XCTestCase {
         }
     }
 
-    func testExpiredCredentialTellsUserToRunGrokAgain() {
-        XCTAssertEqual(GrokUsageFetchOutcome.expiredCredential.staleReasonLabel, "인증 만료 · grok 실행 후 다시 로그인하세요")
+    func testExpiredCredentialDirectsUserToInAppLogin() {
+        XCTAssertEqual(GrokUsageFetchOutcome.expiredCredential.staleReasonLabel, "인증 만료 · 브라우저에서 Grok 로그인이 필요합니다")
     }
 }
 

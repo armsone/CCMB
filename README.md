@@ -26,7 +26,7 @@ CCMB (Codex & Claude Meter Bar) is an unofficial macOS menu bar app that display
 - Antigravity's `agy` CLI installed and signed in when Gemini usage information is required
 - The Grok CLI signed in (`~/.grok/auth.json`, or `$GROK_HOME/auth.json`) when Grok usage information is required
 
-CCMB starts the local `codex app-server` process and uses the current user's existing Codex session. It does not bundle an API key or login credential. Gemini usage is read by launching the locally installed `agy` CLI in read-only plan/sandbox mode; CCMB never sends its own network requests for Gemini data. Grok usage is read by calling the Grok CLI's own billing endpoint with the OAuth token the `grok` CLI already stored locally; CCMB never signs in, refreshes credentials, or writes to that file itself — an expired credential simply asks you to run `grok` again.
+CCMB starts the local `codex app-server` process and uses the current user's existing Codex session. It does not bundle an API key or login credential. Gemini usage is read by launching the locally installed `agy` CLI in read-only plan/sandbox mode; CCMB never sends its own network requests for Gemini data. Grok usage is read by calling the Grok CLI's own billing endpoint with the OAuth token the `grok` CLI already stored locally. When needed, CCMB asks the official Grok CLI to refresh that token or start its browser login flow; CCMB never writes or displays the credential itself.
 
 ## Share usage with other apps and chats
 

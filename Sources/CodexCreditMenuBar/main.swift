@@ -48,10 +48,14 @@ private enum SharedUsageStore {
             "source": "codex app-server",
             "method": "account/rateLimits/read",
             "weeklyRemainingPercent": remainingPercent ?? NSNull(),
+            "sparkRemainingPercent": snapshot.sparkUsedPercent.map(UsageCore.remainingPercent) ?? NSNull(),
             "creditBalance": snapshot.creditBalance ?? NSNull(),
             "usedPercent": snapshot.usedPercent ?? NSNull(),
             "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
             "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "sparkResetsAt": snapshot.sparkResetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "sparkUsedPercent": snapshot.sparkUsedPercent ?? NSNull(),
+            "sparkWindowDurationMins": snapshot.sparkWindowDurationMinutes ?? NSNull(),
             "fetchedAt": iso8601Formatter.string(from: snapshot.updatedAt),
             "publishedAt": iso8601Formatter.string(from: Date()),
             "sequence": sequence,
@@ -217,10 +221,14 @@ private enum UsageCommand {
             ?? GrokUsageCore.sharedPayload(from: nil)
         var output: [String: Any] = [
             "weeklyRemainingPercent": payload["weeklyRemainingPercent"] ?? NSNull(),
+            "sparkRemainingPercent": payload["sparkRemainingPercent"] ?? NSNull(),
             "creditBalance": payload["creditBalance"] ?? NSNull(),
             "usedPercent": payload["usedPercent"] ?? NSNull(),
+            "sparkUsedPercent": payload["sparkUsedPercent"] ?? NSNull(),
             "windowDurationMins": payload["windowDurationMins"] ?? NSNull(),
             "resetsAt": payload["resetsAt"] ?? NSNull(),
+            "sparkResetsAt": payload["sparkResetsAt"] ?? NSNull(),
+            "sparkWindowDurationMins": payload["sparkWindowDurationMins"] ?? NSNull(),
             "origin": "ccmb-cache",
             "fetchedAt": payload["fetchedAt"] ?? NSNull(),
             "claude": ClaudeUsageCore.refreshedSharedPayload(storedClaude),
@@ -294,10 +302,14 @@ private enum UsageCommand {
         let fetchedAt = iso8601Formatter.string(from: snapshot.updatedAt)
         return [
             "weeklyRemainingPercent": min(max(100 - usedPercent, 0), 100),
+            "sparkRemainingPercent": snapshot.sparkUsedPercent.map { min(max(100 - $0, 0), 100) } ?? NSNull(),
             "creditBalance": snapshot.creditBalance ?? NSNull(),
             "usedPercent": usedPercent,
+            "sparkUsedPercent": snapshot.sparkUsedPercent ?? NSNull(),
             "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
+            "sparkWindowDurationMins": snapshot.sparkWindowDurationMinutes ?? NSNull(),
             "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "sparkResetsAt": snapshot.sparkResetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
             "origin": "direct-app-server",
             "fetchedAt": fetchedAt,
             "ageSeconds": 0,
@@ -1073,6 +1085,9 @@ private final class CodexAppServerClient: @unchecked Sendable {
     ) -> RateLimitSnapshot {
         let rateLimits = object["rateLimits"] as? [String: Any]
         let primary = rateLimits?["primary"] as? [String: Any]
+        let sparkWeekly = UsageCore.sparkWeeklyWindow(
+            from: object["rateLimitsByLimitId"] as? [String: Any]
+        )
 
         let resetCredits = object.value(at: ["rateLimitResetCredits", "availableCount"]).flatMap(numberAsInt)
         let resetsAt = primary?["resetsAt"].flatMap(numberAsDouble).map {
@@ -1087,6 +1102,9 @@ private final class CodexAppServerClient: @unchecked Sendable {
             resetsAt: resetsAt,
             resetCredits: resetCredits,
             creditBalance: object.value(at: ["rateLimits", "credits", "balance"]).flatMap(numberAsDouble),
+            sparkUsedPercent: sparkWeekly?.usedPercent,
+            sparkWindowDurationMinutes: sparkWeekly?.windowDurationMinutes,
+            sparkResetsAt: sparkWeekly?.resetsAt,
             detailedCreditsReturned: object.containsKeyRecursively("credits"),
             updatedAt: Date()
         )
@@ -1330,6 +1348,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
         controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
         controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
+        controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
         controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
         controller.setShareMenu(makeShareMenu())
         controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
@@ -1355,6 +1374,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastGeminiFetchFailureLabel: String?
     private var lastGrokSnapshot: GrokUsageSnapshot?
     private var lastGrokFetchFailureLabel: String?
+    private var grokLoginRequired = false
+    private var grokLoginInProgress = false
+    private var grokAuthRecoveryInProgress = false
+    private var lastGrokAuthRecoveryAttemptAt: Date?
     private var lastSharedUsageAt: Date?
     private var lastShareError: String?
     private var helperInstallError: String?
@@ -1810,7 +1833,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         usagePageLinksView.geminiButton.target = self
         usagePageLinksView.geminiButton.action = #selector(openGeminiDashboard)
         usagePageLinksView.grokButton.target = self
-        usagePageLinksView.grokButton.action = #selector(openGrokDashboard)
+        usagePageLinksView.grokButton.action = #selector(performGrokUsageAction)
         usagePageLinksItem.view = usagePageLinksView
         usagePageLinksItem.isEnabled = true
         menu.addItem(usagePageLinksItem)
@@ -2234,9 +2257,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     /// Restores the last successful Grok snapshot from CCMB's own shared
     /// file first, then asks the billing endpoint for a fresh read on the
-    /// same throttled cadence Gemini uses. CCMB never launches `grok` and
-    /// never performs a login/refresh flow of its own.
-    private func refreshGrokUsage() {
+    /// same throttled cadence Gemini uses. Expired OAuth state is first handed
+    /// to the official CLI for its own background token refresh.
+    private func refreshGrokUsage(force: Bool = false, allowAuthRecovery: Bool = true) {
         if lastGrokSnapshot == nil, let cached = SharedUsageStore.readGrokSnapshot() {
             lastGrokSnapshot = cached
             recordGrokConsumption()
@@ -2245,26 +2268,105 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         let minimumInterval = max(grokRefreshInterval, GrokUsageCore.minimumRequestIntervalSeconds)
-        GrokUsageClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
+        GrokUsageClient.fetchIfDue(minimumInterval: minimumInterval, force: force) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case .success(let snapshot):
                 self.lastGrokSnapshot = snapshot
                 self.recordGrokConsumption()
                 self.lastGrokFetchFailureLabel = nil
+                self.grokLoginRequired = false
             case .skippedInFlight, .skippedThrottled:
                 break
-            case .notSignedIn, .expiredCredential, .httpFailure, .transportFailure, .decodeFailure:
+            case .notSignedIn:
+                self.grokLoginRequired = true
                 self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
-                if let diagnostic = outcome.diagnosticDescription {
-                    self.appLog("grok usage fetch failed: \(diagnostic)")
+            case .expiredCredential:
+                if allowAuthRecovery, self.startAutomaticGrokAuthRecovery() { return }
+                self.grokLoginRequired = true
+                self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+            case .httpFailure(let status) where status == 401 || status == 403:
+                if allowAuthRecovery, self.startAutomaticGrokAuthRecovery() { return }
+                self.grokLoginRequired = true
+                self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+            case .httpFailure, .transportFailure, .decodeFailure:
+                self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+            }
+            if let diagnostic = outcome.diagnosticDescription {
+                self.appLog("grok usage fetch failed: \(diagnostic)")
+            }
+            self.finishGrokRefreshUI()
+        }
+    }
+
+    /// Uses the CLI's harmless model-list command to let its built-in OAuth
+    /// refresher update `auth.json`, at most once per five minutes.
+    private func startAutomaticGrokAuthRecovery() -> Bool {
+        guard !grokAuthRecoveryInProgress,
+              GrokAuthStore.readCredential()?.hasRefreshToken == true
+        else { return false }
+        if let lastGrokAuthRecoveryAttemptAt,
+           Date().timeIntervalSince(lastGrokAuthRecoveryAttemptAt) < 300 {
+            return false
+        }
+
+        grokAuthRecoveryInProgress = true
+        lastGrokAuthRecoveryAttemptAt = Date()
+        lastGrokFetchFailureLabel = nil
+        updateSplitPanel()
+        GrokAuthenticationClient.refreshCredential { [weak self] result in
+            DispatchQueue.main.async { @MainActor in
+                guard let self else { return }
+                self.grokAuthRecoveryInProgress = false
+                if case .success = result {
+                    self.refreshGrokUsage(force: true, allowAuthRecovery: false)
+                } else {
+                    self.grokLoginRequired = true
+                    self.lastGrokFetchFailureLabel = result.failureLabel.map {
+                        "\($0) · 브라우저 로그인이 필요합니다"
+                    } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    self.finishGrokRefreshUI()
                 }
             }
-            if let lastSnapshot = self.lastSnapshot {
-                self.publishSharedUsage(lastSnapshot, origin: "cache-republish")
+        }
+        return true
+    }
+
+    private func finishGrokRefreshUI() {
+        if let lastSnapshot {
+            publishSharedUsage(lastSnapshot, origin: "cache-republish")
+        }
+        refreshStatusTitle()
+        updateSplitPanel()
+    }
+
+    @objc private func performGrokUsageAction() {
+        guard grokLoginRequired else {
+            NSWorkspace.shared.open(UsageDashboardURLs.grok)
+            return
+        }
+        guard !grokLoginInProgress, !grokAuthRecoveryInProgress else { return }
+
+        grokLoginInProgress = true
+        lastGrokFetchFailureLabel = nil
+        updateSplitPanel()
+        GrokAuthenticationClient.login { [weak self] result in
+            DispatchQueue.main.async { @MainActor in
+                guard let self else { return }
+                self.grokLoginInProgress = false
+                if case .success = result {
+                    self.grokLoginRequired = false
+                    self.lastGrokFetchFailureLabel = nil
+                    self.lastGrokAuthRecoveryAttemptAt = nil
+                    self.refreshGrokUsage(force: true, allowAuthRecovery: false)
+                } else {
+                    self.grokLoginRequired = true
+                    self.lastGrokFetchFailureLabel = result.failureLabel.map {
+                        "\($0) · 브라우저 로그인이 필요합니다"
+                    } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    self.finishGrokRefreshUI()
+                }
             }
-            self.refreshStatusTitle()
-            self.updateSplitPanel()
         }
     }
 
@@ -2448,6 +2550,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func updateSplitPanel() {
         updateHistoryChart()
+        usagePageLinksView.applyGrokAuthState(
+            loginRequired: grokLoginRequired,
+            loginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
         guard let lastSnapshot else {
             splitPanelItem.isHidden = true
             return
@@ -2487,6 +2593,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func codexColumn(from snapshot: RateLimitSnapshot) -> UsagePanelColumn {
         let accent = UsageBrandColors.codex
         var quota: UsagePanelQuota?
+        var sparkQuota: UsagePanelQuota?
         var rows: [UsagePanelRow] = []
 
         if let planTitle = CodexPlanCore.title(for: snapshot.planType) {
@@ -2521,6 +2628,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             rows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
         }
 
+        if let sparkUsedPercent = snapshot.sparkUsedPercent {
+            let sparkRemaining = UsageCore.remainingPercent(from: sparkUsedPercent)
+            sparkQuota = UsagePanelQuota(
+                caption: "Spark 남음",
+                percentText: percentTitle(from: sparkRemaining),
+                fraction: sparkRemaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Spark 주간 사용량 \(percentTitle(from: sparkRemaining))"
+            )
+        }
+
         if let resetCredits = snapshot.resetCredits {
             rows.append(UsagePanelRow(label: "초기화", value: "\(resetCredits)개"))
         }
@@ -2533,6 +2651,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             ))
         } else if let minutes = snapshot.windowDurationMinutes {
             rows.append(UsagePanelRow(label: "주간", value: "\(minutes)분 창", isEmphasized: true))
+        }
+
+        if let sparkResetsAt = snapshot.sparkResetsAt {
+            rows.append(UsagePanelRow(
+                label: "Spark 주간",
+                value: resetDateTimeFormatter.string(from: sparkResetsAt),
+                isEmphasized: true
+            ))
+        } else if let minutes = snapshot.sparkWindowDurationMinutes {
+            rows.append(UsagePanelRow(label: "Spark 주간", value: "\(minutes)분 창", isEmphasized: true))
         }
 
         if let creditBalance = snapshot.creditBalance {
@@ -2553,7 +2681,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             title: "Codex",
             accentColor: accent,
             quota: quota,
-            secondaryQuota: nil,
+            secondaryQuota: sparkQuota,
             rows: rows,
             accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
             refreshLine: "업데이트 \(relativeFormatter.localizedString(for: snapshot.updatedAt, relativeTo: Date()))",
@@ -2823,12 +2951,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             if let fetchFailureLabel {
                 statusLines.append("갱신 실패: \(fetchFailureLabel)")
             } else {
-                statusLines.append("Grok 실행 후 로그인하세요")
+                statusLines.append("사용량 정보를 불러오는 중…")
             }
             return UsagePanelColumn(
                 title: "Grok",
                 accentColor: accent,
-                quota: nil,
+                quota: UsagePanelQuota(
+                    caption: "주간 남음",
+                    percentText: "—",
+                    fraction: 0,
+                    color: accent,
+                    accessibilityValue: "Grok 주간 사용량 정보 없음"
+                ),
                 secondaryQuota: nil,
                 rows: [UsagePanelRow(label: "Grok", value: "정보 없음")],
                 accountLines: ["계정 정보 없음"],
@@ -2850,7 +2984,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 accessibilityValue: "남은 Grok 주간 사용량 \(percentTitle(from: remaining))"
             )
         } else {
-            rows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
+            quota = UsagePanelQuota(
+                caption: "주간 남음",
+                percentText: "—",
+                fraction: 0,
+                color: accent,
+                accessibilityValue: "Grok 주간 사용량 정보 없음"
+            )
         }
         rows.append(UsagePanelRow(label: "요금제", value: snapshot.subscriptionTier ?? "정보 없음"))
         rows.append(UsagePanelRow(
@@ -2868,6 +3008,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         ))
 
         var statusLines: [String] = []
+        if snapshot.weeklyUsedPercent == nil {
+            statusLines.append("주간 잔량: Grok에서 수치를 제공하지 않음")
+        }
         if let fetchFailureLabel {
             statusLines.append("갱신 실패: \(fetchFailureLabel)")
         }
@@ -3241,6 +3384,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
             controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
             controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
+            controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
             controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
             controller.setShareMenu(makeShareMenu())
             controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
@@ -3266,7 +3410,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         controller.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: isLaunchAtLoginEnabled,
-            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
         controller.setShareMenu(makeShareMenu())
         if !controller.isVisible {
@@ -3294,7 +3440,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         statusDropdownController.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: isLaunchAtLoginEnabled,
-            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
         statusDropdownController.setShareMenu(makeShareMenu())
     }
@@ -3306,7 +3454,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         statusDropdownController.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: isLaunchAtLoginEnabled,
-            alwaysViewEnabled: enabled
+            alwaysViewEnabled: enabled,
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
     }
 
@@ -3348,10 +3498,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         NSWorkspace.shared.open(UsageDashboardURLs.gemini)
     }
 
-    @objc private func openGrokDashboard() {
-        NSWorkspace.shared.open(UsageDashboardURLs.grok)
-    }
-
     @objc private func openFooterLink() {
         guard let url = URL(string: Self.footerLinkURLString) else { return }
         NSWorkspace.shared.open(url)
@@ -3383,12 +3529,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         pinnedUsageWindowController?.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: enabled,
-            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
         statusDropdownController.applyLowerControlsState(
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: enabled,
-            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+            alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
     }
 

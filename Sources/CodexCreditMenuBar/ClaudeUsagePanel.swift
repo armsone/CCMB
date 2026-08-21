@@ -1607,6 +1607,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     var onClaudeRefreshIntervalChange: ((Int) -> Void)?
     var onGeminiRefreshIntervalChange: ((Int) -> Void)?
     var onGrokRefreshIntervalChange: ((Int) -> Void)?
+    var onGrokUsageAction: (() -> Void)?
     /// Same lower-control actions as the status menu, performed through
     /// callbacks into `AppDelegate` rather than duplicating any business
     /// logic here. "항상 보기" needs no callback of its own when this panel
@@ -1810,13 +1811,19 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     func applyLowerControlsState(
         versionText: String,
         launchAtLoginEnabled: Bool,
-        alwaysViewEnabled: Bool
+        alwaysViewEnabled: Bool,
+        grokLoginRequired: Bool = false,
+        grokLoginInProgress: Bool = false
     ) {
         updateVersionView.versionButton.title = versionText
         updateVersionView.alwaysViewButton.title = (isTransient ? alwaysViewEnabled : true)
             ? "✓ 항상 보기"
             : "항상 보기"
         lifecycleActionsView.launchButton.title = launchAtLoginEnabled ? "✓ 자동 실행" : "자동 실행"
+        usagePageButtonsView.applyGrokAuthState(
+            loginRequired: grokLoginRequired,
+            loginInProgress: grokLoginInProgress
+        )
     }
 
     func show() {
@@ -1953,7 +1960,11 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func openGrokUsagePage() {
-        NSWorkspace.shared.open(UsageDashboardURLs.grok)
+        if let onGrokUsageAction {
+            onGrokUsageAction()
+        } else {
+            NSWorkspace.shared.open(UsageDashboardURLs.grok)
+        }
     }
 
     @objc private func closeWindow() {
@@ -2097,6 +2108,22 @@ final class UsagePageButtonsView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func applyGrokAuthState(loginRequired: Bool, loginInProgress: Bool) {
+        if loginInProgress {
+            grokButton.title = "Grok 인증 중…"
+            grokButton.setAccessibilityLabel("Grok 인증 진행 중")
+            grokButton.isEnabled = false
+        } else if loginRequired {
+            grokButton.title = "Grok 로그인"
+            grokButton.setAccessibilityLabel("브라우저에서 Grok 로그인")
+            grokButton.isEnabled = true
+        } else {
+            grokButton.title = "Grok 사용량 페이지"
+            grokButton.setAccessibilityLabel("Grok 사용량 페이지 열기")
+            grokButton.isEnabled = true
+        }
     }
 
     private static func makeButton(title: String, accessibilityLabel: String) -> RolloverButton {

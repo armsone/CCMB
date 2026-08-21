@@ -12,11 +12,11 @@ struct GrokAuthCredential: Equatable {
     let userID: String?
     let teamID: String?
     let expiresAt: Date?
+    let hasRefreshToken: Bool
 }
 
 /// Pure parsing of the Grok CLI's local `auth.json`. CCMB only ever reads
-/// this file; it never writes it, refreshes it, or launches `grok` to sign
-/// in on the user's behalf.
+/// this file and leaves every credential mutation to the official CLI.
 enum GrokAuthCore {
     /// Entries are keyed like `https://auth.x.ai::<id>`.
     static let issuerPrefix = "https://auth.x.ai::"
@@ -42,7 +42,8 @@ enum GrokAuthCore {
                 email: entry["email"] as? String,
                 userID: entry["user_id"] as? String,
                 teamID: entry["team_id"] as? String,
-                expiresAt: expiresAt
+                expiresAt: expiresAt,
+                hasRefreshToken: (entry["refresh_token"] as? String)?.isEmpty == false
             )
             let sortKey = expiresAt ?? .distantPast
             if best == nil || sortKey > best!.sortKey {
@@ -91,7 +92,7 @@ private let grokAuthISO8601WholeSecondsFormatter: ISO8601DateFormatter = {
 }()
 
 /// Reads the Grok CLI's local OAuth state file only. CCMB never writes to
-/// this path and never launches `grok` itself.
+/// this path; automatic refresh and login are delegated to the official CLI.
 enum GrokAuthStore {
     static var authFileURL: URL {
         let environment = ProcessInfo.processInfo.environment["GROK_HOME"]
@@ -118,9 +119,8 @@ enum GrokUsageFetchOutcome: Error {
     case skippedInFlight
     case skippedThrottled
     case notSignedIn
-    /// The local credential's own `expires_at` is in the past. CCMB never
-    /// refreshes or re-authenticates on the user's behalf; the fix is for the
-    /// user to run `grok` once themselves.
+    /// The local credential's own `expires_at` is in the past. The app may ask
+    /// the official Grok CLI to refresh it before presenting the login action.
     case expiredCredential
     case httpFailure(status: Int)
     case transportFailure
@@ -149,11 +149,11 @@ enum GrokUsageFetchOutcome: Error {
         case .success, .skippedInFlight, .skippedThrottled:
             return nil
         case .notSignedIn:
-            return "로그인 필요"
+            return "브라우저에서 Grok 로그인이 필요합니다"
         case .expiredCredential:
-            return "인증 만료 · grok 실행 후 다시 로그인하세요"
+            return "인증 만료 · 브라우저에서 Grok 로그인이 필요합니다"
         case .httpFailure(let status) where status == 401 || status == 403:
-            return "인증 만료 · grok 실행 후 다시 로그인하세요"
+            return "인증 만료 · 브라우저에서 Grok 로그인이 필요합니다"
         case .httpFailure(let status):
             return "서버 오류(\(status))"
         case .transportFailure:
@@ -165,10 +165,8 @@ enum GrokUsageFetchOutcome: Error {
 }
 
 /// Fetches Grok CLI usage from its own `cli-chat-proxy` billing endpoint,
-/// using the OAuth token the `grok` CLI already stored locally. CCMB never
-/// launches `grok`, never writes `auth.json`, and never performs a login or
-/// refresh flow of its own — an expired credential simply surfaces as
-/// `.expiredCredential` until the user signs in with the CLI again.
+/// using the OAuth token the `grok` CLI already stored locally. Credential
+/// writes and browser authentication remain owned by the official Grok CLI.
 enum GrokUsageClient {
     private static let creditsURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits")!
     private static let billingURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing")!
@@ -178,13 +176,17 @@ enum GrokUsageClient {
     @MainActor private static var lastFetchDate: Date?
 
     @MainActor
-    static func fetchIfDue(minimumInterval: TimeInterval, completion: @escaping (GrokUsageFetchOutcome) -> Void) {
+    static func fetchIfDue(
+        minimumInterval: TimeInterval,
+        force: Bool = false,
+        completion: @escaping (GrokUsageFetchOutcome) -> Void
+    ) {
         guard !isFetchInFlight else {
             completion(.skippedInFlight)
             return
         }
         let now = Date()
-        if GrokUsageCore.shouldThrottleFetch(minimumInterval: minimumInterval, lastFetchDate: lastFetchDate, now: now) {
+        if !force, GrokUsageCore.shouldThrottleFetch(minimumInterval: minimumInterval, lastFetchDate: lastFetchDate, now: now) {
             completion(.skippedThrottled)
             return
         }
@@ -266,6 +268,130 @@ enum GrokUsageClient {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+enum GrokAuthenticationOutcome: Equatable {
+    case success
+    case commandNotFound
+    case timedOut
+    case failed
+
+    var failureLabel: String? {
+        switch self {
+        case .success:
+            return nil
+        case .commandNotFound:
+            return "Grok CLI를 찾을 수 없습니다"
+        case .timedOut:
+            return "Grok 인증 시간이 초과되었습니다"
+        case .failed:
+            return "Grok 인증에 실패했습니다"
+        }
+    }
+}
+
+/// Delegates token refresh and browser login to the official Grok CLI so
+/// CCMB never needs to understand, persist, or display OAuth secrets itself.
+enum GrokAuthenticationClient {
+    private static let refreshTimeoutSeconds: TimeInterval = 20
+    private static let loginTimeoutSeconds: TimeInterval = 300
+
+    static func refreshCredential(completion: @escaping (GrokAuthenticationOutcome) -> Void) {
+        runGrok(arguments: ["models"], timeout: refreshTimeoutSeconds) { outcome in
+            guard case .success = outcome,
+                  let credential = GrokAuthStore.readCredential(),
+                  !GrokAuthCore.isExpired(credential, now: Date())
+            else {
+                completion(outcome == .success ? .failed : outcome)
+                return
+            }
+            completion(.success)
+        }
+    }
+
+    static func login(completion: @escaping (GrokAuthenticationOutcome) -> Void) {
+        runGrok(arguments: ["login", "--oauth"], timeout: loginTimeoutSeconds) { outcome in
+            guard case .success = outcome,
+                  let credential = GrokAuthStore.readCredential(),
+                  !GrokAuthCore.isExpired(credential, now: Date())
+            else {
+                completion(outcome == .success ? .failed : outcome)
+                return
+            }
+            completion(.success)
+        }
+    }
+
+    private static func grokExecutableURL() -> URL? {
+        var candidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appendingPathComponent("grok") }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        candidates.append(contentsOf: [
+            home.appendingPathComponent(".grok/bin/grok"),
+            home.appendingPathComponent(".local/bin/grok"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/grok"),
+            URL(fileURLWithPath: "/usr/local/bin/grok")
+        ])
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    private static func runGrok(
+        arguments: [String],
+        timeout: TimeInterval,
+        completion: @escaping (GrokAuthenticationOutcome) -> Void
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            guard let executableURL = grokExecutableURL() else {
+                completion(.commandNotFound)
+                return
+            }
+
+            let process = Process()
+            process.executableURL = executableURL
+            process.arguments = arguments
+            process.standardInput = FileHandle.nullDevice
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+            }
+            errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+            }
+
+            let exited = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in exited.signal() }
+            do {
+                try process.run()
+            } catch {
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                completion(.commandNotFound)
+                return
+            }
+
+            let timedOut = exited.wait(timeout: .now() + timeout) == .timedOut
+            if timedOut {
+                process.terminate()
+                if exited.wait(timeout: .now() + 2) == .timedOut {
+                    kill(process.processIdentifier, SIGKILL)
+                    _ = exited.wait(timeout: .now() + 2)
+                }
+            }
+            process.waitUntilExit()
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+
+            if timedOut {
+                completion(.timedOut)
+            } else {
+                completion(process.terminationStatus == 0 ? .success : .failed)
             }
         }
     }

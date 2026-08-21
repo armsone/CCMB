@@ -11,8 +11,17 @@ struct RateLimitSnapshot {
     let resetsAt: Date?
     let resetCredits: Int?
     let creditBalance: Double?
+    let sparkUsedPercent: Double?
+    let sparkWindowDurationMinutes: Int?
+    let sparkResetsAt: Date?
     let detailedCreditsReturned: Bool
     let updatedAt: Date
+}
+
+struct CodexSparkWeeklyWindow: Equatable {
+    let usedPercent: Double
+    let windowDurationMinutes: Int?
+    let resetsAt: Date?
 }
 
 enum CodexPlanCore {
@@ -196,6 +205,38 @@ struct UsageConsumptionTracker: Codable, Equatable {
 }
 
 enum UsageCore {
+    static func sparkWeeklyWindow(from rateLimitsByLimitID: [String: Any]?) -> CodexSparkWeeklyWindow? {
+        guard let rateLimitsByLimitID else { return nil }
+
+        for (key, value) in rateLimitsByLimitID {
+            guard let bucket = value as? [String: Any] else { continue }
+            let limitID = (bucket["limitId"] as? String) ?? key
+            let limitName = bucket["limitName"] as? String
+            let isSpark = limitID.caseInsensitiveCompare("codex_bengalfox") == .orderedSame
+                || limitName?.localizedCaseInsensitiveContains("spark") == true
+            guard isSpark,
+                  let weekly = bucket["secondary"] as? [String: Any],
+                  let usedPercent = number(weekly["usedPercent"])
+            else { continue }
+
+            let duration = number(weekly["windowDurationMins"]).map(Int.init)
+            let resetsAt = number(weekly["resetsAt"]).map(Date.init(timeIntervalSince1970:))
+            return CodexSparkWeeklyWindow(
+                usedPercent: usedPercent,
+                windowDurationMinutes: duration,
+                resetsAt: resetsAt
+            )
+        }
+
+        return nil
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+
     static let usageHelperMarker = "# CCMB_USAGE_HELPER_VERSION="
 
     static func remainingPercent(from usedPercent: Double) -> Double {
@@ -325,7 +366,8 @@ enum UsageCore {
 
     /// Nested `codex` object mirroring `ClaudeUsageCore.sharedPayload`'s
     /// shape, so shared-file consumers can read Codex and Claude with the
-    /// same status/weekly/account/freshness concepts.
+    /// same status/weekly/account/freshness concepts and optional Spark weekly
+    /// quota details when present.
     static func codexPayload(from snapshot: RateLimitSnapshot?, freshForSeconds: Int, now: Date = Date()) -> [String: Any] {
         guard let snapshot else {
             return [
@@ -333,6 +375,10 @@ enum UsageCore {
                 "weeklyRemainingPercent": NSNull(),
                 "weeklyUsedPercent": NSNull(),
                 "weeklyResetsAt": NSNull(),
+                "sparkRemainingPercent": NSNull(),
+                "sparkUsedPercent": NSNull(),
+                "sparkResetsAt": NSNull(),
+                "sparkWindowDurationMins": NSNull(),
                 "account": NSNull(),
                 "creditBalance": NSNull(),
                 "windowDurationMins": NSNull(),
@@ -350,6 +396,10 @@ enum UsageCore {
             "weeklyRemainingPercent": snapshot.usedPercent.map(remainingPercent) ?? NSNull(),
             "weeklyUsedPercent": snapshot.usedPercent ?? NSNull(),
             "weeklyResetsAt": snapshot.resetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "sparkRemainingPercent": snapshot.sparkUsedPercent.map(remainingPercent) ?? NSNull(),
+            "sparkUsedPercent": snapshot.sparkUsedPercent ?? NSNull(),
+            "sparkResetsAt": snapshot.sparkResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
+            "sparkWindowDurationMins": snapshot.sparkWindowDurationMinutes ?? NSNull(),
             "account": snapshot.accountID ?? NSNull(),
             "creditBalance": snapshot.creditBalance ?? NSNull(),
             "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
@@ -1235,7 +1285,6 @@ struct GrokUsageSnapshot: Sendable, Equatable {
 enum GrokUsageCore {
     static let sharedFreshForSeconds: TimeInterval = 300
     static let minimumRequestIntervalSeconds: TimeInterval = 120
-    static let weeklyPeriodType = "USAGE_PERIOD_TYPE_WEEKLY"
 
     static func remainingPercent(from usedPercent: Double?) -> Double? {
         guard let usedPercent else { return nil }
@@ -1253,46 +1302,12 @@ enum GrokUsageCore {
         return now.timeIntervalSince(lastFetchDate) < minimumInterval - timerTolerance
     }
 
-    /// True only when `currentPeriod` is an exact-bounds match for the
-    /// account's own weekly billing period. This is the one confirmed shape
-    /// in which the live endpoint omits `creditUsagePercent` entirely to mean
-    /// zero used, rather than the field being merely missing/unreliable.
-    static func isConfirmedWeeklyPeriod(
-        periodType: String?,
-        periodStart: String?,
-        periodEnd: String?,
-        billingPeriodStart: String?,
-        billingPeriodEnd: String?
-    ) -> Bool {
-        guard periodType == weeklyPeriodType,
-              let periodStart, !periodStart.isEmpty,
-              let periodEnd, !periodEnd.isEmpty,
-              let billingPeriodStart, let billingPeriodEnd
-        else { return false }
-        return periodStart == billingPeriodStart && periodEnd == billingPeriodEnd
-    }
-
-    /// A present `creditUsagePercent` is always trusted (clamped). When it is
-    /// omitted, usage is zero only in the confirmed-weekly-bounds shape;
-    /// every other omission stays unavailable rather than inventing a value.
-    static func weeklyUsedPercent(
-        creditUsagePercent: Double?,
-        periodType: String?,
-        periodStart: String?,
-        periodEnd: String?,
-        billingPeriodStart: String?,
-        billingPeriodEnd: String?
-    ) -> Double? {
-        if let creditUsagePercent {
-            return min(max(creditUsagePercent, 0), 100)
-        }
-        return isConfirmedWeeklyPeriod(
-            periodType: periodType,
-            periodStart: periodStart,
-            periodEnd: periodEnd,
-            billingPeriodStart: billingPeriodStart,
-            billingPeriodEnd: billingPeriodEnd
-        ) ? 0 : nil
+    /// Only a percentage explicitly returned by Grok is trustworthy. A
+    /// missing field must stay unavailable: matching period bounds identify
+    /// the window, but do not prove that the account has used zero quota.
+    static func weeklyUsedPercent(creditUsagePercent: Double?) -> Double? {
+        guard let creditUsagePercent else { return nil }
+        return min(max(creditUsagePercent, 0), 100)
     }
 
     /// A zero or missing monthly limit (the proxy's own default response
@@ -1361,16 +1376,9 @@ enum GrokUsageCore {
         guard let response = try? JSONDecoder().decode(BillingResponse.self, from: data) else { return nil }
         let config = response.effectiveConfig
 
-        let weeklyUsed = weeklyUsedPercent(
-            creditUsagePercent: config.creditUsagePercent,
-            periodType: config.currentPeriod?.type,
-            periodStart: config.currentPeriod?.start,
-            periodEnd: config.currentPeriod?.end,
-            billingPeriodStart: config.billingPeriodStart,
-            billingPeriodEnd: config.billingPeriodEnd
-        )
+        let weeklyUsed = weeklyUsedPercent(creditUsagePercent: config.creditUsagePercent)
         let monthlyUsed = monthlyUsedPercent(limit: config.monthlyLimit?.val, used: config.used?.val)
-        guard weeklyUsed != nil || monthlyUsed != nil else { return nil }
+        guard weeklyUsed != nil || monthlyUsed != nil || config.prepaidBalance?.val != nil else { return nil }
 
         return GrokUsageSnapshot(
             weeklyUsedPercent: weeklyUsed,
@@ -1423,6 +1431,7 @@ enum GrokUsageCore {
                 "status": "unavailable",
                 "weeklyRemainingPercent": NSNull(),
                 "weeklyUsedPercent": NSNull(),
+                "weeklyUsageConfirmed": false,
                 "weeklyResetsAt": NSNull(),
                 "monthlyRemainingPercent": NSNull(),
                 "monthlyUsedPercent": NSNull(),
@@ -1443,6 +1452,7 @@ enum GrokUsageCore {
             "status": snapshot.hasUsage ? "ok" : "partial",
             "weeklyRemainingPercent": remainingPercent(from: snapshot.weeklyUsedPercent) ?? NSNull(),
             "weeklyUsedPercent": snapshot.weeklyUsedPercent ?? NSNull(),
+            "weeklyUsageConfirmed": snapshot.weeklyUsedPercent != nil,
             "weeklyResetsAt": snapshot.weeklyResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
             "monthlyRemainingPercent": remainingPercent(from: snapshot.monthlyUsedPercent) ?? NSNull(),
             "monthlyUsedPercent": snapshot.monthlyUsedPercent ?? NSNull(),
@@ -1480,8 +1490,14 @@ enum GrokUsageCore {
             (payload[key] as? String).flatMap(sharedISO8601Formatter.date(from:))
         }
 
+        let storedWeeklyUsedPercent = percent("weeklyUsedPercent")
+        // Payloads written before `weeklyUsageConfirmed` existed may contain
+        // the old inferred 0%. Preserve explicit nonzero readings, but migrate
+        // the ambiguous zero to unavailable instead of restoring a false 100%.
+        let weeklyUsageConfirmed = (payload["weeklyUsageConfirmed"] as? Bool)
+            ?? (storedWeeklyUsedPercent.map { $0 != 0 } ?? false)
         let snapshot = GrokUsageSnapshot(
-            weeklyUsedPercent: percent("weeklyUsedPercent"),
+            weeklyUsedPercent: weeklyUsageConfirmed ? storedWeeklyUsedPercent : nil,
             weeklyResetsAt: date("weeklyResetsAt"),
             monthlyUsedPercent: percent("monthlyUsedPercent"),
             monthlyResetsAt: date("monthlyResetsAt"),
