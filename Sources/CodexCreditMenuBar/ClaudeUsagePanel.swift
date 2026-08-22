@@ -371,6 +371,9 @@ struct UsagePanelModel {
 
 /// Compact circular progress indicator used for a column's primary quota.
 private final class UsageRingView: NSView {
+    private static let tickCount = 36
+    private static let ornamentInset: CGFloat = 7.5
+
     var lineWidth: CGFloat = 4.5
     var trackColor: NSColor = .quaternaryLabelColor {
         didSet { needsDisplay = true }
@@ -400,9 +403,14 @@ private final class UsageRingView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        // Leave a half-point anti-aliasing safety margin so round caps on a
-        // full Gemini ring never touch the view edge at 99–100%.
-        let inset = lineWidth / 2 + 0.5
+        let clampedFraction = min(max(fraction, 0), 1)
+        drawTicks(fraction: clampedFraction)
+
+        // The campaign artwork's ring has a quiet instrument-like face, an
+        // illuminated quota arc, and a fine halo of ticks. Keep those layers
+        // inside this code-native view so the result remains sharp at every
+        // display scale and adapts naturally to light and dark appearances.
+        let inset = Self.ornamentInset
         let rect = bounds.insetBy(dx: inset, dy: inset)
         guard rect.width > 0, rect.height > 0 else { return }
         let diameter = min(rect.width, rect.height)
@@ -415,13 +423,27 @@ private final class UsageRingView: NSView {
         let center = NSPoint(x: squareRect.midX, y: squareRect.midY)
         let radius = diameter / 2
 
+        let face = NSBezierPath(ovalIn: squareRect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2))
+        NSColor.controlBackgroundColor.withAlphaComponent(0.16).setFill()
+        face.fill()
+
+        let innerRim = NSBezierPath()
+        innerRim.appendArc(
+            withCenter: center,
+            radius: max(0, radius - lineWidth - 2),
+            startAngle: 0,
+            endAngle: 360
+        )
+        innerRim.lineWidth = 1
+        NSColor.labelColor.withAlphaComponent(0.08).setStroke()
+        innerRim.stroke()
+
         let track = NSBezierPath()
         track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
         track.lineWidth = lineWidth
         trackColor.setStroke()
         track.stroke()
 
-        let clampedFraction = min(max(fraction, 0), 1)
         guard clampedFraction > 0 else { return }
         let progress = NSBezierPath()
         let startAngle: CGFloat = 90
@@ -430,12 +452,91 @@ private final class UsageRingView: NSView {
         progress.lineWidth = lineWidth
         progress.lineCapStyle = .round
 
+        NSGraphicsContext.saveGraphicsState()
+        let glow = NSShadow()
+        glow.shadowOffset = .zero
+        glow.shadowBlurRadius = 4
+        glow.shadowColor = endpointColor(for: clampedFraction).withAlphaComponent(0.42)
+        glow.set()
         if let gradientColors, gradientColors.count >= 2 {
             drawGradientProgress(progress, colors: gradientColors, rect: squareRect)
         } else {
             progressColor.setStroke()
             progress.stroke()
         }
+        NSGraphicsContext.restoreGraphicsState()
+
+        let sheen = progress.copy() as! NSBezierPath
+        sheen.lineWidth = 1
+        NSColor.white.withAlphaComponent(0.34).setStroke()
+        sheen.stroke()
+
+        drawEndpoint(center: center, radius: radius, fraction: clampedFraction)
+    }
+
+    private func drawTicks(fraction: Double) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let center = NSPoint(x: bounds.midX, y: bounds.midY)
+        let outerRadius = min(bounds.width, bounds.height) / 2 - 0.75
+        let innerRadius = outerRadius - 2.25
+
+        for index in 0..<Self.tickCount {
+            let tickFraction = Double(index) / Double(Self.tickCount)
+            let angle = -.pi / 2 + CGFloat(tickFraction) * 2 * .pi
+            let path = NSBezierPath()
+            path.lineWidth = index.isMultiple(of: 3) ? 1.05 : 0.75
+            path.lineCapStyle = .round
+            path.move(to: NSPoint(
+                x: center.x + cos(angle) * innerRadius,
+                y: center.y + sin(angle) * innerRadius
+            ))
+            path.line(to: NSPoint(
+                x: center.x + cos(angle) * outerRadius,
+                y: center.y + sin(angle) * outerRadius
+            ))
+
+            if tickFraction <= fraction {
+                ringColor(at: tickFraction).withAlphaComponent(0.76).setStroke()
+            } else {
+                trackColor.withAlphaComponent(0.38).setStroke()
+            }
+            path.stroke()
+        }
+    }
+
+    private func drawEndpoint(center: NSPoint, radius: CGFloat, fraction: Double) {
+        let angle = -.pi / 2 + CGFloat(fraction) * 2 * .pi
+        let point = NSPoint(
+            x: center.x + cos(angle) * radius,
+            y: center.y + sin(angle) * radius
+        )
+        let color = endpointColor(for: fraction)
+
+        NSGraphicsContext.saveGraphicsState()
+        let glow = NSShadow()
+        glow.shadowOffset = .zero
+        glow.shadowBlurRadius = 5
+        glow.shadowColor = color.withAlphaComponent(0.7)
+        glow.set()
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor.white.withAlphaComponent(0.86).setFill()
+        NSBezierPath(ovalIn: NSRect(x: point.x - 1.25, y: point.y - 1.25, width: 2.5, height: 2.5)).fill()
+    }
+
+    private func endpointColor(for fraction: Double) -> NSColor {
+        ringColor(at: max(0, fraction - 0.001))
+    }
+
+    private func ringColor(at fraction: Double) -> NSColor {
+        guard let gradientColors, !gradientColors.isEmpty else { return progressColor }
+        let index = min(
+            gradientColors.count - 1,
+            Int(fraction * Double(gradientColors.count))
+        )
+        return gradientColors[index]
     }
 
     /// Fills the swept arc with a diagonal linear gradient through
@@ -738,8 +839,8 @@ private final class ProviderTitleMarkView: NSView {
 private final class UsageColumnView: NSView {
     private static let titleHeight: CGFloat = 16
     private static let titleGap: CGFloat = 6
-    private static let quotaDiameter: CGFloat = 46
-    private static let quotaLineWidth: CGFloat = 4
+    private static let quotaDiameter: CGFloat = 54
+    private static let quotaLineWidth: CGFloat = 5
     private static let quotaGroupGap: CGFloat = 6
     private static let quotaCaptionHeight: CGFloat = 14
     private static let quotaCaptionGap: CGFloat = 3
@@ -759,7 +860,7 @@ private final class UsageColumnView: NSView {
     private let ringView = UsageRingView()
     private let percentLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .monospacedDigitSystemFont(ofSize: 14, weight: .bold)
+        field.font = .monospacedDigitSystemFont(ofSize: 14, weight: .regular)
         field.alignment = .center
         field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
         return field
@@ -897,7 +998,7 @@ private final class UsageColumnView: NSView {
             ringView.lineWidth = Self.quotaLineWidth
             percentLabel.font = .monospacedDigitSystemFont(
                 ofSize: quota.percentText.count >= 4 ? 11 : 13,
-                weight: .bold
+                weight: .regular
             )
             let primaryRingX = (groupWidth - diameter) / 2
             ringView.frame = NSRect(x: primaryRingX, y: y, width: diameter, height: diameter)
