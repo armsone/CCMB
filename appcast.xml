@@ -3,6 +3,22 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>0.4.4</title>
+            <pubDate>Sat, 22 Aug 2026 14:33:18 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v0.4.4</link>
+            <sparkle:version>52</sparkle:version>
+            <sparkle:shortVersionString>0.4.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 0.4.4
+
+- 의미 있는 사용량을 확인할 수 없는 Grok 항목을 메뉴와 항상 보기 패널에서 숨겼습니다.
+- 업데이트 확인과 현재 버전을 한 칸에 합치고, 투명도·재시작·종료 조작을 더 간결하게 정돈했습니다.
+- 메뉴 막대 아이콘을 제거하고 Codex·Claude·Gemini의 남은 사용량 숫자를 각 서비스의 대표 색상으로 구분했습니다.
+- Grok 사용량 수집 기반은 유지해 신뢰할 수 있는 데이터가 제공되면 같은 구성으로 다시 노출할 수 있습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.4/CCMB-0.4.4.dmg" length="2852375" type="application/octet-stream" sparkle:edSignature="aoPbhisnfEim8UGxdJI/rGlCadBmHu3vv++8IqmigoWxA7fyqlBjIZWa81LEgRsWcWNHK5g+6J7qf33p+ZB1Dg=="/>
+        </item>
+        <item>
             <title>0.4.3</title>
             <pubDate>Sat, 22 Aug 2026 06:06:44 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v0.4.3</link>
@@ -34,23 +50,6 @@
 - 항상 보기 패널의 크기 조절, 투명도, 접근성 문구와 갱신 상태 표시를 다듬었습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.2/CCMB-0.4.2.dmg" length="2913469" type="application/octet-stream" sparkle:edSignature="r/aSuTOSFeGfZXkg1EFeLMEAYIJxE/GVpeusQxzfetIKK3A2BtrscWaa7ShLCxndEng4DXPMBbzuTwSHHYpAAg=="/>
-        </item>
-        <item>
-            <title>0.4.1</title>
-            <pubDate>Thu, 20 Aug 2026 12:00:32 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.4.1</link>
-            <sparkle:version>49</sparkle:version>
-            <sparkle:shortVersionString>0.4.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.4.1
-
-- 상태 메뉴와 항상 보기 패널을 같은 전체 레이아웃과 설정 구성으로 통합했습니다.
-- 패널 전체 배경의 불투명도를 95%~100% 범위에서 조절하고 현재 수치를 표시합니다.
-- 앱별 자동 갱신 시간을 목록에서 선택하고 다음 갱신까지 남은 시간을 확인할 수 있습니다.
-- 사용량 페이지 버튼의 브랜드 색상 롤오버와 사용량 공유 메뉴 동작을 개선했습니다.
-- 주간 Codex 사용량 소진 후 남은 크레딧을 크게 표시하면서 상세 크레딧 행은 유지합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.1/CCMB-0.4.1.dmg" length="2805737" type="application/octet-stream" sparkle:edSignature="OAOlFNMr4qAuw/SQYtztDnvlDMRp7Ynj0hGsJq40M9UnC5ausA8YJ+wr5GUpLxvzXJCBGXWBEmeZDPJttt9KCg=="/>
         </item>
     </channel>
 </rss>
