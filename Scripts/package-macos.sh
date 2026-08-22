@@ -4,8 +4,9 @@ set -euo pipefail
 APP_NAME="CCMB"
 EXECUTABLE_NAME="CodexCreditMenuBar"
 BUNDLE_ID="com.codex.creditmenubar"
-APP_VERSION="0.4.5"
-APP_BUILD="53"
+APP_VERSION="2.0.0"
+APP_BUILD="337417"
+APP_BUILD_STAMP="202608230737"
 DEPLOYMENT_TARGET="10.15"
 ARM64_DEPLOYMENT_TARGET="11.0"
 ARM64_TRIPLE="arm64-apple-macosx$ARM64_DEPLOYMENT_TARGET"
@@ -492,6 +493,8 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
   <string>$APP_BUILD</string>
+  <key>BuildStamp</key>
+  <string>$APP_BUILD_STAMP</string>
   <key>LSMinimumSystemVersion</key>
   <string>$DEPLOYMENT_TARGET</string>
   <key>LSUIElement</key>

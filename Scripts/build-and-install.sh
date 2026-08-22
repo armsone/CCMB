@@ -12,10 +12,11 @@ EXE="CodexCreditMenuBar"
 PACKAGE_SCRIPT="$ROOT_DIR/Scripts/package-macos.sh"
 APP_VERSION="$(sed -n 's/^APP_VERSION="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
 APP_BUILD="$(sed -n 's/^APP_BUILD="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
+APP_BUILD_STAMP="$(sed -n 's/^APP_BUILD_STAMP="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
 step() { printf '\n==== %s ====\n' "$1"; }
 fail() { printf '\n실패: %s\nCCMB_RESULT=FAIL:%s\n' "$1" "$2"; exit 1; }
 
-[ -n "$APP_VERSION" ] && [ -n "$APP_BUILD" ] \
+[ -n "$APP_VERSION" ] && [ -n "$APP_BUILD" ] && [ -n "$APP_BUILD_STAMP" ] \
   || fail "앱 버전 정보를 읽지 못했습니다." "version-missing"
 
 printf 'CCMB 빌드 시작: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -78,6 +79,9 @@ chmod 755 "$DEST_BIN"
   || fail "앱 버전 갱신 실패" "version-write"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD" "$STAGE/Contents/Info.plist" \
   || fail "앱 빌드 번호 갱신 실패" "build-write"
+/usr/libexec/PlistBuddy -c "Set :BuildStamp $APP_BUILD_STAMP" "$STAGE/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :BuildStamp string $APP_BUILD_STAMP" "$STAGE/Contents/Info.plist" \
+  || fail "표시 빌드 번호 갱신 실패" "build-stamp-write"
 
 # SwiftPM이 뱉는 실행 파일에는 번들 안 Frameworks를 찾는 경로가 없다.
 # package-macos.sh 와 똑같이 넣어주지 않으면 Sparkle을 못 찾고 즉시 죽는다.
