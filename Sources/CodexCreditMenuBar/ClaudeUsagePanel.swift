@@ -1093,7 +1093,7 @@ private final class UsageColumnView: NSView {
 
 /// Shared column geometry for every fixed-width row in the usage menu
 /// (the split panel itself, the history chart, and the usage-page buttons)
-/// so their four columns and three dividers always land at the same x
+/// so their three columns and two dividers always land at the same x
 /// positions and the menu reads as one object end to end.
 enum UsagePanelLayout {
     static let columnWidth: CGFloat = 178
@@ -1101,7 +1101,7 @@ enum UsagePanelLayout {
     static let sidePadding: CGFloat = 12
     static let controlRowHeight: CGFloat = 30
     static let controlVerticalInset: CGFloat = 3
-    static let columnCount = 4
+    static let columnCount = 3
     static let viewWidth: CGFloat = sidePadding * 2 + columnWidth * CGFloat(columnCount) + columnGap * CGFloat(columnCount - 1)
 
     /// Leading x of each provider column, left to right.
@@ -1210,8 +1210,9 @@ final class PanelBackgroundView: NSVisualEffectView {
     }
 }
 
-/// Four-column status panel — Codex, Claude, Gemini, then Grok — hosted as
-/// the `view` of a single NSMenuItem.
+/// Three-column status panel — Codex, Claude, then Gemini — hosted as
+/// the `view` of a single NSMenuItem. Grok data is still collected in
+/// `UsagePanelModel.grok` but is not rendered while its column is hidden.
 @MainActor
 final class SplitUsagePanelView: NSView {
     private let columnWidth = UsagePanelLayout.columnWidth
@@ -1221,7 +1222,6 @@ final class SplitUsagePanelView: NSView {
     private let codexColumnView = UsageColumnView()
     private let claudeColumnView = UsageColumnView()
     private let geminiColumnView = UsageColumnView()
-    private let grokColumnView = UsageColumnView()
     private let dividers: [NSView] = (0..<UsagePanelLayout.columnCount - 1).map { _ in
         let view = NSView()
         view.wantsLayer = true
@@ -1236,7 +1236,6 @@ final class SplitUsagePanelView: NSView {
         addSubview(codexColumnView)
         addSubview(claudeColumnView)
         addSubview(geminiColumnView)
-        addSubview(grokColumnView)
         dividers.forEach(addSubview)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -1247,8 +1246,8 @@ final class SplitUsagePanelView: NSView {
     }
 
     func apply(_ model: UsagePanelModel) {
-        let columnViews = [codexColumnView, claudeColumnView, geminiColumnView, grokColumnView]
-        let columns = [model.codex, model.claude, model.gemini, model.grok]
+        let columnViews = [codexColumnView, claudeColumnView, geminiColumnView]
+        let columns = [model.codex, model.claude, model.gemini]
 
         let bodyHeights = zip(columnViews, columns).map { view, column in view.apply(column, width: columnWidth) }
         let bodyHeight = max(bodyHeights.max() ?? 1, 1)
@@ -1289,9 +1288,8 @@ final class SplitUsagePanelView: NSView {
         let codexSummary = model.codex.quota?.accessibilityValue ?? model.codex.title
         let claudeSummary = model.claude.quota?.accessibilityValue ?? model.claude.title
         let geminiSummary = model.gemini.quota?.accessibilityValue ?? model.gemini.title
-        let grokSummary = model.grok.quota?.accessibilityValue ?? model.grok.title
-        setAccessibilityLabel("Codex, Claude, Gemini 및 Grok 사용량 패널")
-        setAccessibilityValue("\(codexSummary), \(claudeSummary), \(geminiSummary), \(grokSummary)")
+        setAccessibilityLabel("Codex, Claude 및 Gemini 사용량 패널")
+        setAccessibilityValue("\(codexSummary), \(claudeSummary), \(geminiSummary)")
     }
 }
 
@@ -1302,7 +1300,7 @@ final class SplitUsagePanelView: NSView {
 @MainActor
 final class UsageHistoryChartView: NSView {
     // Column geometry comes from the shared `UsagePanelLayout` on purpose:
-    // the four strips must sit exactly under their provider columns
+    // the visible strips must sit exactly under their provider columns
     // columns above them, and the inner dividers must line up with that
     // panel's dividers. That alignment is what makes the whole menu read as
     // one object.
@@ -1443,7 +1441,6 @@ final class UsageHistoryChartView: NSView {
         drawDot(color: codexBars.barColor, x: UsagePanelLayout.columnX[0] + Self.columnContentInset, visible: !codexCaption.isHidden)
         drawDot(color: claudeBars.barColor, x: UsagePanelLayout.columnX[1] + Self.columnContentInset, visible: !claudeCaption.isHidden)
         drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
-        drawDot(color: grokBars.barColor, x: UsagePanelLayout.columnX[3] + Self.columnContentInset, visible: !grokCaption.isHidden)
     }
 
     private func drawDot(color: NSColor, x: CGFloat, visible: Bool) {
@@ -1497,8 +1494,10 @@ final class UsageHistoryChartView: NSView {
         let codexShown = configure(codex, caption: codexCaption, bars: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset)
         let claudeShown = configure(claude, caption: claudeCaption, bars: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset)
         let geminiShown = configure(gemini, caption: geminiCaption, bars: geminiBars, x: UsagePanelLayout.columnX[2] + Self.columnContentInset)
-        let grokShown = configure(grok, caption: grokCaption, bars: grokBars, x: UsagePanelLayout.columnX[3] + Self.columnContentInset)
-        let anyShown = codexShown || claudeShown || geminiShown || grokShown
+        // Grok samples keep arriving, but the strip stays hidden while the
+        // provider has no visible column of its own.
+        _ = configure(nil, caption: grokCaption, bars: grokBars, x: 0)
+        let anyShown = codexShown || claudeShown || geminiShown
         needsDisplay = true
         return anyShown
     }
@@ -1696,10 +1695,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
         updateVersionView.updateButton.target = self
         updateVersionView.updateButton.action = #selector(triggerCheckForUpdates)
-        updateVersionView.versionButton.isBordered = false
-        updateVersionView.versionButton.isEnabled = false
-        updateVersionView.versionButton.font = .systemFont(ofSize: 11, weight: .regular)
-        updateVersionView.versionButton.setAccessibilityRole(.staticText)
         updateVersionView.opacitySlider.target = self
         updateVersionView.opacitySlider.action = #selector(changeOpacity(_:))
 
@@ -1815,7 +1810,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         grokLoginRequired: Bool = false,
         grokLoginInProgress: Bool = false
     ) {
-        updateVersionView.versionButton.title = versionText
+        updateVersionView.setVersionText(versionText)
         updateVersionView.alwaysViewButton.title = (isTransient ? alwaysViewEnabled : true)
             ? "✓ 항상 보기"
             : "항상 보기"
@@ -2062,7 +2057,7 @@ enum UsageDashboardURLs {
     static let grok = URL(string: "https://grok.com/?_s=billing")!
 }
 
-/// Compact four-button row linking to each provider's usage page
+/// Compact three-button row linking to each provider's usage page
 /// web pages, replacing separate vertical menu rows with one native view
 /// hosted as a single `NSMenuItem`, directly above the refresh item. Shares
 /// the split usage panel's own column geometry.
@@ -2094,7 +2089,8 @@ final class UsagePageButtonsView: NSView {
         addSubview(codexButton)
         addSubview(claudeButton)
         addSubview(geminiButton)
-        addSubview(grokButton)
+        // The Grok button stays configured (auth states included) but out of
+        // the visible row while its column is hidden.
         // Quiet/neutral at rest; each button only takes on its provider's
         // brand color while the pointer is over it.
         codexButton.hoverTintColor = UsageBrandColors.codex
@@ -2139,7 +2135,7 @@ final class UsagePageButtonsView: NSView {
         let inset = UsagePanelLayout.controlVerticalInset
         let buttonHeight = Self.viewHeight - inset * 2
         let y = inset
-        let buttons = [codexButton, claudeButton, geminiButton, grokButton]
+        let buttons = [codexButton, claudeButton, geminiButton]
 
         for (index, button) in buttons.enumerated() {
             button.frame = NSRect(x: UsagePanelLayout.columnX[index], y: y, width: UsagePanelLayout.columnWidth, height: buttonHeight)
@@ -2225,7 +2221,7 @@ private final class IntervalControlButton: RolloverButton {
     }
 }
 
-/// Four aligned refresh-cadence controls shared by the status menu and the
+/// Three aligned refresh-cadence controls shared by the status menu and the
 /// persistent panel. Each exposes every supported value in an explicit list
 /// instead of making the user cycle through them one click at a time, and
 /// shows a live per-second countdown while closed.
@@ -2271,7 +2267,9 @@ final class RefreshIntervalControlsView: NSView {
                 onSelect: callbacks[index]
             )
         }
-        controls.forEach { addSubview($0) }
+        // The Grok control stays configured but out of the visible row while
+        // its column is hidden.
+        [codexButton, claudeButton, geminiButton].forEach { addSubview($0) }
         codexButton.contentTintColor = UsageBrandColors.codex
         claudeButton.contentTintColor = UsageBrandColors.claude
         geminiButton.contentTintColor = UsageBrandColors.geminiText
@@ -2317,7 +2315,7 @@ final class RefreshIntervalControlsView: NSView {
     }
 
     private func layoutControls() {
-        let controls = [codexButton, claudeButton, geminiButton, grokButton]
+        let controls = [codexButton, claudeButton, geminiButton]
         let inset = UsagePanelLayout.controlVerticalInset
         for (index, button) in controls.enumerated() {
             button.frame = NSRect(
@@ -2421,9 +2419,10 @@ final class MenuActionRowView: NSView {
     }
 }
 
-/// Four-column lifecycle row. The second provider-width cell is split evenly
-/// between the closely related support destinations, keeping the outer grid
-/// aligned with every row above it.
+/// Three-column lifecycle row. The second and third provider-width cells are
+/// each split evenly between their closely related actions — support
+/// destinations, then restart/quit — keeping the outer grid aligned with
+/// every row above it.
 @MainActor
 final class LifecycleActionsRowView: NSView {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
@@ -2438,6 +2437,7 @@ final class LifecycleActionsRowView: NSView {
         LifecycleActionsRowView.makeDivider()
     }
     private let supportDivider = LifecycleActionsRowView.makeDivider()
+    private let lifecycleDivider = LifecycleActionsRowView.makeDivider()
 
     override var isFlipped: Bool { true }
 
@@ -2451,6 +2451,7 @@ final class LifecycleActionsRowView: NSView {
         [launchButton, diagnosticButton, githubButton, restartButton, quitButton].forEach(addSubview)
         columnDividers.forEach(addSubview)
         addSubview(supportDivider)
+        addSubview(lifecycleDivider)
         layoutButtons()
     }
 
@@ -2489,8 +2490,14 @@ final class LifecycleActionsRowView: NSView {
             width: halfWidth,
             height: buttonHeight
         )
-        restartButton.frame = NSRect(x: UsagePanelLayout.columnX[2], y: inset, width: columnWidth, height: buttonHeight)
-        quitButton.frame = NSRect(x: UsagePanelLayout.columnX[3], y: inset, width: columnWidth, height: buttonHeight)
+        let lifecycleX = UsagePanelLayout.columnX[2]
+        restartButton.frame = NSRect(x: lifecycleX, y: inset, width: halfWidth, height: buttonHeight)
+        quitButton.frame = NSRect(
+            x: lifecycleX + halfWidth + Self.innerGap,
+            y: inset,
+            width: halfWidth,
+            height: buttonHeight
+        )
 
         for (index, divider) in columnDividers.enumerated() {
             divider.frame = NSRect(
@@ -2506,18 +2513,26 @@ final class LifecycleActionsRowView: NSView {
             width: 1,
             height: Self.viewHeight - 14
         )
+        lifecycleDivider.frame = NSRect(
+            x: lifecycleX + columnWidth / 2,
+            y: 7,
+            width: 1,
+            height: Self.viewHeight - 14
+        )
     }
 }
 
-/// Four-column settings row: always-on-top, update, current version, opacity.
+/// Three-column settings row: always-on-top, combined update/version, opacity.
 @MainActor
 final class VersionOpacityRowView: NSView {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
 
     let alwaysViewButton: NSButton
+    /// One clickable control carrying both the update action and the current
+    /// version text, via `setVersionText(_:)`.
     let updateButton: NSButton
-    let versionButton: NSButton
     let opacitySlider: NSSlider
+    private let updateTitle: String
     private let opacityLabel = NSTextField(labelWithString: "투명도")
     private let opacityValueLabel = NSTextField(labelWithString: "100%")
     private let dividers: [NSView]
@@ -2525,9 +2540,9 @@ final class VersionOpacityRowView: NSView {
     override var isFlipped: Bool { true }
 
     init(alwaysTitle: String, updateTitle: String, versionTitle: String) {
+        self.updateTitle = updateTitle
         alwaysViewButton = Self.makeButton(title: alwaysTitle)
         updateButton = Self.makeButton(title: updateTitle)
-        versionButton = Self.makeButton(title: versionTitle)
         opacitySlider = NSSlider(
             value: 1,
             minValue: UsageCore.minimumPanelOpacity,
@@ -2544,7 +2559,6 @@ final class VersionOpacityRowView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
         addSubview(alwaysViewButton)
         addSubview(updateButton)
-        addSubview(versionButton)
         addSubview(opacityLabel)
         addSubview(opacitySlider)
         addSubview(opacityValueLabel)
@@ -2559,8 +2573,17 @@ final class VersionOpacityRowView: NSView {
         opacityValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         opacityValueLabel.textColor = .secondaryLabelColor
         opacityValueLabel.alignment = .right
+        setVersionText(versionTitle)
         setOpacity(1)
         layoutSubviews()
+    }
+
+    /// Shows the current version on the same clickable update control.
+    func setVersionText(_ text: String) {
+        updateButton.title = text.isEmpty ? updateTitle : "\(updateTitle) · \(text)"
+        updateButton.setAccessibilityLabel(
+            text.isEmpty ? updateTitle : "\(updateTitle), \(text)"
+        )
     }
 
     required init?(coder: NSCoder) {
@@ -2598,13 +2621,7 @@ final class VersionOpacityRowView: NSView {
             width: UsagePanelLayout.columnWidth,
             height: Self.viewHeight - verticalInset * 2
         )
-        versionButton.frame = NSRect(
-            x: UsagePanelLayout.columnX[2],
-            y: verticalInset,
-            width: UsagePanelLayout.columnWidth,
-            height: Self.viewHeight - verticalInset * 2
-        )
-        let opacityX = UsagePanelLayout.columnX[3]
+        let opacityX = UsagePanelLayout.columnX[2]
         opacityLabel.frame = NSRect(x: opacityX + 8, y: 8, width: 42, height: 16)
         opacitySlider.frame = NSRect(
             x: opacityX + 52,

@@ -1272,7 +1272,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중…", action: nil, keyEquivalent: "")
     private let shareFolderItem = NSMenuItem(title: "저장 위치 열기", action: #selector(openSharedUsageFolder), keyEquivalent: "")
     private let copySharePromptCombinedItem = NSMenuItem(
-        title: "전체(Codex+Claude+Gemini+Grok) 요청문 복사",
+        title: "전체(Codex+Claude+Gemini) 요청문 복사",
         action: #selector(copySharePromptCombined),
         keyEquivalent: ""
     )
@@ -1763,24 +1763,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func configureStatusItem() {
         statusItem.button?.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        statusItem.button?.toolTip = "Codex, Claude, Gemini, Grok 남은 사용량과 크레딧"
-        statusItem.button?.imageHugsTitle = true
-        statusItem.button?.setAccessibilityLabel("Codex, Claude, Gemini, Grok 사용량")
-
-        if #available(macOS 11.0, *) {
-            if let image = NSImage(systemSymbolName: "bolt.circle", accessibilityDescription: "CCMB 사용량") {
-                image.isTemplate = true
-                statusItem.button?.image = image
-                statusItem.button?.imagePosition = .imageLeading
-            }
-        }
+        statusItem.button?.toolTip = "Codex, Claude, Gemini 남은 사용량과 크레딧"
+        statusItem.button?.image = nil
+        statusItem.button?.imagePosition = .noImage
+        statusItem.button?.setAccessibilityLabel("Codex, Claude, Gemini 사용량")
         setStatusTitle("…")
         statusItem.button?.setAccessibilityValue("사용량 확인 중")
 
         let menu = NSMenu()
         menu.autoenablesItems = false
         // Status-item menus anchor their trailing edge beneath the status
-        // button. Matching the dashboard width keeps the rightmost Grok
+        // button. Matching the dashboard width keeps the rightmost Gemini
         // column directly below that button instead of leaving a side gutter.
         menu.minimumWidth = UsagePanelLayout.viewWidth
         accountItem.isEnabled = true
@@ -1866,7 +1859,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         intervalMenu.addItem(codexIntervalItem)
         intervalMenu.addItem(claudeIntervalItem)
         intervalMenu.addItem(geminiIntervalItem)
-        intervalMenu.addItem(grokIntervalItem)
+        // Grok's interval item and submenu stay built above but are not
+        // listed while the provider is hidden from the visible UI.
         intervalItem.submenu = intervalMenu
         menu.addItem(accountItem)
         menu.addItem(accountSeparatorItem)
@@ -1876,10 +1870,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(.separator())
         updateVersionView.updateButton.target = updaterController
         updateVersionView.updateButton.action = #selector(SPUStandardUpdaterController.checkForUpdates(_:))
-        updateVersionView.versionButton.isBordered = false
-        updateVersionView.versionButton.isEnabled = false
-        updateVersionView.versionButton.font = .systemFont(ofSize: 11, weight: .regular)
-        updateVersionView.versionButton.setAccessibilityRole(.staticText)
         updateVersionView.opacitySlider.target = self
         updateVersionView.opacitySlider.action = #selector(changePanelOpacity(_:))
         updateVersionView.setOpacity(panelOpacity)
@@ -2542,7 +2532,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func refreshStatusTitle() {
         guard let snapshot = lastSnapshot else { return }
-        setStatusTitle(Self.statusTitle(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot))
+        setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot))
         statusItem.button?.setAccessibilityValue(
             Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot)
         )
@@ -3117,7 +3107,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(copyItem(copySharePromptCodexItem))
         menu.addItem(copyItem(copySharePromptClaudeItem))
         menu.addItem(copyItem(copySharePromptGeminiItem))
-        menu.addItem(copyItem(copySharePromptGrokItem))
         menu.addItem(.separator())
         menu.addItem(copyItem(copyShareCommandItem))
         return menu
@@ -3190,7 +3179,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     @objc private func copySharePromptCombined() {
         copySharePrompt(
-            "~/.codex/bin/ccmb-usage를 실행해서 Codex·Claude·Gemini·Grok의 남은 주간 사용량과 Codex·Gemini 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.",
+            "~/.codex/bin/ccmb-usage를 실행해서 Codex·Claude·Gemini의 남은 주간 사용량과 Codex·Gemini 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.",
             label: "전체"
         )
     }
@@ -3602,12 +3591,37 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func setStatusTitle(_ title: String) {
         guard let button = statusItem.button else { return }
-        button.title = title
-
         let font = button.font ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [.font: font, .foregroundColor: NSColor.labelColor]
+        )
         let titleWidth = (title as NSString).size(withAttributes: [.font: font]).width
-        let iconWidth = button.image?.size.width ?? 0
-        statusItem.length = ceil(iconWidth + titleWidth + 8)
+        statusItem.length = ceil(titleWidth + 8)
+    }
+
+    private func setStatusTitle(_ parts: [(text: String, color: NSColor)]) {
+        guard !parts.isEmpty else {
+            setStatusTitle("—")
+            return
+        }
+        guard let button = statusItem.button else { return }
+        let font = button.font ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let title = NSMutableAttributedString()
+        for (index, part) in parts.enumerated() {
+            if index > 0 {
+                title.append(NSAttributedString(
+                    string: "·",
+                    attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]
+                ))
+            }
+            title.append(NSAttributedString(
+                string: part.text,
+                attributes: [.font: font, .foregroundColor: part.color]
+            ))
+        }
+        button.attributedTitle = title
+        statusItem.length = ceil(title.size().width + 8)
     }
 
     private static let percentFormatter: NumberFormatter = {
@@ -3621,29 +3635,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         UsageCore.creditDetailTitle(from: balance)
     }
 
-    private static func statusTitle(
+    private static func statusTitleParts(
         from snapshot: RateLimitSnapshot,
         claude: ClaudeUsageSnapshot?,
         gemini: GeminiUsageSnapshot?
-    ) -> String {
-        var parts: [String] = []
+    ) -> [(text: String, color: NSColor)] {
+        var parts: [(text: String, color: NSColor)] = []
 
         if let codexTitle = UsageCore.menuBarCodexTitle(
             usedPercent: snapshot.usedPercent,
             creditBalance: snapshot.creditBalance
         ) {
-            parts.append(codexTitle)
+            parts.append((codexTitle, UsageBrandColors.codex))
         }
 
         if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
-            parts.append(percentTitle(from: claudeRemaining))
+            parts.append((percentTitle(from: claudeRemaining), UsageBrandColors.claude))
         }
 
         if let geminiRemaining = GeminiUsageCore.remainingPercent(from: gemini?.fiveHourRemainingFraction) {
-            parts.append(percentTitle(from: geminiRemaining))
+            parts.append((percentTitle(from: geminiRemaining), UsageBrandColors.geminiText))
         }
 
-        return parts.isEmpty ? "—" : parts.joined(separator: "·")
+        return parts
     }
 
     private static func remainingUsagePercent(from usedPercent: Double) -> Double {
