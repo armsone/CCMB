@@ -2970,10 +2970,9 @@ enum ClaudeOAuthUsageClient {
                     UserDefaults.standard.set(retryAt, forKey: rateLimitRetryDefaultsKey)
                     consecutiveRateLimits = nextRateLimitCount
                     UserDefaults.standard.set(nextRateLimitCount, forKey: consecutiveRateLimitsDefaultsKey)
-                    // The CLI may rotate its token while the circuit is open.
-                    // Re-resolve it for the single half-open probe instead of
-                    // pinning the token that received the 429.
-                    cachedAccessToken = nil
+                    // A rate-limit response does not invalidate the token.
+                    // Keep it cached so the half-open probe cannot trigger
+                    // another Keychain authorization prompt.
                     completion(outcome)
                 default:
                     completion(outcome)
