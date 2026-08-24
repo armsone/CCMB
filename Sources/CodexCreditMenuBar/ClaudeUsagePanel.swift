@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import LocalAuthentication
 import Security
 
 /// Reads Claude Code's non-secret cached account metadata only. The OAuth
@@ -3063,13 +3064,23 @@ enum ClaudeOAuthUsageClient {
     /// requires. The caller keeps a successful read in process memory and
     /// clears it only after an authentication failure, avoiding recurring
     /// Keychain authorization prompts while still picking up rotated tokens.
-    private static func readKeychainToken() -> KeychainTokenResult {
-        let query: [String: Any] = [
+    static func keychainTokenQuery() -> [String: Any] {
+        let authenticationContext = LAContext()
+        authenticationContext.interactionNotAllowed = true
+        return [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            // Usage refresh runs without an explicit credential action from
+            // the user. Never let this passive lookup present a macOS
+            // password or Keychain authorization dialog.
+            kSecUseAuthenticationContext as String: authenticationContext
         ]
+    }
+
+    private static func readKeychainToken() -> KeychainTokenResult {
+        let query = keychainTokenQuery()
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess else {

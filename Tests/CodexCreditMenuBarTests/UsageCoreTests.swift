@@ -1,4 +1,6 @@
 import XCTest
+import LocalAuthentication
+import Security
 @testable import CodexCreditMenuBar
 
 final class UsageCoreTests: XCTestCase {
@@ -1446,6 +1448,13 @@ final class ClaudeUsageCoreTests: XCTestCase {
 }
 
 final class ClaudeOAuthUsageParsingTests: XCTestCase {
+    func testPassiveKeychainLookupCannotPresentAuthenticationUI() {
+        let query = ClaudeOAuthUsageClient.keychainTokenQuery()
+        let context = query[kSecUseAuthenticationContext as String] as? LAContext
+
+        XCTAssertEqual(context?.interactionNotAllowed, true)
+    }
+
     private func data(_ json: String) -> Data {
         Data(json.utf8)
     }
