@@ -3,6 +3,20 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.1</title>
+            <pubDate>Mon, 24 Aug 2026 10:39:38 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.1</link>
+            <sparkle:version>337418</sparkle:version>
+            <sparkle:shortVersionString>2.0.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.1
+
+- Claude 사용량 요청이 제한된 뒤에도 인증 정보를 안전하게 재사용해 macOS 키체인 권한 창이 반복해서 나타나지 않도록 개선했습니다.
+- Codex·Claude·Gemini 사용량 표시와 자동 업데이트 동작은 그대로 유지됩니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.1/CCMB-2.0.1.dmg" length="2856025" type="application/octet-stream" sparkle:edSignature="lXBKQd+mT4vrRAcfVQg03uCFUxqqvjwj8Pp0cz0EgYMv1c+KmNV5fdDHr8CCj9UKJK1x6MyU1xpj/0xNr+WdCg=="/>
+        </item>
+        <item>
             <title>2.0.0</title>
             <pubDate>Sun, 23 Aug 2026 07:49:06 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.0</link>
@@ -25,22 +39,6 @@
 - 메뉴바는 아이콘 없이 서비스별 대표 색상의 숫자만 표시합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.5/CCMB-0.4.5.dmg" length="2856238" type="application/octet-stream" sparkle:edSignature="UYAGvkKi2Vs1nF235fCyFCxio2sd1hvvvGlHcHg4euIX3z5n1z9JElKcsy3K9l7ibaYeI9sh7MckQeVpbX71BQ=="/>
-        </item>
-        <item>
-            <title>0.4.4</title>
-            <pubDate>Sat, 22 Aug 2026 14:33:18 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.4.4</link>
-            <sparkle:version>52</sparkle:version>
-            <sparkle:shortVersionString>0.4.4</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.4.4
-
-- 의미 있는 사용량을 확인할 수 없는 Grok 항목을 메뉴와 항상 보기 패널에서 숨겼습니다.
-- 업데이트 확인과 현재 버전을 한 칸에 합치고, 투명도·재시작·종료 조작을 더 간결하게 정돈했습니다.
-- 메뉴 막대 아이콘을 제거하고 Codex·Claude·Gemini의 남은 사용량 숫자를 각 서비스의 대표 색상으로 구분했습니다.
-- Grok 사용량 수집 기반은 유지해 신뢰할 수 있는 데이터가 제공되면 같은 구성으로 다시 노출할 수 있습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.4/CCMB-0.4.4.dmg" length="2852375" type="application/octet-stream" sparkle:edSignature="aoPbhisnfEim8UGxdJI/rGlCadBmHu3vv++8IqmigoWxA7fyqlBjIZWa81LEgRsWcWNHK5g+6J7qf33p+ZB1Dg=="/>
         </item>
     </channel>
 </rss>
