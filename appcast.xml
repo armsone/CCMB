@@ -3,6 +3,22 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.3</title>
+            <pubDate>Tue, 25 Aug 2026 16:27:37 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.3</link>
+            <sparkle:version>340823</sparkle:version>
+            <sparkle:shortVersionString>2.0.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.3
+
+- 사용량 응답이 늦을 때 CCMB 전체가 재시작되며 메뉴바에서 사라질 수 있던 문제를 고쳤습니다.
+- 잠자기 복귀와 자동 복구에서는 앱을 종료하지 않고 데이터 연결만 안전하게 다시 시작합니다.
+- 수동 재시작은 기존 CCMB가 완전히 종료된 뒤 새 인스턴스를 실행합니다.
+- 업데이트 자동 다운로드를 메뉴와 고정 패널에서 바로 켜고 끌 수 있습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.3/CCMB-2.0.3.dmg" length="2859318" type="application/octet-stream" sparkle:edSignature="aBxkO5PwDK6Ljw1w+aLmRFTAnaPf0u0Tge4AQOAe/HhLrUojdDEkNdLHiklUoZjCza10Jl3gaqcuLy4sDqhfCw=="/>
+        </item>
+        <item>
             <title>2.0.1</title>
             <pubDate>Mon, 24 Aug 2026 10:39:38 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.1</link>
@@ -24,21 +40,6 @@
             <sparkle:shortVersionString>2.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.0/CCMB-2.0.0.dmg" length="2856219" type="application/octet-stream" sparkle:edSignature="7iEBhQpdigF4INbQ43kC3veYjpnVbVpbVODWovFOwpYufiU+aVCiNzaMghj+EXWZpxtKiUkkSvrkhZwOZFLZBw=="/>
-        </item>
-        <item>
-            <title>0.4.5</title>
-            <pubDate>Sat, 22 Aug 2026 15:06:04 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v0.4.5</link>
-            <sparkle:version>53</sparkle:version>
-            <sparkle:shortVersionString>0.4.5</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 0.4.5
-
-- Codex·Claude·Gemini 사용량 링을 정밀 눈금, 은은한 발광, 광택, 끝점 표시가 있는 새 디자인으로 개선했습니다.
-- 원형 링 내부의 퍼센트 숫자를 모두 같은 보통 굵기로 통일했습니다.
-- 메뉴바는 아이콘 없이 서비스별 대표 색상의 숫자만 표시합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v0.4.5/CCMB-0.4.5.dmg" length="2856238" type="application/octet-stream" sparkle:edSignature="UYAGvkKi2Vs1nF235fCyFCxio2sd1hvvvGlHcHg4euIX3z5n1z9JElKcsy3K9l7ibaYeI9sh7MckQeVpbX71BQ=="/>
         </item>
     </channel>
 </rss>
