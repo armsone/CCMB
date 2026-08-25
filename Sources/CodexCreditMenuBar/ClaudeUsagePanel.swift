@@ -1717,6 +1717,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     /// `onToggleAlwaysView` to hand off to that persistent panel.
     var onOpacityChange: ((Double) -> Void)?
     var onCheckForUpdates: (() -> Void)?
+    var onAutomaticDownloadsChange: ((Bool) -> Void)?
     var onOpenDiagnosticLog: (() -> Void)?
     var onOpenGitHub: (() -> Void)?
     var onToggleLaunchAtLogin: (() -> Void)?
@@ -1797,6 +1798,8 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
         updateVersionView.updateButton.target = self
         updateVersionView.updateButton.action = #selector(triggerCheckForUpdates)
+        updateVersionView.automaticDownloadsButton.target = self
+        updateVersionView.automaticDownloadsButton.action = #selector(toggleAutomaticDownloads(_:))
         updateVersionView.opacitySlider.target = self
         updateVersionView.opacitySlider.action = #selector(changeOpacity(_:))
 
@@ -2078,6 +2081,14 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func triggerCheckForUpdates() {
         onCheckForUpdates?()
+    }
+
+    @objc private func toggleAutomaticDownloads(_ sender: NSButton) {
+        onAutomaticDownloadsChange?(sender.state == .on)
+    }
+
+    func setAutomaticDownloadsEnabled(_ enabled: Bool) {
+        updateVersionView.setAutomaticDownloadsEnabled(enabled)
     }
 
     @objc private func triggerOpenDiagnosticLog() {
@@ -2627,12 +2638,13 @@ final class LifecycleActionsRowView: NSView {
 /// Three-column settings row: always-on-top, combined update/version, opacity.
 @MainActor
 final class VersionOpacityRowView: NSView {
-    private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
+    private static let viewHeight: CGFloat = 46
 
     let alwaysViewButton: NSButton
     /// One clickable control carrying both the update action and the current
     /// version text, via `setVersionText(_:)`.
     let updateButton: NSButton
+    let automaticDownloadsButton: NSButton
     let opacitySlider: NSSlider
     private let updateTitle: String
     private let opacityLabel = NSTextField(labelWithString: "투명도")
@@ -2645,6 +2657,11 @@ final class VersionOpacityRowView: NSView {
         self.updateTitle = updateTitle
         alwaysViewButton = Self.makeButton(title: alwaysTitle)
         updateButton = Self.makeButton(title: updateTitle)
+        automaticDownloadsButton = NSButton(
+            checkboxWithTitle: "자동 다운로드",
+            target: nil,
+            action: nil
+        )
         opacitySlider = NSSlider(
             value: 1,
             minValue: UsageCore.minimumPanelOpacity,
@@ -2661,12 +2678,16 @@ final class VersionOpacityRowView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
         addSubview(alwaysViewButton)
         addSubview(updateButton)
+        addSubview(automaticDownloadsButton)
         addSubview(opacityLabel)
         addSubview(opacitySlider)
         addSubview(opacityValueLabel)
         dividers.forEach(addSubview)
 
         opacitySlider.controlSize = .small
+        automaticDownloadsButton.controlSize = .small
+        automaticDownloadsButton.font = .systemFont(ofSize: 10, weight: .regular)
+        automaticDownloadsButton.setAccessibilityLabel("업데이트 자동 다운로드")
         opacitySlider.isContinuous = true
         opacitySlider.setAccessibilityLabel("패널 투명도")
         opacityLabel.font = .systemFont(ofSize: 11, weight: .regular)
@@ -2686,6 +2707,13 @@ final class VersionOpacityRowView: NSView {
         updateButton.setAccessibilityLabel(
             text.isEmpty ? updateTitle : "\(updateTitle), \(text)"
         )
+    }
+
+    func setAutomaticDownloadsEnabled(_ enabled: Bool) {
+        automaticDownloadsButton.state = enabled ? .on : .off
+        automaticDownloadsButton.toolTip = enabled
+            ? "새 버전을 확인하면 미리 다운로드합니다."
+            : "업데이트 확인 후 직접 다운로드합니다."
     }
 
     required init?(coder: NSCoder) {
@@ -2719,19 +2747,25 @@ final class VersionOpacityRowView: NSView {
         )
         updateButton.frame = NSRect(
             x: UsagePanelLayout.columnX[1],
-            y: verticalInset,
+            y: 2,
             width: UsagePanelLayout.columnWidth,
-            height: Self.viewHeight - verticalInset * 2
+            height: 20
+        )
+        automaticDownloadsButton.frame = NSRect(
+            x: UsagePanelLayout.columnX[1] + 20,
+            y: 26,
+            width: UsagePanelLayout.columnWidth - 40,
+            height: 16
         )
         let opacityX = UsagePanelLayout.columnX[2]
-        opacityLabel.frame = NSRect(x: opacityX + 8, y: 8, width: 42, height: 16)
+        opacityLabel.frame = NSRect(x: opacityX + 8, y: 15, width: 42, height: 16)
         opacitySlider.frame = NSRect(
             x: opacityX + 52,
             y: (Self.viewHeight - 20) / 2,
             width: 80,
             height: 20
         )
-        opacityValueLabel.frame = NSRect(x: opacityX + 138, y: 8, width: 32, height: 16)
+        opacityValueLabel.frame = NSRect(x: opacityX + 138, y: 15, width: 32, height: 16)
 
         for (index, divider) in dividers.enumerated() {
             divider.frame = NSRect(

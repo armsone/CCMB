@@ -746,7 +746,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
             guard self.refreshGeneration == generation else { return }
 
             let elapsed = abs(self.refreshStartedAt?.timeIntervalSinceNow ?? 0)
-            self.log("\(reason) timed out after \(Int(elapsed))s; restarting app")
+            self.log("\(reason) timed out after \(Int(elapsed))s; restarting app-server")
             self.diagnosticLog?.log("codex_refresh_watchdog_timeout", ["reason": .string(reason), "elapsedSeconds": .int(Int(elapsed))])
             self.isRefreshing = false
             self.refreshStartedAt = nil
@@ -754,7 +754,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
             self.stopCurrentProcess()
 
             self.deliverCallback {
-                self.onRestartRequired?("정보 가져오기가 응답하지 않아 앱을 재시작합니다.")
+                self.onRestartRequired?("정보 가져오기가 늦어 연결만 다시 시작합니다.")
             }
         }
     }
@@ -1197,6 +1197,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         updaterDelegate: nil,
         userDriverDelegate: nil
     )
+    private lazy var updateDownloadPreference = UpdateDownloadPreference(
+        read: { [unowned self] in self.updaterController.updater.automaticallyDownloadsUpdates },
+        write: { [unowned self] enabled in
+            self.updaterController.updater.automaticallyDownloadsUpdates = enabled
+        }
+    )
     private var countdownTimer: DispatchSourceTimer?
     private var autoRefreshTimer: DispatchSourceTimer?
     private var refreshInterval: TimeInterval = AppDelegate.savedRefreshInterval()
@@ -1352,6 +1358,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
         controller.setShareMenu(makeShareMenu())
         controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
+        controller.onAutomaticDownloadsChange = { [weak self] in self?.setAutomaticDownloadsEnabled($0) }
+        controller.setAutomaticDownloadsEnabled(updateDownloadPreference.isEnabled)
         controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
         controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
         controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
@@ -1389,6 +1397,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let diagnosticLog = DiagnosticLog.shared
     private var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+    }
+
+    @objc private func toggleAutomaticDownloads(_ sender: NSButton) {
+        setAutomaticDownloadsEnabled(sender.state == .on)
+    }
+
+    private func setAutomaticDownloadsEnabled(_ enabled: Bool) {
+        updateDownloadPreference.setEnabled(enabled)
+        let effectiveValue = updateDownloadPreference.isEnabled
+        updateVersionView.setAutomaticDownloadsEnabled(effectiveValue)
+        statusDropdownController.setAutomaticDownloadsEnabled(effectiveValue)
+        pinnedUsageWindowController?.setAutomaticDownloadsEnabled(effectiveValue)
+        appLog("update automatic downloads: \(updateDownloadPreference.statusText)")
     }
     deinit {
         writePrivateLog("app delegate deinit")
@@ -1532,9 +1553,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             }
             guard self.lastRateLimitUpdatedAt == nil else { return }
 
-            self.appLog("wake recovery watchdog: hard restart triggered")
-            self.setDetailTitle("앱 재시작 복구...", for: self.updatedItem)
-            self.restartAppForReason("wake-recovery")
+            self.appLog("wake recovery watchdog: retry app-server")
+            self.setDetailTitle("연결을 다시 시작하는 중...", for: self.updatedItem)
+            self.client.recoverFromSleep()
         }
     }
 
@@ -1548,7 +1569,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if FileManager.default.fileExists(atPath: appPath) {
             let relauncher = Process()
             relauncher.executableURL = URL(fileURLWithPath: "/bin/sh")
-            relauncher.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$1\"", "ccmb-relaunch", appPath]
+            relauncher.arguments = [
+                "-c",
+                "while /bin/kill -0 \"$2\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open -n \"$1\"",
+                "ccmb-relaunch",
+                appPath,
+                String(ProcessInfo.processInfo.processIdentifier)
+            ]
             try? relauncher.run()
         }
         NSApp.terminate(nil)
@@ -1870,6 +1897,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(.separator())
         updateVersionView.updateButton.target = updaterController
         updateVersionView.updateButton.action = #selector(SPUStandardUpdaterController.checkForUpdates(_:))
+        updateVersionView.automaticDownloadsButton.target = self
+        updateVersionView.automaticDownloadsButton.action = #selector(toggleAutomaticDownloads(_:))
+        updateVersionView.setAutomaticDownloadsEnabled(updateDownloadPreference.isEnabled)
         updateVersionView.opacitySlider.target = self
         updateVersionView.opacitySlider.action = #selector(changePanelOpacity(_:))
         updateVersionView.setOpacity(panelOpacity)
@@ -2020,7 +2050,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 self.appLog(message)
                 self.setStatusTitle("!")
                 self.setDetailTitle(message, for: self.updatedItem)
-                self.restartAppForReason("appserver-watchdog")
+                self.client.recoverFromSleep()
             }
         }
     }
@@ -3399,6 +3429,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
             controller.setShareMenu(makeShareMenu())
             controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
+            controller.onAutomaticDownloadsChange = { [weak self] in self?.setAutomaticDownloadsEnabled($0) }
+            controller.setAutomaticDownloadsEnabled(updateDownloadPreference.isEnabled)
             controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
             controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
             controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
