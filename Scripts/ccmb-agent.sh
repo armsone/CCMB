@@ -44,9 +44,9 @@ while true; do
 
     # 안전장치: 사용자 화면에 모달 권한 창을 띄울 수 있는 명령은 실행하지
     # 않는다. 그런 창은 키보드 입력을 전부 삼켜서 맥을 먹통처럼 보이게 한다.
-    if grep -qE 'osascript|find-generic-password|security[[:space:]]+(add|unlock|import)' "$DONE_DIR/$name.sh"; then
+    if grep -qE 'osascript|find-(generic|internet)-password|security[[:space:]]+(add|delete|dump|export|import|unlock)' "$DONE_DIR/$name.sh"; then
       printf '거부: 이 작업은 권한 대화상자를 띄울 수 있는 명령을 포함합니다.\n' > "$OUT_DIR/$name.log"
-      grep -nE 'osascript|find-generic-password|security[[:space:]]+(add|unlock|import)' "$DONE_DIR/$name.sh" >> "$OUT_DIR/$name.log"
+      grep -nE 'osascript|find-(generic|internet)-password|security[[:space:]]+(add|delete|dump|export|import|unlock)' "$DONE_DIR/$name.sh" >> "$OUT_DIR/$name.log"
       printf '%s\n' "77" > "$OUT_DIR/$name.status"
       printf '[%s] 거부됨: %s\n' "$(date '+%H:%M:%S')" "$name"
       continue
