@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.4</title>
+            <pubDate>Wed, 26 Aug 2026 09:42:45 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.4</link>
+            <sparkle:version>341860</sparkle:version>
+            <sparkle:shortVersionString>2.0.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.4
+
+- Claude 인증이 만료되면 저장된 Claude Code 로그인 정보로 안전하게 자동 복구합니다.
+- 자동 복구가 어려운 경우 초보 사용자도 다음 조치를 알 수 있도록 다시 로그인 안내를 표시합니다.
+- 동시에 자격정보가 갱신되는 상황과 반복 복구 요청을 방지해 인증 안정성을 높였습니다.
+
+Claude Code에 정상 로그인된 상태라면 별도의 토큰 수정 없이 CCMB가 사용량 표시를 다시 복구합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.4/CCMB-2.0.4.dmg" length="2886269" type="application/octet-stream" sparkle:edSignature="UxF3H7ekzPiQjGo5j+6ZCZcL0FgtSxdJPBb1GSy1kNmggw2REst1JAgjUxs2eLIZT3Wl32Y9r/YSJb7AyscDBw=="/>
+        </item>
+        <item>
             <title>2.0.3</title>
             <pubDate>Tue, 25 Aug 2026 16:27:37 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.3</link>
@@ -31,15 +48,6 @@
 - Codex·Claude·Gemini 사용량 표시와 자동 업데이트 동작은 그대로 유지됩니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.1/CCMB-2.0.1.dmg" length="2856025" type="application/octet-stream" sparkle:edSignature="lXBKQd+mT4vrRAcfVQg03uCFUxqqvjwj8Pp0cz0EgYMv1c+KmNV5fdDHr8CCj9UKJK1x6MyU1xpj/0xNr+WdCg=="/>
-        </item>
-        <item>
-            <title>2.0.0</title>
-            <pubDate>Sun, 23 Aug 2026 07:49:06 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.0</link>
-            <sparkle:version>337417</sparkle:version>
-            <sparkle:shortVersionString>2.0.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.0/CCMB-2.0.0.dmg" length="2856219" type="application/octet-stream" sparkle:edSignature="7iEBhQpdigF4INbQ43kC3veYjpnVbVpbVODWovFOwpYufiU+aVCiNzaMghj+EXWZpxtKiUkkSvrkhZwOZFLZBw=="/>
         </item>
     </channel>
 </rss>
