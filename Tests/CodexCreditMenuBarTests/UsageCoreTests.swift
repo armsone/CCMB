@@ -1453,6 +1453,7 @@ final class ClaudeOAuthUsageParsingTests: XCTestCase {
         let context = query[kSecUseAuthenticationContext as String] as? LAContext
 
         XCTAssertEqual(context?.interactionNotAllowed, true)
+        XCTAssertEqual(query[kSecUseAuthenticationUI as String] as? String, kSecUseAuthenticationUISkip as String)
     }
 
     func testRefreshableCredentialReadsClaudeCodeOAuthFields() throws {

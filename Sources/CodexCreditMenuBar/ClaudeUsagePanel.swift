@@ -3334,6 +3334,7 @@ enum ClaudeOAuthUsageClient {
             // Usage refresh runs without an explicit credential action from
             // the user. Never let this passive lookup present a macOS
             // password or Keychain authorization dialog.
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
             kSecUseAuthenticationContext as String: authenticationContext
         ]
     }
