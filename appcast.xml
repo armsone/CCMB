@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.5</title>
+            <pubDate>Thu, 27 Aug 2026 06:12:03 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.5</link>
+            <sparkle:version>343088</sparkle:version>
+            <sparkle:shortVersionString>2.0.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.5
+
+- 백그라운드에서 Claude 사용량을 갱신할 때 macOS 키체인 인증창이 나타나지 않도록 보강했습니다.
+- 키체인 접근에 사용자 확인이 필요한 경우 창을 반복 표시하지 않고 안전하게 대체 데이터 경로를 사용합니다.
+- Codex·Claude·Gemini·Grok 사용량 표시와 자동 업데이트 동작은 그대로 유지됩니다.
+
+참고: Claude Code 자체가 실행 중 표시하는 `security` 인증창은 Anthropic의 Claude Code 키체인 동작에 해당하며 CCMB가 표시하는 창이 아닙니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.5/CCMB-2.0.5.dmg" length="2915363" type="application/octet-stream" sparkle:edSignature="C1ciFe3qEu9byYNIQprl6ALVMjPO2d65nKr5rtXnGHNTI5+J6i286YrEQY6Z0jD7vKjpVrP4NqErAMQBMEZ8Cw=="/>
+        </item>
+        <item>
             <title>2.0.4</title>
             <pubDate>Wed, 26 Aug 2026 09:42:45 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.4</link>
@@ -34,20 +51,6 @@ Claude Code에 정상 로그인된 상태라면 별도의 토큰 수정 없이 C
 - 업데이트 자동 다운로드를 메뉴와 고정 패널에서 바로 켜고 끌 수 있습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.3/CCMB-2.0.3.dmg" length="2859318" type="application/octet-stream" sparkle:edSignature="aBxkO5PwDK6Ljw1w+aLmRFTAnaPf0u0Tge4AQOAe/HhLrUojdDEkNdLHiklUoZjCza10Jl3gaqcuLy4sDqhfCw=="/>
-        </item>
-        <item>
-            <title>2.0.1</title>
-            <pubDate>Mon, 24 Aug 2026 10:39:38 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.1</link>
-            <sparkle:version>337418</sparkle:version>
-            <sparkle:shortVersionString>2.0.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.1
-
-- Claude 사용량 요청이 제한된 뒤에도 인증 정보를 안전하게 재사용해 macOS 키체인 권한 창이 반복해서 나타나지 않도록 개선했습니다.
-- Codex·Claude·Gemini 사용량 표시와 자동 업데이트 동작은 그대로 유지됩니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.1/CCMB-2.0.1.dmg" length="2856025" type="application/octet-stream" sparkle:edSignature="lXBKQd+mT4vrRAcfVQg03uCFUxqqvjwj8Pp0cz0EgYMv1c+KmNV5fdDHr8CCj9UKJK1x6MyU1xpj/0xNr+WdCg=="/>
         </item>
     </channel>
 </rss>
