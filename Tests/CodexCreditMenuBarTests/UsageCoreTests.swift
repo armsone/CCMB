@@ -1455,6 +1455,59 @@ final class ClaudeOAuthUsageParsingTests: XCTestCase {
         XCTAssertEqual(context?.interactionNotAllowed, true)
     }
 
+    func testRefreshableCredentialReadsClaudeCodeOAuthFields() throws {
+        let json = #"{"claudeAiOauth":{"accessToken":"old-access","refreshToken":"refresh-secret","scopes":["user:profile","user:inference"]}}"#
+        let credential = try XCTUnwrap(ClaudeOAuthUsageClient.parseRefreshableCredential(data(json)))
+
+        XCTAssertEqual(credential.accessToken, "old-access")
+        XCTAssertEqual(credential.refreshToken, "refresh-secret")
+        XCTAssertEqual(credential.scopes, ["user:profile", "user:inference"])
+    }
+
+    func testRefreshableCredentialRequiresBothTokens() {
+        XCTAssertNil(ClaudeOAuthUsageClient.parseRefreshableCredential(data(#"{"claudeAiOauth":{"accessToken":"access"}}"#)))
+        XCTAssertNil(ClaudeOAuthUsageClient.parseRefreshableCredential(data(#"{"claudeAiOauth":{"refreshToken":"refresh"}}"#)))
+    }
+
+    func testUpdatedCredentialPreservesUnknownFieldsAndRotatesReturnedValues() throws {
+        let original = data(#"{"unrelated":{"keep":true},"claudeAiOauth":{"accessToken":"old","refreshToken":"old-refresh","expiresAt":1,"scopes":["old"],"subscriptionType":"max"}}"#)
+        let updated = try XCTUnwrap(ClaudeOAuthUsageClient.updatedCredentialData(
+            original: original,
+            accessToken: "new",
+            refreshToken: "new-refresh",
+            expiresIn: 3_600,
+            refreshTokenExpiresIn: 86_400,
+            scope: "user:profile user:inference",
+            now: Date(timeIntervalSince1970: 1_000)
+        ))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: updated) as? [String: Any])
+        let oauth = try XCTUnwrap(root["claudeAiOauth"] as? [String: Any])
+        let unrelated = try XCTUnwrap(root["unrelated"] as? [String: Any])
+
+        XCTAssertEqual(oauth["accessToken"] as? String, "new")
+        XCTAssertEqual(oauth["refreshToken"] as? String, "new-refresh")
+        XCTAssertEqual((oauth["expiresAt"] as? NSNumber)?.int64Value, 4_600_000)
+        XCTAssertEqual((oauth["refreshTokenExpiresAt"] as? NSNumber)?.int64Value, 87_400_000)
+        XCTAssertEqual(oauth["scopes"] as? [String], ["user:profile", "user:inference"])
+        XCTAssertEqual(oauth["subscriptionType"] as? String, "max")
+        XCTAssertEqual(unrelated["keep"] as? Bool, true)
+    }
+
+    func testUpdatedCredentialKeepsRefreshTokenWhenResponseOmitsRotation() throws {
+        let original = data(#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"keep-me"}}"#)
+        let updated = try XCTUnwrap(ClaudeOAuthUsageClient.updatedCredentialData(
+            original: original,
+            accessToken: "new",
+            refreshToken: nil,
+            expiresIn: 60,
+            scope: nil,
+            now: Date(timeIntervalSince1970: 0)
+        ))
+        let credential = try XCTUnwrap(ClaudeOAuthUsageClient.parseRefreshableCredential(updated))
+        XCTAssertEqual(credential.accessToken, "new")
+        XCTAssertEqual(credential.refreshToken, "keep-me")
+    }
+
     private func data(_ json: String) -> Data {
         Data(json.utf8)
     }
@@ -1645,6 +1698,7 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
             .noCredential,
             .keychainCredentialUnreadable,
             .rateLimited(retryAt: Date(timeIntervalSince1970: 1_000)),
+            .authenticationRecoveryFailed,
             .httpFailure(status: 401),
             .httpFailure(status: 500),
             .transportFailure,
@@ -1654,6 +1708,13 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
             XCTAssertNotNil(outcome.diagnosticDescription, "\(outcome) must log a reason")
             XCTAssertNotNil(outcome.staleReasonLabel, "\(outcome) must surface an actionable label")
         }
+    }
+
+    func testAuthenticationRecoveryFailureExplainsTheNextBeginnerAction() {
+        XCTAssertEqual(
+            ClaudeUsageFetchOutcome.authenticationRecoveryFailed.staleReasonLabel,
+            "자동 복구 실패 · Claude Code에서 다시 로그인"
+        )
     }
 
     func testRateLimitRetryAtIsOnlyCarriedByTheBackoffCases() {
@@ -1807,5 +1868,11 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
         )
         XCTAssertFalse(rateLimitedDiagnostic.lowercased().contains("bearer"))
         XCTAssertFalse(rateLimitedDiagnostic.lowercased().contains("token"))
+
+        let recoveryDiagnostic = try XCTUnwrap(
+            ClaudeUsageFetchOutcome.authenticationRecoveryFailed.diagnosticDescription
+        )
+        XCTAssertFalse(recoveryDiagnostic.lowercased().contains("bearer"))
+        XCTAssertFalse(recoveryDiagnostic.lowercased().contains("refresh_token"))
     }
 }

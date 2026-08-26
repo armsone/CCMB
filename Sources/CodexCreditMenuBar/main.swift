@@ -2223,7 +2223,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 if let diagnostic = outcome.diagnosticDescription {
                     self.appLog("claude usage fetch failed: \(diagnostic)")
                 }
-            case .noCredential, .keychainCredentialUnreadable, .httpFailure, .transportFailure, .decodeFailure:
+            case .noCredential, .keychainCredentialUnreadable, .authenticationRecoveryFailed,
+                 .httpFailure, .transportFailure, .decodeFailure:
                 self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
                 self.lastClaudeRateLimitRetryAt = nil
                 if let diagnostic = outcome.diagnosticDescription {
