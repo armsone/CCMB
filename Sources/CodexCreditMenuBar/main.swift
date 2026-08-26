@@ -1315,7 +1315,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// Per-refresh consumption strips, persisted so the chart is not blank for
     /// the first stretch after every launch.
     private var codexConsumption = UsageConsumptionTracker()
+    private var codexSparkConsumption = UsageConsumptionTracker()
     private var claudeConsumption = UsageConsumptionTracker()
+    private var claudeFableConsumption = UsageConsumptionTracker()
     private var geminiConsumption = UsageConsumptionTracker()
     private var grokConsumption = UsageConsumptionTracker()
     private let checkForUpdatesItem = NSMenuItem(
@@ -2430,51 +2432,111 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             isDecreasing: usesCredits,
             metricKey: usesCredits ? "codex.credit" : "codex.weekly"
         )
+        // Spark has its own weekly window, tracked independently of the
+        // ordinary meter. A snapshot without a Spark figure records nothing
+        // here, so the bucket stays missing for that refresh rather than
+        // showing up as zero work.
+        codexSparkConsumption.record(
+            reading: snapshot.sparkUsedPercent,
+            at: snapshot.updatedAt,
+            isDecreasing: false,
+            metricKey: "codex.spark.weekly"
+        )
         persistConsumptionTrackers()
     }
 
     private func recordClaudeConsumption() {
         guard let snapshot = lastClaudeSnapshot, let publishedAt = snapshot.publishedAt else { return }
-        // The 5-hour session meter is the one that visibly moves while working;
-        // weekly is the fallback for accounts that only report it.
-        let usesSession = snapshot.fiveHourUsedPercent != nil
+        // The weekly meter is the ordinary bucket so it stacks with Fable's
+        // own weekly limit like for like; the 5-hour session meter is the
+        // fallback for accounts that only report it.
+        let usesWeekly = snapshot.weeklyUsedPercent != nil
         claudeConsumption.record(
-            reading: usesSession ? snapshot.fiveHourUsedPercent : snapshot.weeklyUsedPercent,
+            reading: usesWeekly ? snapshot.weeklyUsedPercent : snapshot.fiveHourUsedPercent,
             at: publishedAt,
             isDecreasing: false,
-            metricKey: usesSession ? "claude.session" : "claude.weekly"
+            metricKey: usesWeekly ? "claude.weekly" : "claude.session"
+        )
+        // Only recorded when `modelWeeklyLimits` actually carries a Fable
+        // figure; otherwise the bucket stays missing for that refresh.
+        claudeFableConsumption.record(
+            reading: ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent,
+            at: publishedAt,
+            isDecreasing: false,
+            metricKey: "claude.fable.weekly"
         )
         persistConsumptionTrackers()
+    }
+
+    /// Caption/accessibility text shared by the multi-bucket strips.
+    private static func stackedStripTexts(
+        provider: String,
+        series: [UsageHistorySeries],
+        unit: String
+    ) -> (caption: String, accessibilityValue: String) {
+        let stacked = UsageConsumptionCore.stackedSamples(series.map(\.samples))
+        let labels = series.map(\.label)
+        // Before the first measured refresh the ordinary meter reads "0",
+        // as it always has; the other buckets are simply not mentioned.
+        let unmeasured: [Double?] = [0] + Array(repeating: nil, count: max(0, series.count - 1))
+        let latestAmounts = stacked.last?.amounts ?? unmeasured
+        let breakdown = UsageConsumptionCore.breakdownTitle(amounts: latestAmounts, labels: labels, unit: unit)
+        return (
+            "\(provider) · 갱신당 \(breakdown)",
+            "최근 \(stacked.count)회 갱신 소비 기록, 마지막 갱신 \(breakdown)"
+        )
     }
 
     private func codexHistoryStrip(from snapshot: RateLimitSnapshot) -> UsageHistoryStrip? {
         // No emptiness guard: the strip is always drawn at full width, with
         // not-yet-measured slots shown as faint placeholders.
-        let samples = codexConsumption.samples
         let usesCredits = Self.codexChartsCredits(snapshot)
         let unit = usesCredits ? " 크레딧" : "%"
-        let latest = samples.last?.amount ?? 0
+        var series = [UsageHistorySeries(
+            label: usesCredits ? "크레딧" : "주간",
+            samples: codexConsumption.samples,
+            color: UsageBrandColors.codex
+        )]
+        // Spark is a weekly percentage; it can only stack with the ordinary
+        // weekly percentage, never with a credit balance.
+        if !usesCredits {
+            series.append(UsageHistorySeries(
+                label: "Spark",
+                samples: codexSparkConsumption.samples,
+                color: UsageBrandColors.codexSpark
+            ))
+        }
+        let texts = Self.stackedStripTexts(provider: "Codex", series: series, unit: unit)
         return UsageHistoryStrip(
-            caption: "Codex · 갱신당 \(usesCredits ? "크레딧" : "주간") \(UsageConsumptionCore.amountTitle(latest, unit: usesCredits ? "" : "%"))",
-            samples: samples,
+            caption: texts.caption,
+            series: series,
             slotCount: UsageConsumptionTracker.defaultCapacity,
             unitSuffix: unit,
-            color: UsageBrandColors.codex,
-            accessibilityValue: "최근 \(samples.count)회 갱신 소비 기록, 마지막 갱신 \(UsageConsumptionCore.amountTitle(latest, unit: unit))"
+            accessibilityValue: texts.accessibilityValue
         )
     }
 
     private func claudeHistoryStrip() -> UsageHistoryStrip? {
-        let samples = claudeConsumption.samples
-        let usesSession = lastClaudeSnapshot?.fiveHourUsedPercent != nil
-        let latest = UsageConsumptionCore.amountTitle(samples.last?.amount ?? 0, unit: "%")
+        let usesWeekly = lastClaudeSnapshot?.weeklyUsedPercent != nil
+        let series = [
+            UsageHistorySeries(
+                label: usesWeekly ? "주간" : "세션",
+                samples: claudeConsumption.samples,
+                color: UsageBrandColors.claude
+            ),
+            UsageHistorySeries(
+                label: "Fable",
+                samples: claudeFableConsumption.samples,
+                color: UsageBrandColors.claudeFable
+            )
+        ]
+        let texts = Self.stackedStripTexts(provider: "Claude", series: series, unit: "%")
         return UsageHistoryStrip(
-            caption: "Claude · 갱신당 \(usesSession ? "세션" : "주간") \(latest)",
-            samples: samples,
+            caption: texts.caption,
+            series: series,
             slotCount: UsageConsumptionTracker.defaultCapacity,
             unitSuffix: "%",
-            color: UsageBrandColors.claude,
-            accessibilityValue: "최근 \(samples.count)회 갱신 소비 기록, 마지막 갱신 \(latest)"
+            accessibilityValue: texts.accessibilityValue
         )
     }
 
@@ -2545,7 +2607,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         guard let data = UserDefaults.standard.data(forKey: Self.consumptionHistoryDefaultsKey),
               let store = try? JSONDecoder().decode(UsageConsumptionHistoryStore.self, from: data) else { return }
         codexConsumption = store.codex
+        codexSparkConsumption = store.codexSpark
         claudeConsumption = store.claude
+        claudeFableConsumption = store.claudeFable
         geminiConsumption = store.gemini
         grokConsumption = store.grok
     }
@@ -2553,7 +2617,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func persistConsumptionTrackers() {
         let store = UsageConsumptionHistoryStore(
             codex: codexConsumption,
+            codexSpark: codexSparkConsumption,
             claude: claudeConsumption,
+            claudeFable: claudeFableConsumption,
             gemini: geminiConsumption,
             grok: grokConsumption
         )

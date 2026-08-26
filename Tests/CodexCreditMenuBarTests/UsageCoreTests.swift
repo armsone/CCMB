@@ -371,6 +371,183 @@ final class UsageConsumptionHistoryStoreTests: XCTestCase {
         XCTAssertEqual(restored, store)
         XCTAssertEqual(restored.grok.amounts, [8])
     }
+
+    func testDecodingPreSparkFableBlobDefaultsThoseBucketsEmpty() throws {
+        var codex = UsageConsumptionTracker()
+        codex.record(reading: 10, at: Date(timeIntervalSince1970: 0), isDecreasing: false, metricKey: "codex.weekly")
+        codex.record(reading: 12, at: Date(timeIntervalSince1970: 60), isDecreasing: false, metricKey: "codex.weekly")
+
+        struct PreSparkFableStore: Codable {
+            let codex: UsageConsumptionTracker
+            let claude: UsageConsumptionTracker
+            let gemini: UsageConsumptionTracker
+            let grok: UsageConsumptionTracker
+        }
+        let legacyData = try JSONEncoder().encode(PreSparkFableStore(
+            codex: codex,
+            claude: UsageConsumptionTracker(),
+            gemini: UsageConsumptionTracker(),
+            grok: UsageConsumptionTracker()
+        ))
+
+        let restored = try JSONDecoder().decode(UsageConsumptionHistoryStore.self, from: legacyData)
+
+        XCTAssertEqual(restored.codex, codex)
+        XCTAssertTrue(restored.codexSpark.amounts.isEmpty)
+        XCTAssertTrue(restored.claudeFable.amounts.isEmpty)
+    }
+
+    func testRoundTripsWithSparkAndFableHistoryIncluded() throws {
+        var spark = UsageConsumptionTracker()
+        spark.record(reading: 5, at: Date(timeIntervalSince1970: 0), isDecreasing: false, metricKey: "codex.spark.weekly")
+        spark.record(reading: 7, at: Date(timeIntervalSince1970: 60), isDecreasing: false, metricKey: "codex.spark.weekly")
+        var fable = UsageConsumptionTracker()
+        fable.record(reading: 20, at: Date(timeIntervalSince1970: 0), isDecreasing: false, metricKey: "claude.fable.weekly")
+        fable.record(reading: 21.5, at: Date(timeIntervalSince1970: 60), isDecreasing: false, metricKey: "claude.fable.weekly")
+        let store = UsageConsumptionHistoryStore(codexSpark: spark, claudeFable: fable)
+
+        let data = try JSONEncoder().encode(store)
+        let restored = try JSONDecoder().decode(UsageConsumptionHistoryStore.self, from: data)
+
+        XCTAssertEqual(restored, store)
+        XCTAssertEqual(restored.codexSpark.amounts, [2])
+        XCTAssertEqual(restored.claudeFable.amounts, [1.5])
+    }
+}
+
+final class UsageConsumptionStackingTests: XCTestCase {
+    private func sample(_ seconds: TimeInterval, _ amount: Double) -> UsageConsumptionSample {
+        UsageConsumptionSample(at: Date(timeIntervalSince1970: seconds), amount: amount)
+    }
+
+    func testStackedSamplesAlignBucketsByRefreshTimestamp() {
+        let ordinary = [sample(60, 1), sample(120, 2), sample(180, 3)]
+        let spark = [sample(60, 0.5), sample(120, 0.25), sample(180, 0.75)]
+
+        let stacked = UsageConsumptionCore.stackedSamples([ordinary, spark])
+
+        XCTAssertEqual(stacked.map(\.at), [60, 120, 180].map { Date(timeIntervalSince1970: $0) })
+        XCTAssertEqual(stacked.map(\.amounts), [[1, 0.5], [2, 0.25], [3, 0.75]])
+        XCTAssertEqual(stacked.map(\.total), [1.5, 2.25, 3.75])
+    }
+
+    func testMissingBucketReadingStaysMissingAndIsNotCountedAsZero() {
+        // Spark was absent from the second refresh and Fable-style buckets can
+        // appear later than the ordinary meter: neither gap may become a 0.
+        let ordinary = [sample(60, 1), sample(120, 2), sample(180, 3)]
+        let spark = [sample(60, 0.5), sample(180, 0.75)]
+
+        let stacked = UsageConsumptionCore.stackedSamples([ordinary, spark])
+
+        XCTAssertEqual(stacked.count, 3)
+        XCTAssertEqual(stacked[1].amounts, [2, nil])
+        XCTAssertEqual(stacked[1].total, 2)
+        XCTAssertNotEqual(stacked[1].amounts, [2, 0])
+    }
+
+    func testARefreshOnlyTheWorkerBucketReportedStillGetsASlot() {
+        // The ordinary meter was momentarily nil while Spark reported: the
+        // refresh is drawn from Spark alone, with the ordinary bucket missing.
+        let ordinary = [sample(60, 1)]
+        let spark = [sample(60, 0.5), sample(120, 0.25)]
+
+        let stacked = UsageConsumptionCore.stackedSamples([ordinary, spark])
+
+        XCTAssertEqual(stacked.map(\.at), [Date(timeIntervalSince1970: 60), Date(timeIntervalSince1970: 120)])
+        XCTAssertEqual(stacked[1].amounts, [nil, 0.25])
+        XCTAssertEqual(stacked[1].total, 0.25)
+    }
+
+    func testStackedSamplesKeepOnlyTheNewestRefreshes() {
+        let ordinary = (0..<50).map { sample(TimeInterval($0) * 60, 1) }
+        let spark = (0..<50).map { sample(TimeInterval($0) * 60, 0.5) }
+
+        let stacked = UsageConsumptionCore.stackedSamples([ordinary, spark], capacity: 40)
+
+        XCTAssertEqual(stacked.count, 40)
+        XCTAssertEqual(stacked.first?.at, Date(timeIntervalSince1970: 10 * 60))
+        XCTAssertEqual(stacked.last?.at, Date(timeIntervalSince1970: 49 * 60))
+    }
+
+    func testStackingASingleBucketMatchesItsOwnSamples() {
+        let gemini = [sample(60, 4), sample(120, 0)]
+
+        let stacked = UsageConsumptionCore.stackedSamples([gemini])
+
+        XCTAssertEqual(stacked.map(\.amounts), [[4], [0]])
+        XCTAssertEqual(stacked.map(\.total), [4, 0])
+        XCTAssertTrue(UsageConsumptionCore.stackedSamples([]).isEmpty)
+        XCTAssertTrue(UsageConsumptionCore.stackedSamples([[]]).isEmpty)
+    }
+
+    func testBreakdownTitleNamesEachReportedBucketWithoutInventingAQuotaTotal() {
+        XCTAssertEqual(
+            UsageConsumptionCore.breakdownTitle(amounts: [1.2, 0.3], labels: ["주간", "Spark"], unit: "%"),
+            "주간 1.2% · Spark 0.3%"
+        )
+        XCTAssertEqual(
+            UsageConsumptionCore.breakdownTitle(amounts: [0.4, 0.2], labels: ["주간", "Fable"], unit: "%"),
+            "주간 0.4% · Fable 0.2%"
+        )
+    }
+
+    func testBreakdownTitleOmitsMissingBucketsInsteadOfWritingZero() {
+        // Only the ordinary meter reported: no total, no "Spark 0%".
+        XCTAssertEqual(
+            UsageConsumptionCore.breakdownTitle(amounts: [1.2, nil], labels: ["주간", "Spark"], unit: "%"),
+            "주간 1.2%"
+        )
+        // Only the worker bucket reported.
+        XCTAssertEqual(
+            UsageConsumptionCore.breakdownTitle(amounts: [nil, 0.3], labels: ["주간", "Spark"], unit: "%"),
+            "Spark 0.3%"
+        )
+        // A bucket that measured genuine zero work is still listed.
+        XCTAssertEqual(
+            UsageConsumptionCore.breakdownTitle(amounts: [1, 0], labels: ["주간", "Fable"], unit: "%"),
+            "주간 1% · Fable 0%"
+        )
+    }
+
+    func testBreakdownTitleKeepsThePlainReadoutForSingleBucketStrips() {
+        // Gemini/Grok strips have one unlabeled bucket and read exactly as before.
+        XCTAssertEqual(UsageConsumptionCore.breakdownTitle(amounts: [4], labels: [""], unit: "%"), "4%")
+        // Codex on credits is a single bucket too; its label is not repeated.
+        XCTAssertEqual(UsageConsumptionCore.breakdownTitle(amounts: [1.5], labels: ["크레딧"], unit: " 크레딧"), "1.5 크레딧")
+        XCTAssertEqual(UsageConsumptionCore.breakdownTitle(amounts: [], labels: [], unit: "%"), "0%")
+    }
+
+    func testSparkAndFableBucketsRecordOnlyWhenTheSnapshotCarriesThem() {
+        // Mirrors the app's recording: the worker bucket is fed the optional
+        // figure straight from the snapshot, so a refresh without it leaves
+        // no sample behind rather than a zero bar.
+        var spark = UsageConsumptionTracker()
+        spark.record(reading: 10, at: Date(timeIntervalSince1970: 0), isDecreasing: false, metricKey: "codex.spark.weekly")
+        spark.record(reading: nil, at: Date(timeIntervalSince1970: 60), isDecreasing: false, metricKey: "codex.spark.weekly")
+        spark.record(reading: 13, at: Date(timeIntervalSince1970: 120), isDecreasing: false, metricKey: "codex.spark.weekly")
+        XCTAssertEqual(spark.samples.map(\.at), [Date(timeIntervalSince1970: 120)])
+        XCTAssertEqual(spark.amounts, [3])
+
+        let limits = [
+            ClaudeModelWeeklyLimit(modelName: "Opus", usedPercent: 40, resetsAt: nil),
+            ClaudeModelWeeklyLimit(modelName: "fable", usedPercent: 21.5, resetsAt: nil)
+        ]
+        var fable = UsageConsumptionTracker()
+        fable.record(
+            reading: ClaudeUsageCore.fableWeeklyLimit(in: limits)?.usedPercent,
+            at: Date(timeIntervalSince1970: 0), isDecreasing: false, metricKey: "claude.fable.weekly"
+        )
+        fable.record(
+            reading: ClaudeUsageCore.fableWeeklyLimit(in: [limits[0]])?.usedPercent,
+            at: Date(timeIntervalSince1970: 60), isDecreasing: false, metricKey: "claude.fable.weekly"
+        )
+        fable.record(
+            reading: ClaudeUsageCore.fableWeeklyLimit(in: limits)?.usedPercent.map { $0 + 2 },
+            at: Date(timeIntervalSince1970: 120), isDecreasing: false, metricKey: "claude.fable.weekly"
+        )
+        XCTAssertEqual(fable.samples.map(\.at), [Date(timeIntervalSince1970: 120)])
+        XCTAssertEqual(fable.amounts, [2])
+    }
 }
 
 final class GeminiUsageCoreTests: XCTestCase {

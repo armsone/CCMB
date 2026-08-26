@@ -125,21 +125,68 @@ struct UsagePanelQuota {
     }
 }
 
-/// Compact bar strip showing how much the column's metric was consumed at each
-/// refresh, drawn directly under the column title.
-struct UsageHistoryStrip {
-    let caption: String
+/// One bucket of work drawn in a column's strip: the ordinary meter, or a
+/// worker/model meter (Codex Spark, Claude Fable) measured alongside it.
+struct UsageHistorySeries {
+    /// Short name used in hover text, e.g. "주간" or "Spark". Empty for a
+    /// strip with a single bucket, which keeps its plain amount readout.
+    let label: String
     /// Stored oldest-first. Only real readings; short histories are padded at
     /// draw time rather than in the data, and each sample keeps the timestamp
     /// of the refresh it came from so hovering a bar can report it.
     let samples: [UsageConsumptionSample]
+    let color: NSColor
+}
+
+/// Compact bar strip showing how much the column's metric was consumed at each
+/// refresh, drawn directly under the column title.
+struct UsageHistoryStrip {
+    let caption: String
+    /// Buckets stacked into one bar per refresh, ordinary meter first. All
+    /// series share `unitSuffix`; a bucket measured in a different unit must
+    /// not be stacked here.
+    let series: [UsageHistorySeries]
     /// Slots the strip always draws, so the chart keeps a constant width.
     /// Filled from the left with the newest reading first.
     let slotCount: Int
     /// Appended to a hovered bar's value, e.g. " 크레딧" or "%".
     let unitSuffix: String
-    let color: NSColor
     let accessibilityValue: String
+
+    init(
+        caption: String,
+        series: [UsageHistorySeries],
+        slotCount: Int,
+        unitSuffix: String,
+        accessibilityValue: String
+    ) {
+        self.caption = caption
+        self.series = series
+        self.slotCount = slotCount
+        self.unitSuffix = unitSuffix
+        self.accessibilityValue = accessibilityValue
+    }
+
+    /// Single-bucket strip, the shape Gemini and Grok still use.
+    init(
+        caption: String,
+        samples: [UsageConsumptionSample],
+        slotCount: Int,
+        unitSuffix: String,
+        color: NSColor,
+        accessibilityValue: String
+    ) {
+        self.init(
+            caption: caption,
+            series: [UsageHistorySeries(label: "", samples: samples, color: color)],
+            slotCount: slotCount,
+            unitSuffix: unitSuffix,
+            accessibilityValue: accessibilityValue
+        )
+    }
+
+    /// The ordinary meter's colour, used for the column's identity mark.
+    var color: NSColor { series.first?.color ?? .controlAccentColor }
 }
 
 struct UsagePanelColumn {
@@ -205,17 +252,24 @@ private final class UsageHistoryBarView: NSView {
     /// "sampled, nothing used" rather than as a hole in the data.
     private static let minimumBarHeight: CGFloat = 1.5
 
-    /// Real samples only, stored oldest-first. Never padded — padding is a
-    /// drawing concern, so the data stays honest about how much was measured.
+    /// Real refreshes only, stored oldest-first, each carrying every bucket
+    /// that reported at that refresh. Never padded — padding is a drawing
+    /// concern, so the data stays honest about how much was measured.
     /// Drawing reverses the order so the newest reading sits at the left edge.
-    var samples: [UsageConsumptionSample] = [] {
+    var samples: [UsageConsumptionStackedSample] = [] {
+        didSet { needsDisplay = true }
+    }
+    /// One entry per stacked bucket, indexed like `samples[n].amounts`.
+    /// Segment `0` (the ordinary meter) sits at the bottom of each bar.
+    var seriesLabels: [String] = []
+    var seriesColors: [NSColor] = [] {
         didSet { needsDisplay = true }
     }
     /// Appended to the hovered value in the hover readout.
     var unitSuffix: String = ""
-    /// Called with the hovered sample, or `nil` when the pointer leaves the
+    /// Called with the hovered refresh, or `nil` when the pointer leaves the
     /// strip. The owner uses it to swap the caption for a readout.
-    var onHover: ((UsageConsumptionSample?) -> Void)?
+    var onHover: ((UsageConsumptionStackedSample?) -> Void)?
 
     private var hoveredSlot: Int?
 
@@ -226,11 +280,24 @@ private final class UsageHistoryBarView: NSView {
         return formatter
     }()
 
-    /// Text shown when a bar is hovered: when the refresh happened and what it
-    /// cost.
-    static func hoverTitle(for sample: UsageConsumptionSample, unitSuffix: String) -> String {
+    /// Text shown when a bar is hovered: when the refresh happened and what
+    /// each bucket cost. Buckets with no reading at that refresh are omitted.
+    static func hoverTitle(
+        for sample: UsageConsumptionStackedSample,
+        labels: [String],
+        unitSuffix: String
+    ) -> String {
         let time = hoverTimeFormatter.string(from: sample.at)
-        return "\(time) · \(UsageConsumptionCore.amountTitle(sample.amount, unit: unitSuffix))"
+        let breakdown = UsageConsumptionCore.breakdownTitle(
+            amounts: sample.amounts,
+            labels: labels,
+            unit: unitSuffix
+        )
+        return "\(time) · \(breakdown)"
+    }
+
+    func hoverTitle(for sample: UsageConsumptionStackedSample) -> String {
+        Self.hoverTitle(for: sample, labels: seriesLabels, unitSuffix: unitSuffix)
     }
     /// Total slots drawn. Slots with no sample yet render as faint placeholders
     /// so "we measured and nothing was used" stays distinguishable from
@@ -258,7 +325,10 @@ private final class UsageHistoryBarView: NSView {
         let slots = max(slotCount, samples.count)
         guard slots > 0 else { return }
 
-        let fractions = UsageConsumptionCore.barFractions(samples.map(\.amount))
+        // Bars scale to the peak combined activity in this strip. The stacked
+        // shape keeps every reported bucket visible, but the UI never labels
+        // independent quota percentages as one arithmetic total.
+        let fractions = UsageConsumptionCore.barFractions(samples.map(\.total))
         let count = CGFloat(slots)
         let totalGap = Self.barGap * max(0, count - 1)
         let barWidth = max(1, (bounds.width - totalGap) / count)
@@ -272,22 +342,6 @@ private final class UsageHistoryBarView: NSView {
                 sampleCount: fractions.count
             )
             let fraction = sampleIndex.map { fractions[$0] }
-            let height: CGFloat
-            let color: NSColor
-            switch fraction {
-            case .some(let value) where value > 0:
-                height = max(Self.minimumBarHeight, CGFloat(value) * bounds.height)
-                color = barColor
-            case .some:
-                // Measured, consumed nothing.
-                height = Self.minimumBarHeight
-                color = barColor.withAlphaComponent(0.28)
-            case .none:
-                // Not measured yet: an even fainter placeholder so the strip
-                // holds its shape without claiming a reading that never happened.
-                height = Self.minimumBarHeight
-                color = barColor.withAlphaComponent(0.10)
-            }
             let x = CGFloat(index) * (barWidth + Self.barGap)
             if index == hoveredSlot {
                 // A faint full-height backdrop, so it is obvious which bar the
@@ -299,10 +353,46 @@ private final class UsageHistoryBarView: NSView {
                     yRadius: 2
                 ).fill()
             }
-            let rect = NSRect(x: x, y: baseline - height, width: barWidth, height: height)
-            color.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            switch (sampleIndex, fraction) {
+            case (.some(let sampleIndex), .some(let value)) where value > 0:
+                let height = max(Self.minimumBarHeight, CGFloat(value) * bounds.height)
+                let rect = NSRect(x: x, y: baseline - height, width: barWidth, height: height)
+                drawStackedBar(samples[sampleIndex], in: rect, radius: radius)
+            case (_, .some):
+                // Measured, consumed nothing.
+                let rect = NSRect(x: x, y: baseline - Self.minimumBarHeight, width: barWidth, height: Self.minimumBarHeight)
+                barColor.withAlphaComponent(0.28).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            case (_, .none):
+                // Not measured yet: an even fainter placeholder so the strip
+                // holds its shape without claiming a reading that never happened.
+                let rect = NSRect(x: x, y: baseline - Self.minimumBarHeight, width: barWidth, height: Self.minimumBarHeight)
+                barColor.withAlphaComponent(0.10).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            }
         }
+    }
+
+    /// Fills one bar bottom-up, one segment per bucket that reported, each
+    /// sized by its share of the refresh's total. Buckets with no reading
+    /// draw nothing. Segments are clipped to the rounded bar outline so a
+    /// stacked bar keeps the same silhouette as a plain one.
+    private func drawStackedBar(_ sample: UsageConsumptionStackedSample, in rect: NSRect, radius: CGFloat) {
+        let total = sample.total
+        guard total > 0 else { return }
+        let outline = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        NSGraphicsContext.saveGraphicsState()
+        outline.addClip()
+        var top = rect.maxY
+        for (index, amount) in sample.amounts.enumerated() {
+            guard let amount, amount > 0 else { continue }
+            let segmentHeight = rect.height * CGFloat(amount / total)
+            let color = index < seriesColors.count ? seriesColors[index] : barColor
+            color.setFill()
+            NSBezierPath(rect: NSRect(x: rect.minX, y: top - segmentHeight, width: rect.width, height: segmentHeight)).fill()
+            top -= segmentHeight
+        }
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     // MARK: - Hover
@@ -345,7 +435,7 @@ private final class UsageHistoryBarView: NSView {
         let sample = slot
             .flatMap { UsageConsumptionCore.sampleIndex(forSlot: $0, sampleCount: samples.count) }
             .map { samples[$0] }
-        toolTip = sample.map { Self.hoverTitle(for: $0, unitSuffix: unitSuffix) }
+        toolTip = sample.map { hoverTitle(for: $0) }
         needsDisplay = true
         onHover?(sample)
     }
@@ -1462,27 +1552,19 @@ final class UsageHistoryChartView: NSView {
 
         codexBars.onHover = { [weak self] sample in
             guard let self else { return }
-            self.codexCaption.stringValue = sample
-                .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.codexBars.unitSuffix) }
-                ?? self.codexBaseCaption
+            self.codexCaption.stringValue = sample.map { self.codexBars.hoverTitle(for: $0) } ?? self.codexBaseCaption
         }
         claudeBars.onHover = { [weak self] sample in
             guard let self else { return }
-            self.claudeCaption.stringValue = sample
-                .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.claudeBars.unitSuffix) }
-                ?? self.claudeBaseCaption
+            self.claudeCaption.stringValue = sample.map { self.claudeBars.hoverTitle(for: $0) } ?? self.claudeBaseCaption
         }
         geminiBars.onHover = { [weak self] sample in
             guard let self else { return }
-            self.geminiCaption.stringValue = sample
-                .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.geminiBars.unitSuffix) }
-                ?? self.geminiBaseCaption
+            self.geminiCaption.stringValue = sample.map { self.geminiBars.hoverTitle(for: $0) } ?? self.geminiBaseCaption
         }
         grokBars.onHover = { [weak self] sample in
             guard let self else { return }
-            self.grokCaption.stringValue = sample
-                .map { UsageHistoryBarView.hoverTitle(for: $0, unitSuffix: self.grokBars.unitSuffix) }
-                ?? self.grokBaseCaption
+            self.grokCaption.stringValue = sample.map { self.grokBars.hoverTitle(for: $0) } ?? self.grokBaseCaption
         }
     }
 
@@ -1538,11 +1620,20 @@ final class UsageHistoryChartView: NSView {
 
         // Identity marks. The caption text itself stays in secondary ink —
         // the mark carries the series colour so the label never has to.
-        // Gemini draws its four brand colors side by side instead of one
-        // dot, so it is never presented as a single solid accent even here.
-        drawDot(color: codexBars.barColor, x: UsagePanelLayout.columnX[0] + Self.columnContentInset, visible: !codexCaption.isHidden)
-        drawDot(color: claudeBars.barColor, x: UsagePanelLayout.columnX[1] + Self.columnContentInset, visible: !claudeCaption.isHidden)
+        // A column stacking more than one bucket (Codex + Spark, Claude +
+        // Fable) shows those colours side by side as a legend, the same way
+        // Gemini's four brand colors are drawn instead of one dot.
+        drawSeriesMark(for: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset, visible: !codexCaption.isHidden)
+        drawSeriesMark(for: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset, visible: !claudeCaption.isHidden)
         drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
+    }
+
+    private func drawSeriesMark(for bars: UsageHistoryBarView, x: CGFloat, visible: Bool) {
+        if bars.seriesColors.count > 1 {
+            drawGradientMark(colors: bars.seriesColors, x: x, visible: visible)
+        } else {
+            drawDot(color: bars.barColor, x: x, visible: visible)
+        }
     }
 
     private func drawDot(color: NSColor, x: CGFloat, visible: Bool) {
@@ -1625,7 +1716,12 @@ final class UsageHistoryChartView: NSView {
             width: max(0, Self.columnWidth - Self.columnContentInset * 2 - Self.dotTextGap),
             height: Self.captionHeight
         )
-        bars.samples = Array(strip.samples.suffix(strip.slotCount))
+        bars.seriesLabels = strip.series.map(\.label)
+        bars.seriesColors = strip.series.map(\.color)
+        bars.samples = UsageConsumptionCore.stackedSamples(
+            strip.series.map(\.samples),
+            capacity: strip.slotCount
+        )
         bars.slotCount = strip.slotCount
         bars.unitSuffix = strip.unitSuffix
         bars.barColor = strip.color

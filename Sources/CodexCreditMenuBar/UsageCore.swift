@@ -104,31 +104,105 @@ enum UsageConsumptionCore {
         }
         return amounts.map { max(0, $0) / peak }
     }
+
+    /// Lines up several trackers' samples by the refresh timestamp they came
+    /// from, so one slot of the strip can stack the ordinary bucket and a
+    /// worker/model bucket (Codex Spark, Claude Fable) measured at the same
+    /// refresh.
+    ///
+    /// Alignment is by exact timestamp, never by position: a bucket that was
+    /// momentarily absent from one refresh simply has no entry in that slot
+    /// (`nil`), so it is neither drawn nor counted as zero. Slots are stored
+    /// oldest-first and trimmed to the newest `capacity` refreshes.
+    static func stackedSamples(
+        _ series: [[UsageConsumptionSample]],
+        capacity: Int = UsageConsumptionTracker.defaultCapacity
+    ) -> [UsageConsumptionStackedSample] {
+        let lookups = series.map { samples in
+            Dictionary(samples.map { ($0.at, $0.amount) }, uniquingKeysWith: { _, newest in newest })
+        }
+        let dates = Set(lookups.flatMap(\.keys)).sorted()
+        return dates.suffix(max(0, capacity)).map { date in
+            UsageConsumptionStackedSample(at: date, amounts: lookups.map { $0[date] })
+        }
+    }
+
+    /// Hover/caption text for one stacked slot. A single-bucket strip keeps
+    /// the plain amount it always showed; a multi-bucket strip names each
+    /// bucket that actually reported. Buckets without a reading are left out
+    /// rather than written as "0". Percent deltas from independent quota
+    /// windows are intentionally never presented as one arithmetic total.
+    static func breakdownTitle(
+        amounts: [Double?],
+        labels: [String],
+        unit: String
+    ) -> String {
+        let present = zip(labels, amounts).compactMap { label, amount in
+            amount.map { (label: label, amount: $0) }
+        }
+        guard let first = present.first else { return amountTitle(0, unit: unit) }
+        let parts = present.map { entry -> String in
+            entry.label.isEmpty
+                ? amountTitle(entry.amount, unit: unit)
+                : "\(entry.label) \(amountTitle(entry.amount, unit: unit))"
+        }
+        guard present.count > 1 else {
+            return labels.count > 1 ? parts[0] : amountTitle(first.amount, unit: unit)
+        }
+        return parts.joined(separator: " · ")
+    }
 }
 
-/// Rolling per-refresh consumption history for all three providers, persisted
+/// One drawing slot of a stacked strip: what every tracked bucket consumed
+/// at the same refresh. `amounts` is indexed like the series passed to
+/// `UsageConsumptionCore.stackedSamples`; `nil` means that bucket has no
+/// reading for this refresh.
+struct UsageConsumptionStackedSample: Equatable {
+    let at: Date
+    let amounts: [Double?]
+
+    /// Sum of the buckets that reported. Missing buckets contribute nothing,
+    /// which is different from contributing zero: the hover text makes the
+    /// distinction visible by omitting them.
+    var total: Double {
+        amounts.compactMap { $0 }.reduce(0, +)
+    }
+}
+
+/// Rolling per-refresh consumption history for every provider, persisted
 /// to UserDefaults as one JSON blob. A blob written before Gemini support
 /// existed (missing `gemini`) still decodes successfully, with `gemini`
 /// starting as an empty tracker instead of failing the whole decode and
-/// silently discarding the Codex/Claude history alongside it.
+/// silently discarding the Codex/Claude history alongside it. The same
+/// leniency covers the later worker/model buckets (`codexSpark`,
+/// `claudeFable`).
 struct UsageConsumptionHistoryStore: Codable, Equatable {
     var codex: UsageConsumptionTracker
+    /// Codex Spark's own weekly window, tracked beside the ordinary Codex
+    /// meter so the chart can show both buckets of work.
+    var codexSpark: UsageConsumptionTracker
     var claude: UsageConsumptionTracker
+    /// Claude's Fable-specific weekly limit from `modelWeeklyLimits`.
+    var claudeFable: UsageConsumptionTracker
     var gemini: UsageConsumptionTracker
     var grok: UsageConsumptionTracker
 
     enum CodingKeys: String, CodingKey {
-        case codex, claude, gemini, grok
+        case codex, codexSpark, claude, claudeFable, gemini, grok
     }
 
     init(
         codex: UsageConsumptionTracker = UsageConsumptionTracker(),
+        codexSpark: UsageConsumptionTracker = UsageConsumptionTracker(),
         claude: UsageConsumptionTracker = UsageConsumptionTracker(),
+        claudeFable: UsageConsumptionTracker = UsageConsumptionTracker(),
         gemini: UsageConsumptionTracker = UsageConsumptionTracker(),
         grok: UsageConsumptionTracker = UsageConsumptionTracker()
     ) {
         self.codex = codex
+        self.codexSpark = codexSpark
         self.claude = claude
+        self.claudeFable = claudeFable
         self.gemini = gemini
         self.grok = grok
     }
@@ -137,6 +211,8 @@ struct UsageConsumptionHistoryStore: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         codex = try container.decode(UsageConsumptionTracker.self, forKey: .codex)
         claude = try container.decode(UsageConsumptionTracker.self, forKey: .claude)
+        codexSpark = (try? container.decodeIfPresent(UsageConsumptionTracker.self, forKey: .codexSpark)) ?? UsageConsumptionTracker()
+        claudeFable = (try? container.decodeIfPresent(UsageConsumptionTracker.self, forKey: .claudeFable)) ?? UsageConsumptionTracker()
         gemini = (try? container.decodeIfPresent(UsageConsumptionTracker.self, forKey: .gemini)) ?? UsageConsumptionTracker()
         grok = (try? container.decodeIfPresent(UsageConsumptionTracker.self, forKey: .grok)) ?? UsageConsumptionTracker()
     }

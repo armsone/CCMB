@@ -21,6 +21,10 @@ enum GeminiAccountStore {
 /// system-themed.
 enum UsageBrandColors {
     static let codex = NSColor(ccmbHex: 0x10A37F)
+    /// Lighter tint of the Codex green for the Spark bucket in the history
+    /// chart, so it reads as "still Codex" while staying distinguishable
+    /// from the ordinary weekly segment beneath it.
+    static let codexSpark = NSColor(ccmbHex: 0x6FD3B4)
     static let claude = NSColor(ccmbHex: 0xD97757)
     static let claudeFable = NSColor(ccmbHex: 0xE69A7F)
     static let claudeWeekly = NSColor(ccmbHex: 0xC45D42)
