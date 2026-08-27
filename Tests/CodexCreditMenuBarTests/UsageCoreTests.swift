@@ -1765,11 +1765,17 @@ final class ClaudeOAuthUsageParsingTests: XCTestCase {
         let context = query[kSecUseAuthenticationContext as String] as? LAContext
 
         XCTAssertEqual(context?.interactionNotAllowed, true)
-        XCTAssertEqual(query[kSecUseAuthenticationUI as String] as? String, kSecUseAuthenticationUISkip as String)
+        // `...UIFail` is explicitly documented to fail immediately instead
+        // of presenting authentication UI when this single-item lookup needs
+        // user interaction.
+        // Compare the exported CFString value directly so the test itself
+        // does not introduce a deprecation warning for this legacy-Keychain
+        // compatibility safeguard.
+        XCTAssertEqual(query[kSecUseAuthenticationUI as String] as? String, "u_AuthUIF")
         XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
         XCTAssertEqual(query[kSecAttrService as String] as? String, "Claude Code-credentials")
         XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
-        XCTAssertEqual(query[kSecReturnAttributes as String] as? Bool, true)
+        XCTAssertNil(query[kSecReturnAttributes as String])
         XCTAssertEqual(query[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
     }
 

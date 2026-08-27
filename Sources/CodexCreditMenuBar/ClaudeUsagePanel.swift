@@ -3271,13 +3271,8 @@ enum ClaudeOAuthUsageClient {
         return ClaudeAccountInfo(email: email, organizationName: organizationName, organizationUUID: organizationUUID)
     }
 
-    private struct KeychainCredentialRecord {
-        let data: Data
-        let account: String?
-    }
-
     private enum KeychainCredentialDataResult {
-        case success(KeychainCredentialRecord)
+        case success(Data)
         case failure(OSStatus)
     }
 
@@ -3294,12 +3289,14 @@ enum ClaudeOAuthUsageClient {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
             kSecReturnData as String: true,
-            kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             // Usage refresh runs without an explicit credential action from
-            // the user. Never let this passive lookup present a macOS
-            // password or Keychain authorization dialog.
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            // the user. The installed app still presented the legacy
+            // Keychain access-control dialog with `...UISkip`; `...UIFail` is
+            // the value explicitly documented to fail immediately
+            // (`errSecInteractionNotAllowed`) instead of ever presenting a
+            // password or "Always Allow/Deny" prompt.
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
             kSecUseAuthenticationContext as String: authenticationContext
         ]
     }
@@ -3308,23 +3305,17 @@ enum ClaudeOAuthUsageClient {
         let query = keychainTokenQuery()
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let attributes = item as? [String: Any],
-              let data = attributes[kSecValueData as String] as? Data
-        else {
+        guard status == errSecSuccess, let data = item as? Data else {
             return .failure(status == errSecSuccess ? errSecDecode : status)
         }
-        return .success(KeychainCredentialRecord(
-            data: data,
-            account: attributes[kSecAttrAccount as String] as? String
-        ))
+        return .success(data)
     }
 
     private static func readKeychainToken() -> ClaudeOAuthTokenCore.KeychainReadResult {
         let data: Data
         switch readKeychainCredentialData() {
-        case .success(let credentialRecord):
-            data = credentialRecord.data
+        case .success(let credentialData):
+            data = credentialData
         case .failure(let status):
             return status == errSecItemNotFound ? .notFound : .unreadable
         }
