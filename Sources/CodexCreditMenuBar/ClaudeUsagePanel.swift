@@ -2967,6 +2967,75 @@ enum ClaudeUsageFetchOutcome {
     }
 }
 
+/// Resolved token status for the Claude OAuth usage client.
+enum ClaudeOAuthTokenResolution: Equatable {
+    case token(String)
+    case keychainUnreadable
+    case noCredential
+    case authenticationFailed
+}
+
+/// Pure helper for resolving and transitioning Claude OAuth token resolution state.
+enum ClaudeOAuthTokenCore {
+    enum KeychainReadResult: Equatable {
+        case token(String)
+        case notFound
+        case unreadable
+    }
+
+    /// Resolves the initial token resolution from a Keychain lookup result and
+    /// an optional file token fallback.
+    static func resolveInitialToken(
+        keychainResult: KeychainReadResult,
+        fileToken: String?
+    ) -> ClaudeOAuthTokenResolution {
+        switch keychainResult {
+        case .token(let token):
+            return .token(token)
+        case .unreadable:
+            if let fileToken, !fileToken.isEmpty {
+                return .token(fileToken)
+            }
+            return .keychainUnreadable
+        case .notFound:
+            if let fileToken, !fileToken.isEmpty {
+                return .token(fileToken)
+            }
+            return .noCredential
+        }
+    }
+
+    /// Determines the next cached token resolution state given an HTTP status code.
+    /// When receiving HTTP 401 or 403, authentication is latched into failure
+    /// so the Keychain item is never re-read for the life of the process.
+    /// Non-authentication status codes preserve the existing resolution state.
+    static func transition(
+        onHTTPStatus status: Int,
+        currentState: ClaudeOAuthTokenResolution?
+    ) -> ClaudeOAuthTokenResolution? {
+        if status == 401 || status == 403 {
+            return .authenticationFailed
+        }
+        return currentState
+    }
+
+    /// Resolves the token for a fetch request:
+    /// - If a cached state exists (including a latched authentication failure or
+    ///   missing/unreadable credential), it is returned directly without
+    ///   performing any Keychain or file reads.
+    /// - If no cached state exists, the initial resolution provider is invoked.
+    static func resolveToken(
+        cachedState: ClaudeOAuthTokenResolution?,
+        resolveInitial: () -> ClaudeOAuthTokenResolution
+    ) -> (resolved: ClaudeOAuthTokenResolution, newCachedState: ClaudeOAuthTokenResolution) {
+        if let cachedState {
+            return (cachedState, cachedState)
+        }
+        let initial = resolveInitial()
+        return (initial, initial)
+    }
+}
+
 /// Fetches Claude account rate-limit usage directly from Anthropic's
 /// undocumented OAuth usage endpoint, using the long-lived token from
 /// `claude setup-token` already stored locally. This endpoint is not
@@ -2987,30 +3056,17 @@ enum ClaudeOAuthUsageClient {
 
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let profileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
-    private static let refreshURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
-    private static let claudeCodeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
     /// Tokens a profile fetch has already been attempted for, so the
     /// unofficial endpoint is hit at most once per process per token
     /// regardless of how many usage fetches succeed afterward.
     @MainActor private static var attemptedProfileTokens = Set<String>()
     @MainActor private static var latestAccountInfo: ClaudeAccountInfo?
-    /// Keep the credential in memory after the first successful Keychain
-    /// read. Re-reading a protected Keychain item on every 90-second usage
-    /// refresh can repeatedly show a macOS authorization dialog, especially
-    /// for locally rebuilt ad-hoc-signed copies of CCMB. An authentication
-    /// failure clears this value so Claude Code's refreshed token is picked
-    /// up on the next request.
-    @MainActor private static var cachedAccessToken: String?
-    /// Cache a failed credential lookup for the life of this process. A
-    /// denied Keychain prompt must not be shown again every refresh; after
-    /// fixing login or permission, restarting CCMB performs one fresh read.
-    @MainActor private static var cachedTokenResolutionFailure: TokenResolution?
-    /// Prevent a permanently invalid refresh token from hitting the token
-    /// endpoint on every 90-second usage tick. A successful usage request or
-    /// a different access token clears this process-local guard.
-    @MainActor private static var lastAuthenticationRecoveryFailure: (token: String, date: Date)?
-    private static let authenticationRecoveryCooldown: TimeInterval = 10 * 60
+    /// Process-local cached token resolution. After the initial read or after an
+    /// HTTP 401/403 authentication failure, the resolution state is latched for
+    /// the lifetime of this CCMB process so background refreshes never prompt
+    /// or re-read the Keychain item.
+    @MainActor private static var cachedTokenResolution: ClaudeOAuthTokenResolution?
 
     // Mutated both when a fetch is kicked off (main actor caller) and when the
     // background URLSession completion handler finishes; isolate to the main
@@ -3053,15 +3109,16 @@ enum ClaudeOAuthUsageClient {
             performFetch(token: token, completion: completion)
         case .keychainUnreadable:
             completion(.keychainCredentialUnreadable)
-        case .none:
+        case .noCredential:
             completion(.noCredential)
+        case .authenticationFailed:
+            completion(.authenticationRecoveryFailed)
         }
     }
 
     @MainActor
     private static func performFetch(
         token: String,
-        allowAuthenticationRecovery: Bool = true,
         completion: @escaping (ClaudeUsageFetchOutcome) -> Void
     ) {
         isFetchInFlight = true
@@ -3081,7 +3138,9 @@ enum ClaudeOAuthUsageClient {
         URLSession.shared.dataTask(with: request) { data, response, _ in
             let now = Date()
             let outcome: ClaudeUsageFetchOutcome
+            let statusCode: Int?
             if let http = response as? HTTPURLResponse {
+                statusCode = http.statusCode
                 if http.statusCode == 200 {
                     if let data, let snapshot = parse(data) {
                         outcome = .success(snapshot)
@@ -3095,17 +3154,25 @@ enum ClaudeOAuthUsageClient {
                         now: now
                     )
                     outcome = .rateLimited(retryAt: now.addingTimeInterval(backoffSeconds))
+                } else if http.statusCode == 401 || http.statusCode == 403 {
+                    outcome = .authenticationRecoveryFailed
                 } else {
                     outcome = .httpFailure(status: http.statusCode)
                 }
             } else {
+                statusCode = nil
                 outcome = .transportFailure
             }
             DispatchQueue.main.async { @MainActor in
                 isFetchInFlight = false
+                if let statusCode {
+                    cachedTokenResolution = ClaudeOAuthTokenCore.transition(
+                        onHTTPStatus: statusCode,
+                        currentState: cachedTokenResolution
+                    )
+                }
                 switch outcome {
                 case .success(let snapshot):
-                    lastAuthenticationRecoveryFailure = nil
                     rateLimitRetryAt = nil
                     UserDefaults.standard.removeObject(forKey: rateLimitRetryDefaultsKey)
                     consecutiveRateLimits = 0
@@ -3113,36 +3180,6 @@ enum ClaudeOAuthUsageClient {
                     fetchProfileIfNeeded(token: token) { accountInfo in
                         completion(.success(accountInfo.map(snapshot.withAccount) ?? snapshot))
                     }
-                case .httpFailure(let status) where (status == 401 || status == 403) && allowAuthenticationRecovery:
-                    cachedAccessToken = nil
-                    if let failure = lastAuthenticationRecoveryFailure,
-                       failure.token == token,
-                       Date().timeIntervalSince(failure.date) < authenticationRecoveryCooldown {
-                        completion(.authenticationRecoveryFailed)
-                        return
-                    }
-                    isFetchInFlight = true
-                    refreshClaudeCodeCredential { refreshedToken in
-                        guard let refreshedToken else {
-                            isFetchInFlight = false
-                            lastAuthenticationRecoveryFailure = (token, Date())
-                            completion(.authenticationRecoveryFailed)
-                            return
-                        }
-                        // Retry the usage request exactly once with the
-                        // rotated credential. A second 401/403 is surfaced
-                        // instead of entering a refresh loop.
-                        isFetchInFlight = false
-                        cachedAccessToken = refreshedToken
-                        performFetch(
-                            token: refreshedToken,
-                            allowAuthenticationRecovery: false,
-                            completion: completion
-                        )
-                    }
-                case .httpFailure(let status) where status == 401 || status == 403:
-                    cachedAccessToken = nil
-                    completion(outcome)
                 case .rateLimited(let retryAt):
                     rateLimitRetryAt = retryAt
                     UserDefaults.standard.set(retryAt, forKey: rateLimitRetryDefaultsKey)
@@ -3159,28 +3196,6 @@ enum ClaudeOAuthUsageClient {
         }.resume()
     }
 
-    private struct RefreshableCredential {
-        let accessToken: String
-        let refreshToken: String
-        let scopes: [String]
-    }
-
-    private struct OAuthRefreshResponse: Decodable {
-        let accessToken: String
-        let refreshToken: String?
-        let expiresIn: Double
-        let refreshTokenExpiresIn: Double?
-        let scope: String?
-
-        enum CodingKeys: String, CodingKey {
-            case accessToken = "access_token"
-            case refreshToken = "refresh_token"
-            case expiresIn = "expires_in"
-            case refreshTokenExpiresIn = "refresh_token_expires_in"
-            case scope
-        }
-    }
-
     /// Extracts only the fields required by the official Claude Code refresh
     /// contract. Keeping this separate makes the secret-handling path
     /// deterministic and testable without a live Keychain item.
@@ -3193,137 +3208,6 @@ enum ClaudeOAuthUsageClient {
               !refreshToken.isEmpty
         else { return nil }
         return (accessToken, refreshToken, oauth["scopes"] as? [String] ?? [])
-    }
-
-    /// Preserves every unknown Claude Code credential field and replaces only
-    /// the values returned by the token endpoint.
-    static func updatedCredentialData(
-        original: Data,
-        accessToken: String,
-        refreshToken: String?,
-        expiresIn: Double,
-        refreshTokenExpiresIn: Double? = nil,
-        scope: String? = nil,
-        now: Date
-    ) -> Data? {
-        guard expiresIn.isFinite, expiresIn > 0,
-              var root = try? JSONSerialization.jsonObject(with: original) as? [String: Any],
-              var oauth = root["claudeAiOauth"] as? [String: Any]
-        else { return nil }
-        oauth["accessToken"] = accessToken
-        if let refreshToken, !refreshToken.isEmpty {
-            oauth["refreshToken"] = refreshToken
-        }
-        oauth["expiresAt"] = Int64(((now.timeIntervalSince1970 + expiresIn) * 1_000).rounded())
-        if let refreshTokenExpiresIn,
-           refreshTokenExpiresIn.isFinite,
-           refreshTokenExpiresIn > 0 {
-            oauth["refreshTokenExpiresAt"] = Int64(
-                ((now.timeIntervalSince1970 + refreshTokenExpiresIn) * 1_000).rounded()
-            )
-        }
-        if let scope {
-            oauth["scopes"] = scope.split(separator: " ").map(String.init)
-        }
-        root["claudeAiOauth"] = oauth
-        return try? JSONSerialization.data(withJSONObject: root)
-    }
-
-    @MainActor
-    private static func refreshClaudeCodeCredential(completion: @escaping (String?) -> Void) {
-        guard case .success(let originalRecord) = readKeychainCredentialData(),
-              let credential = parseRefreshableCredential(originalRecord.data),
-              let originalAccount = originalRecord.account,
-              // A refresh response may rotate and immediately invalidate the
-              // old refresh token. Confirm that CCMB can persist to this exact
-              // Keychain item before asking the server to rotate anything.
-              updateKeychainCredentialData(originalRecord.data, account: originalAccount)
-        else {
-            completion(nil)
-            return
-        }
-
-        var body: [String: Any] = [
-            "grant_type": "refresh_token",
-            "refresh_token": credential.refreshToken,
-            "client_id": claudeCodeOAuthClientID
-        ]
-        if !credential.scopes.isEmpty {
-            body["scope"] = credential.scopes.joined(separator: " ")
-        }
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
-            completion(nil)
-            return
-        }
-
-        var request = URLRequest(url: refreshURL, cachePolicy: .reloadIgnoringLocalCacheData)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = bodyData
-        request.timeoutInterval = 10
-
-        URLSession.shared.dataTask(with: request) { data, response, _ in
-            guard let http = response as? HTTPURLResponse,
-                  http.statusCode == 200,
-                  let data,
-                  let refreshed = try? JSONDecoder().decode(OAuthRefreshResponse.self, from: data),
-                  !refreshed.accessToken.isEmpty
-            else {
-                DispatchQueue.main.async { @MainActor in
-                    // If Claude Code won a concurrent refresh race, its new
-                    // access token is already the safest recovery result.
-                    if case .success(let currentRecord) = readKeychainCredentialData(),
-                       let current = parseRefreshableCredential(currentRecord.data),
-                       current.accessToken != credential.accessToken {
-                        completion(current.accessToken)
-                    } else {
-                        completion(nil)
-                    }
-                }
-                return
-            }
-
-            DispatchQueue.main.async { @MainActor in
-                // Claude Code may have refreshed concurrently. Never replace
-                // a newer credential with the result of our older request.
-                guard case .success(let currentRecord) = readKeychainCredentialData(),
-                      let current = parseRefreshableCredential(currentRecord.data)
-                else {
-                    // The server already issued this access token. It remains
-                    // useful for the one in-process retry even if a transient
-                    // Keychain read fails after the preflight write check.
-                    completion(refreshed.accessToken)
-                    return
-                }
-                if current.accessToken != credential.accessToken
-                    || current.refreshToken != credential.refreshToken {
-                    completion(current.accessToken)
-                    return
-                }
-                // Merge against the newest bytes so unrelated fields written
-                // by Claude Code while the request was in flight survive.
-                guard let updatedData = updatedCredentialData(
-                    original: currentRecord.data,
-                    accessToken: refreshed.accessToken,
-                    refreshToken: refreshed.refreshToken,
-                    expiresIn: refreshed.expiresIn,
-                    refreshTokenExpiresIn: refreshed.refreshTokenExpiresIn,
-                    scope: refreshed.scope,
-                    now: Date()
-                ) else {
-                    completion(refreshed.accessToken)
-                    return
-                }
-                _ = updateKeychainCredentialData(
-                    updatedData,
-                    account: currentRecord.account ?? originalAccount
-                )
-                // If persistence unexpectedly fails after the successful
-                // preflight, do not discard the server-issued token. Retry
-                // usage once in memory and let the next failure guide login.
-                completion(refreshed.accessToken)
-            }
-        }.resume()
     }
 
     /// Fetches Claude account identity (email, organization) from the
@@ -3387,15 +3271,6 @@ enum ClaudeOAuthUsageClient {
         return ClaudeAccountInfo(email: email, organizationName: organizationName, organizationUUID: organizationUUID)
     }
 
-    private enum KeychainTokenResult {
-        case token(String)
-        case notFound
-        /// Item exists but couldn't be read back or decoded — distinct from
-        /// `notFound` so the caller can surface that exact actionable state
-        /// instead of silently falling through as if no credential existed.
-        case unreadable
-    }
-
     private struct KeychainCredentialRecord {
         let data: Data
         let account: String?
@@ -3406,18 +3281,12 @@ enum ClaudeOAuthUsageClient {
         case failure(OSStatus)
     }
 
-    private enum TokenResolution {
-        case token(String)
-        case keychainUnreadable
-        case none
-    }
-
     /// The interactive `claude` CLI session's own OAuth token, stored by Claude
     /// Code in the login keychain. Unlike the `claude setup-token` file token,
     /// this one carries `user:profile` scope, which this usage endpoint
     /// requires. The caller keeps a successful read in process memory and
-    /// clears it only after an authentication failure, avoiding recurring
-    /// Keychain authorization prompts while still picking up rotated tokens.
+    /// latches failures across the process lifetime, avoiding recurring
+    /// Keychain authorization prompts.
     static func keychainTokenQuery() -> [String: Any] {
         let authenticationContext = LAContext()
         authenticationContext.interactionNotAllowed = true
@@ -3451,22 +3320,7 @@ enum ClaudeOAuthUsageClient {
         ))
     }
 
-    private static func updateKeychainCredentialData(_ data: Data, account: String) -> Bool {
-        let authenticationContext = LAContext()
-        authenticationContext.interactionNotAllowed = true
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecUseAuthenticationContext as String: authenticationContext
-        ]
-        query[kSecAttrAccount as String] = account
-        return SecItemUpdate(
-            query as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        ) == errSecSuccess
-    }
-
-    private static func readKeychainToken() -> KeychainTokenResult {
+    private static func readKeychainToken() -> ClaudeOAuthTokenCore.KeychainReadResult {
         let data: Data
         switch readKeychainCredentialData() {
         case .success(let credentialRecord):
@@ -3498,33 +3352,15 @@ enum ClaudeOAuthUsageClient {
     /// that exists but can't be decoded is only reported as `keychainUnreadable`
     /// if the file fallback also has no usable token.
     @MainActor
-    private static func resolveToken() -> TokenResolution {
-        if let cachedAccessToken {
-            return .token(cachedAccessToken)
+    private static func resolveToken() -> ClaudeOAuthTokenResolution {
+        let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(cachedState: cachedTokenResolution) {
+            ClaudeOAuthTokenCore.resolveInitialToken(
+                keychainResult: readKeychainToken(),
+                fileToken: readFileToken()
+            )
         }
-        if let cachedTokenResolutionFailure {
-            return cachedTokenResolutionFailure
-        }
-
-        switch readKeychainToken() {
-        case .token(let token):
-            cachedAccessToken = token
-            return .token(token)
-        case .unreadable:
-            if let fileToken = readFileToken() {
-                cachedAccessToken = fileToken
-                return .token(fileToken)
-            }
-            cachedTokenResolutionFailure = .keychainUnreadable
-            return .keychainUnreadable
-        case .notFound:
-            if let fileToken = readFileToken() {
-                cachedAccessToken = fileToken
-                return .token(fileToken)
-            }
-            cachedTokenResolutionFailure = TokenResolution.none
-            return .none
-        }
+        cachedTokenResolution = newCached
+        return resolved
     }
 
     private struct UsageWindow: Decodable {

@@ -1624,6 +1624,141 @@ final class ClaudeUsageCoreTests: XCTestCase {
     }
 }
 
+final class ClaudeOAuthTokenResolutionTests: XCTestCase {
+    func testInitialTokenResolutionPrefersKeychainToken() {
+        let resolution = ClaudeOAuthTokenCore.resolveInitialToken(
+            keychainResult: .token("keychain-token"),
+            fileToken: "file-token"
+        )
+        XCTAssertEqual(resolution, .token("keychain-token"))
+    }
+
+    func testInitialTokenResolutionFallsBackToFileTokenWhenKeychainUnreadable() {
+        let withFileToken = ClaudeOAuthTokenCore.resolveInitialToken(
+            keychainResult: .unreadable,
+            fileToken: "file-token"
+        )
+        XCTAssertEqual(withFileToken, .token("file-token"))
+
+        let withoutFileToken = ClaudeOAuthTokenCore.resolveInitialToken(
+            keychainResult: .unreadable,
+            fileToken: nil
+        )
+        XCTAssertEqual(withoutFileToken, .keychainUnreadable)
+    }
+
+    func testInitialTokenResolutionFallsBackToFileTokenWhenKeychainNotFound() {
+        let withFileToken = ClaudeOAuthTokenCore.resolveInitialToken(
+            keychainResult: .notFound,
+            fileToken: "file-token"
+        )
+        XCTAssertEqual(withFileToken, .token("file-token"))
+
+        let withoutFileToken = ClaudeOAuthTokenCore.resolveInitialToken(
+            keychainResult: .notFound,
+            fileToken: nil
+        )
+        XCTAssertEqual(withoutFileToken, .noCredential)
+    }
+
+    func testAuthenticationFailureLatchesOnHTTP401And403() {
+        let state401 = ClaudeOAuthTokenCore.transition(
+            onHTTPStatus: 401,
+            currentState: .token("valid-token")
+        )
+        XCTAssertEqual(state401, .authenticationFailed)
+
+        let state403 = ClaudeOAuthTokenCore.transition(
+            onHTTPStatus: 403,
+            currentState: .token("valid-token")
+        )
+        XCTAssertEqual(state403, .authenticationFailed)
+    }
+
+    func testNonAuthenticationHTTPStatusPreservesCurrentTokenState() {
+        let state200 = ClaudeOAuthTokenCore.transition(
+            onHTTPStatus: 200,
+            currentState: .token("valid-token")
+        )
+        XCTAssertEqual(state200, .token("valid-token"))
+
+        let state429 = ClaudeOAuthTokenCore.transition(
+            onHTTPStatus: 429,
+            currentState: .token("valid-token")
+        )
+        XCTAssertEqual(state429, .token("valid-token"))
+
+        let state500 = ClaudeOAuthTokenCore.transition(
+            onHTTPStatus: 500,
+            currentState: .token("valid-token")
+        )
+        XCTAssertEqual(state500, .token("valid-token"))
+    }
+
+    func testLatchedAuthenticationFailureNeverRetriesResolution() {
+        var resolveCount = 0
+        let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .authenticationFailed
+        ) {
+            resolveCount += 1
+            return .token("should-never-be-called")
+        }
+
+        XCTAssertEqual(resolveCount, 0)
+        XCTAssertEqual(resolved, .authenticationFailed)
+        XCTAssertEqual(newCached, .authenticationFailed)
+    }
+
+    func testCachedTokenNeverRetriesResolution() {
+        var resolveCount = 0
+        let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .token("existing-token")
+        ) {
+            resolveCount += 1
+            return .token("new-token")
+        }
+
+        XCTAssertEqual(resolveCount, 0)
+        XCTAssertEqual(resolved, .token("existing-token"))
+        XCTAssertEqual(newCached, .token("existing-token"))
+    }
+
+    func testCachedMissingOrUnreadableCredentialNeverRetriesResolution() {
+        var resolveCount = 0
+        let (unreadableResolved, _) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .keychainUnreadable
+        ) {
+            resolveCount += 1
+            return .token("retry")
+        }
+        XCTAssertEqual(resolveCount, 0)
+        XCTAssertEqual(unreadableResolved, .keychainUnreadable)
+
+        let (noCredResolved, _) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .noCredential
+        ) {
+            resolveCount += 1
+            return .token("retry")
+        }
+        XCTAssertEqual(resolveCount, 0)
+        XCTAssertEqual(noCredResolved, .noCredential)
+    }
+
+    func testUncachedStateInvokesResolutionOnceAndCachesResult() {
+        var resolveCount = 0
+        let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: nil
+        ) {
+            resolveCount += 1
+            return .token("resolved-token")
+        }
+
+        XCTAssertEqual(resolveCount, 1)
+        XCTAssertEqual(resolved, .token("resolved-token"))
+        XCTAssertEqual(newCached, .token("resolved-token"))
+    }
+}
+
 final class ClaudeOAuthUsageParsingTests: XCTestCase {
     func testPassiveKeychainLookupCannotPresentAuthenticationUI() {
         let query = ClaudeOAuthUsageClient.keychainTokenQuery()
@@ -1631,6 +1766,11 @@ final class ClaudeOAuthUsageParsingTests: XCTestCase {
 
         XCTAssertEqual(context?.interactionNotAllowed, true)
         XCTAssertEqual(query[kSecUseAuthenticationUI as String] as? String, kSecUseAuthenticationUISkip as String)
+        XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
+        XCTAssertEqual(query[kSecAttrService as String] as? String, "Claude Code-credentials")
+        XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
+        XCTAssertEqual(query[kSecReturnAttributes as String] as? Bool, true)
+        XCTAssertEqual(query[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
     }
 
     func testRefreshableCredentialReadsClaudeCodeOAuthFields() throws {
@@ -1645,45 +1785,6 @@ final class ClaudeOAuthUsageParsingTests: XCTestCase {
     func testRefreshableCredentialRequiresBothTokens() {
         XCTAssertNil(ClaudeOAuthUsageClient.parseRefreshableCredential(data(#"{"claudeAiOauth":{"accessToken":"access"}}"#)))
         XCTAssertNil(ClaudeOAuthUsageClient.parseRefreshableCredential(data(#"{"claudeAiOauth":{"refreshToken":"refresh"}}"#)))
-    }
-
-    func testUpdatedCredentialPreservesUnknownFieldsAndRotatesReturnedValues() throws {
-        let original = data(#"{"unrelated":{"keep":true},"claudeAiOauth":{"accessToken":"old","refreshToken":"old-refresh","expiresAt":1,"scopes":["old"],"subscriptionType":"max"}}"#)
-        let updated = try XCTUnwrap(ClaudeOAuthUsageClient.updatedCredentialData(
-            original: original,
-            accessToken: "new",
-            refreshToken: "new-refresh",
-            expiresIn: 3_600,
-            refreshTokenExpiresIn: 86_400,
-            scope: "user:profile user:inference",
-            now: Date(timeIntervalSince1970: 1_000)
-        ))
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: updated) as? [String: Any])
-        let oauth = try XCTUnwrap(root["claudeAiOauth"] as? [String: Any])
-        let unrelated = try XCTUnwrap(root["unrelated"] as? [String: Any])
-
-        XCTAssertEqual(oauth["accessToken"] as? String, "new")
-        XCTAssertEqual(oauth["refreshToken"] as? String, "new-refresh")
-        XCTAssertEqual((oauth["expiresAt"] as? NSNumber)?.int64Value, 4_600_000)
-        XCTAssertEqual((oauth["refreshTokenExpiresAt"] as? NSNumber)?.int64Value, 87_400_000)
-        XCTAssertEqual(oauth["scopes"] as? [String], ["user:profile", "user:inference"])
-        XCTAssertEqual(oauth["subscriptionType"] as? String, "max")
-        XCTAssertEqual(unrelated["keep"] as? Bool, true)
-    }
-
-    func testUpdatedCredentialKeepsRefreshTokenWhenResponseOmitsRotation() throws {
-        let original = data(#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"keep-me"}}"#)
-        let updated = try XCTUnwrap(ClaudeOAuthUsageClient.updatedCredentialData(
-            original: original,
-            accessToken: "new",
-            refreshToken: nil,
-            expiresIn: 60,
-            scope: nil,
-            now: Date(timeIntervalSince1970: 0)
-        ))
-        let credential = try XCTUnwrap(ClaudeOAuthUsageClient.parseRefreshableCredential(updated))
-        XCTAssertEqual(credential.accessToken, "new")
-        XCTAssertEqual(credential.refreshToken, "keep-me")
     }
 
     private func data(_ json: String) -> Data {
