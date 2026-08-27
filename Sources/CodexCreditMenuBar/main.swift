@@ -1844,7 +1844,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         copyErrorItem.isHidden = true
         menu.addItem(copyErrorItem)
         historyChartItem.view = historyChartView
-        historyChartItem.isEnabled = false
+        // Must stay enabled like every other view-hosting item: a disabled
+        // NSMenuItem renders its custom view's text fields in the dimmed
+        // disabled style, which makes the chart captions unreadable on the
+        // translucent menu background while the bars stay visible.
+        historyChartItem.isEnabled = true
         historyChartItem.isHidden = true
         menu.addItem(historyChartItem)
 
