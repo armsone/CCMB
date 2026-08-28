@@ -3,6 +3,22 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.9</title>
+            <pubDate>Sat, 29 Aug 2026 07:23:24 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.9</link>
+            <sparkle:version>346040</sparkle:version>
+            <sparkle:shortVersionString>2.0.9</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.9
+
+- Claude 사용량 인증이 만료되면 CCMB가 토큰을 직접 수정하지 않고 공식 Claude CLI에 비대화형 갱신을 한 번 맡깁니다.
+- 백그라운드 갱신에서 브라우저 로그인이나 macOS 키체인 암호창을 자동으로 열지 않습니다.
+- 자동 갱신에 실패해도 마지막으로 확인한 사용량을 유지하고 반복 인증 요청을 제한합니다.
+- Claude의 refresh token을 CCMB가 읽거나 복사하거나 갱신하지 않도록 인증 경계를 정리했습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.9/CCMB-2.0.9.dmg" length="2915898" type="application/octet-stream" sparkle:edSignature="p4BE/44VwiNk/O65d2r0fcmlQZEFIjN+8r+rkGrYeqDjn1Xd5hq8KjRRyiLQz6kyJSwBH8Gfe96C2teSjBVFBg=="/>
+        </item>
+        <item>
             <title>2.0.5</title>
             <pubDate>Thu, 27 Aug 2026 06:12:03 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.5</link>
@@ -35,22 +51,6 @@
 Claude Code에 정상 로그인된 상태라면 별도의 토큰 수정 없이 CCMB가 사용량 표시를 다시 복구합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.4/CCMB-2.0.4.dmg" length="2886269" type="application/octet-stream" sparkle:edSignature="UxF3H7ekzPiQjGo5j+6ZCZcL0FgtSxdJPBb1GSy1kNmggw2REst1JAgjUxs2eLIZT3Wl32Y9r/YSJb7AyscDBw=="/>
-        </item>
-        <item>
-            <title>2.0.3</title>
-            <pubDate>Tue, 25 Aug 2026 16:27:37 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.3</link>
-            <sparkle:version>340823</sparkle:version>
-            <sparkle:shortVersionString>2.0.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.3
-
-- 사용량 응답이 늦을 때 CCMB 전체가 재시작되며 메뉴바에서 사라질 수 있던 문제를 고쳤습니다.
-- 잠자기 복귀와 자동 복구에서는 앱을 종료하지 않고 데이터 연결만 안전하게 다시 시작합니다.
-- 수동 재시작은 기존 CCMB가 완전히 종료된 뒤 새 인스턴스를 실행합니다.
-- 업데이트 자동 다운로드를 메뉴와 고정 패널에서 바로 켜고 끌 수 있습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.3/CCMB-2.0.3.dmg" length="2859318" type="application/octet-stream" sparkle:edSignature="aBxkO5PwDK6Ljw1w+aLmRFTAnaPf0u0Tge4AQOAe/HhLrUojdDEkNdLHiklUoZjCza10Jl3gaqcuLy4sDqhfCw=="/>
         </item>
     </channel>
 </rss>
