@@ -1625,6 +1625,24 @@ final class ClaudeUsageCoreTests: XCTestCase {
 }
 
 final class ClaudeOAuthTokenResolutionTests: XCTestCase {
+    func testClaudeCredentialRefreshIsStrictlyNonInteractive() {
+        XCTAssertEqual(
+            ClaudeAuthenticationClient.refreshArguments,
+            [
+                "-p",
+                "--safe-mode",
+                "--no-session-persistence",
+                "--tools", "",
+                "--model", "haiku",
+                "--max-turns", "1",
+                "Reply only OK."
+            ]
+        )
+        XCTAssertFalse(ClaudeAuthenticationClient.refreshArguments.contains("auth"))
+        XCTAssertFalse(ClaudeAuthenticationClient.refreshArguments.contains("login"))
+        XCTAssertFalse(ClaudeAuthenticationClient.refreshArguments.contains("setup-token"))
+    }
+
     func testInitialTokenResolutionPrefersKeychainToken() {
         let resolution = ClaudeOAuthTokenCore.resolveInitialToken(
             keychainResult: .token("keychain-token"),
@@ -1815,20 +1833,6 @@ final class ClaudeOAuthUsageParsingTests: XCTestCase {
         XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
         XCTAssertNil(query[kSecReturnAttributes as String])
         XCTAssertEqual(query[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
-    }
-
-    func testRefreshableCredentialReadsClaudeCodeOAuthFields() throws {
-        let json = #"{"claudeAiOauth":{"accessToken":"old-access","refreshToken":"refresh-secret","scopes":["user:profile","user:inference"]}}"#
-        let credential = try XCTUnwrap(ClaudeOAuthUsageClient.parseRefreshableCredential(data(json)))
-
-        XCTAssertEqual(credential.accessToken, "old-access")
-        XCTAssertEqual(credential.refreshToken, "refresh-secret")
-        XCTAssertEqual(credential.scopes, ["user:profile", "user:inference"])
-    }
-
-    func testRefreshableCredentialRequiresBothTokens() {
-        XCTAssertNil(ClaudeOAuthUsageClient.parseRefreshableCredential(data(#"{"claudeAiOauth":{"accessToken":"access"}}"#)))
-        XCTAssertNil(ClaudeOAuthUsageClient.parseRefreshableCredential(data(#"{"claudeAiOauth":{"refreshToken":"refresh"}}"#)))
     }
 
     private func data(_ json: String) -> Data {

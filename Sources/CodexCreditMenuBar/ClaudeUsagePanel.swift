@@ -3059,6 +3059,100 @@ enum ClaudeOAuthTokenCore {
     }
 }
 
+enum ClaudeAuthenticationOutcome: Equatable {
+    case success
+    case commandNotFound
+    case timedOut
+    case failed
+}
+
+/// Asks the official Claude CLI to exercise its own authenticated session so
+/// Claude Code, rather than CCMB, owns access-token refresh and Keychain
+/// updates. The command runs without a TTY, tools, project customizations, or
+/// session persistence and never invokes an auth/login command. If the Claude
+/// session has actually been revoked, it simply fails and CCMB keeps the last
+/// known usage snapshot.
+enum ClaudeAuthenticationClient {
+    private static let refreshTimeoutSeconds: TimeInterval = 30
+
+    static let refreshArguments = [
+        "-p",
+        "--safe-mode",
+        "--no-session-persistence",
+        "--tools", "",
+        "--model", "haiku",
+        "--max-turns", "1",
+        "Reply only OK."
+    ]
+
+    static func refreshCredential(completion: @escaping (ClaudeAuthenticationOutcome) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            guard let executableURL = claudeExecutableURL() else {
+                completion(.commandNotFound)
+                return
+            }
+
+            let process = Process()
+            process.executableURL = executableURL
+            process.arguments = refreshArguments
+            process.standardInput = FileHandle.nullDevice
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+            }
+            errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+            }
+
+            let exited = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in exited.signal() }
+            do {
+                try process.run()
+            } catch {
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                completion(.commandNotFound)
+                return
+            }
+
+            let timedOut = exited.wait(timeout: .now() + refreshTimeoutSeconds) == .timedOut
+            if timedOut {
+                process.terminate()
+                if exited.wait(timeout: .now() + 2) == .timedOut {
+                    kill(process.processIdentifier, SIGKILL)
+                    _ = exited.wait(timeout: .now() + 2)
+                }
+            }
+            process.waitUntilExit()
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+
+            if timedOut {
+                completion(.timedOut)
+            } else {
+                completion(process.terminationStatus == 0 ? .success : .failed)
+            }
+        }
+    }
+
+    private static func claudeExecutableURL() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var candidates = [
+            home.appendingPathComponent(".local/bin/claude"),
+            home.appendingPathComponent(".claude/local/claude"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
+            URL(fileURLWithPath: "/usr/local/bin/claude")
+        ]
+        candidates.append(contentsOf: (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude") })
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+}
+
 /// Fetches Claude account rate-limit usage directly from Anthropic's
 /// undocumented OAuth usage endpoint, using the long-lived token from
 /// `claude setup-token` already stored locally. This endpoint is not
@@ -3142,6 +3236,7 @@ enum ClaudeOAuthUsageClient {
     @MainActor
     private static func performFetch(
         token: String,
+        allowAuthenticationRecovery: Bool = true,
         completion: @escaping (ClaudeUsageFetchOutcome) -> Void
     ) {
         isFetchInFlight = true
@@ -3188,7 +3283,8 @@ enum ClaudeOAuthUsageClient {
             }
             DispatchQueue.main.async { @MainActor in
                 isFetchInFlight = false
-                if let statusCode {
+                if let statusCode,
+                   !(allowAuthenticationRecovery && (statusCode == 401 || statusCode == 403)) {
                     cachedTokenResolution = ClaudeOAuthTokenCore.transition(
                         onHTTPStatus: statusCode,
                         currentState: cachedTokenResolution,
@@ -3204,6 +3300,41 @@ enum ClaudeOAuthUsageClient {
                     fetchProfileIfNeeded(token: token) { accountInfo in
                         completion(.success(accountInfo.map(snapshot.withAccount) ?? snapshot))
                     }
+                case .authenticationRecoveryFailed where allowAuthenticationRecovery:
+                    // Let the official CLI refresh its own rotating credential.
+                    // CCMB never reads or writes the refresh token and never
+                    // launches an interactive login flow.
+                    isFetchInFlight = true
+                    ClaudeAuthenticationClient.refreshCredential { authenticationOutcome in
+                        DispatchQueue.main.async { @MainActor in
+                            isFetchInFlight = false
+                            guard authenticationOutcome == .success else {
+                                cachedTokenResolution = ClaudeOAuthTokenCore.transition(
+                                    onHTTPStatus: statusCode ?? 401,
+                                    currentState: cachedTokenResolution,
+                                    now: Date()
+                                )
+                                completion(.authenticationRecoveryFailed)
+                                return
+                            }
+
+                            cachedTokenResolution = nil
+                            guard case .token(let refreshedToken) = resolveToken() else {
+                                cachedTokenResolution = ClaudeOAuthTokenCore.transition(
+                                    onHTTPStatus: statusCode ?? 401,
+                                    currentState: cachedTokenResolution,
+                                    now: Date()
+                                )
+                                completion(.authenticationRecoveryFailed)
+                                return
+                            }
+                            performFetch(
+                                token: refreshedToken,
+                                allowAuthenticationRecovery: false,
+                                completion: completion
+                            )
+                        }
+                    }
                 case .rateLimited(let retryAt):
                     rateLimitRetryAt = retryAt
                     UserDefaults.standard.set(retryAt, forKey: rateLimitRetryDefaultsKey)
@@ -3218,20 +3349,6 @@ enum ClaudeOAuthUsageClient {
                 }
             }
         }.resume()
-    }
-
-    /// Extracts only the fields required by the official Claude Code refresh
-    /// contract. Keeping this separate makes the secret-handling path
-    /// deterministic and testable without a live Keychain item.
-    static func parseRefreshableCredential(_ data: Data) -> (accessToken: String, refreshToken: String, scopes: [String])? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = root["claudeAiOauth"] as? [String: Any],
-              let accessToken = oauth["accessToken"] as? String,
-              !accessToken.isEmpty,
-              let refreshToken = oauth["refreshToken"] as? String,
-              !refreshToken.isEmpty
-        else { return nil }
-        return (accessToken, refreshToken, oauth["scopes"] as? [String] ?? [])
     }
 
     /// Fetches Claude account identity (email, organization) from the
