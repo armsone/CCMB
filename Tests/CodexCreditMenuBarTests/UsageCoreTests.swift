@@ -1661,18 +1661,23 @@ final class ClaudeOAuthTokenResolutionTests: XCTestCase {
         XCTAssertEqual(withoutFileToken, .noCredential)
     }
 
-    func testAuthenticationFailureLatchesOnHTTP401And403() {
+    func testAuthenticationFailureEntersCooldownOnHTTP401And403() {
+        let baseTime = Date(timeIntervalSince1970: 1_000)
         let state401 = ClaudeOAuthTokenCore.transition(
             onHTTPStatus: 401,
-            currentState: .token("valid-token")
+            currentState: .token("valid-token"),
+            now: baseTime,
+            cooldown: 600
         )
-        XCTAssertEqual(state401, .authenticationFailed)
+        XCTAssertEqual(state401, .authenticationFailed(retryAt: Date(timeIntervalSince1970: 1_600)))
 
         let state403 = ClaudeOAuthTokenCore.transition(
             onHTTPStatus: 403,
-            currentState: .token("valid-token")
+            currentState: .token("valid-token"),
+            now: baseTime,
+            cooldown: 600
         )
-        XCTAssertEqual(state403, .authenticationFailed)
+        XCTAssertEqual(state403, .authenticationFailed(retryAt: Date(timeIntervalSince1970: 1_600)))
     }
 
     func testNonAuthenticationHTTPStatusPreservesCurrentTokenState() {
@@ -1695,18 +1700,51 @@ final class ClaudeOAuthTokenResolutionTests: XCTestCase {
         XCTAssertEqual(state500, .token("valid-token"))
     }
 
-    func testLatchedAuthenticationFailureNeverRetriesResolution() {
+    func testAuthenticationCooldownDoesNotInvokeResolverBeforeRetryTime() {
+        let retryAt = Date(timeIntervalSince1970: 1_600)
+        let beforeRetryTime = Date(timeIntervalSince1970: 1_599)
         var resolveCount = 0
         let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(
-            cachedState: .authenticationFailed
+            cachedState: .authenticationFailed(retryAt: retryAt),
+            now: beforeRetryTime
         ) {
             resolveCount += 1
-            return .token("should-never-be-called")
+            return .token("should-not-be-called")
         }
 
         XCTAssertEqual(resolveCount, 0)
-        XCTAssertEqual(resolved, .authenticationFailed)
-        XCTAssertEqual(newCached, .authenticationFailed)
+        XCTAssertEqual(resolved, .authenticationFailed(retryAt: retryAt))
+        XCTAssertEqual(newCached, .authenticationFailed(retryAt: retryAt))
+    }
+
+    func testAuthenticationCooldownInvokesResolverAndAdoptsNewTokenAtOrAfterRetryTime() {
+        let retryAt = Date(timeIntervalSince1970: 1_600)
+
+        // At exact retry time
+        var atResolveCount = 0
+        let (atResolved, atNewCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .authenticationFailed(retryAt: retryAt),
+            now: Date(timeIntervalSince1970: 1_600)
+        ) {
+            atResolveCount += 1
+            return .token("rotated-token-at")
+        }
+        XCTAssertEqual(atResolveCount, 1)
+        XCTAssertEqual(atResolved, .token("rotated-token-at"))
+        XCTAssertEqual(atNewCached, .token("rotated-token-at"))
+
+        // After retry time
+        var afterResolveCount = 0
+        let (afterResolved, afterNewCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .authenticationFailed(retryAt: retryAt),
+            now: Date(timeIntervalSince1970: 1_700)
+        ) {
+            afterResolveCount += 1
+            return .token("rotated-token-after")
+        }
+        XCTAssertEqual(afterResolveCount, 1)
+        XCTAssertEqual(afterResolved, .token("rotated-token-after"))
+        XCTAssertEqual(afterNewCached, .token("rotated-token-after"))
     }
 
     func testCachedTokenNeverRetriesResolution() {
@@ -1971,7 +2009,11 @@ final class ClaudeOAuthUsageParsingTests: XCTestCase {
 final class ClaudeUsageFetchOutcomeTests: XCTestCase {
     func testSkippedOutcomesCarryNoDiagnosticOrLabel() {
         let retryAt = Date(timeIntervalSince1970: 1_000)
-        let skips: [ClaudeUsageFetchOutcome] = [.skippedInFlight, .skippedThrottled, .skippedRateLimitBackoff(retryAt: retryAt)]
+        let skips: [ClaudeUsageFetchOutcome] = [
+            .skippedInFlight,
+            .skippedThrottled(retryAt: retryAt),
+            .skippedRateLimitBackoff(retryAt: retryAt)
+        ]
         for outcome in skips {
             XCTAssertNil(outcome.diagnosticDescription, "\(outcome) is a routine skip, not a failure")
             XCTAssertNil(outcome.staleReasonLabel)
@@ -1998,7 +2040,7 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
     func testAuthenticationRecoveryFailureExplainsTheNextBeginnerAction() {
         XCTAssertEqual(
             ClaudeUsageFetchOutcome.authenticationRecoveryFailed.staleReasonLabel,
-            "자동 복구 실패 · Claude Code에서 다시 로그인"
+            "Claude Code 실행 또는 다시 로그인"
         )
     }
 
@@ -2007,7 +2049,7 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
         XCTAssertEqual(ClaudeUsageFetchOutcome.rateLimited(retryAt: retryAt).rateLimitRetryAt, retryAt)
         XCTAssertEqual(ClaudeUsageFetchOutcome.skippedRateLimitBackoff(retryAt: retryAt).rateLimitRetryAt, retryAt)
         XCTAssertNil(ClaudeUsageFetchOutcome.httpFailure(status: 429).rateLimitRetryAt)
-        XCTAssertNil(ClaudeUsageFetchOutcome.skippedThrottled.rateLimitRetryAt)
+        XCTAssertNil(ClaudeUsageFetchOutcome.skippedThrottled(retryAt: retryAt).rateLimitRetryAt)
     }
 
     // MARK: - Per-refresh consumption strip

@@ -2888,7 +2888,10 @@ private let iso8601Formatter: ISO8601DateFormatter = {
 enum ClaudeUsageFetchOutcome {
     case success(ClaudeUsageSnapshot)
     case skippedInFlight
-    case skippedThrottled
+    /// The persisted request cadence has not elapsed yet. Carries the exact
+    /// next eligible instant so an app relaunch cannot postpone the retry by
+    /// another full refresh interval.
+    case skippedThrottled(retryAt: Date)
     /// A prior 429's backoff window is still active, so this call never hit
     /// the network. Carries the same `retryAt` the original `.rateLimited`
     /// outcome stored, so the UI's countdown stays accurate.
@@ -2898,9 +2901,8 @@ enum ClaudeUsageFetchOutcome {
     /// An actual 429 response, with the backoff deadline computed from its
     /// `Retry-After` header (or the conservative fallback).
     case rateLimited(retryAt: Date)
-    /// The access token was rejected and the stored refresh token could not
-    /// safely restore the Claude Code credential. The user must sign in to
-    /// Claude Code once; no token or server response is exposed here.
+    /// The access token was rejected (HTTP 401/403) or authentication cooldown is active.
+    /// The user must run Claude Code or sign in again to rotate the credential.
     case authenticationRecoveryFailed
     case httpFailure(status: Int)
     case transportFailure
@@ -2920,7 +2922,7 @@ enum ClaudeUsageFetchOutcome {
         case .rateLimited(let retryAt):
             return "http 429, backoff until epoch \(Int(retryAt.timeIntervalSince1970))"
         case .authenticationRecoveryFailed:
-            return "Claude authentication recovery failed"
+            return "Claude authentication failed"
         case .httpFailure(let status):
             return "http \(status)"
         case .transportFailure:
@@ -2942,7 +2944,7 @@ enum ClaudeUsageFetchOutcome {
         case .rateLimited:
             return "요청 제한(429)"
         case .authenticationRecoveryFailed:
-            return "자동 복구 실패 · Claude Code에서 다시 로그인"
+            return "Claude Code 실행 또는 다시 로그인"
         case .httpFailure(let status) where status == 401 || status == 403:
             return "인증 만료"
         case .httpFailure(let status):
@@ -2972,11 +2974,15 @@ enum ClaudeOAuthTokenResolution: Equatable {
     case token(String)
     case keychainUnreadable
     case noCredential
-    case authenticationFailed
+    case authenticationFailed(retryAt: Date)
 }
 
 /// Pure helper for resolving and transitioning Claude OAuth token resolution state.
 enum ClaudeOAuthTokenCore {
+    /// Bounded cooldown period after receiving an HTTP 401/403 authentication error,
+    /// aligned with the 10-minute Claude OAuth shared freshness cadence.
+    static let authenticationFailureCooldown: TimeInterval = 600
+
     enum KeychainReadResult: Equatable {
         case token(String)
         case notFound
@@ -3006,33 +3012,50 @@ enum ClaudeOAuthTokenCore {
     }
 
     /// Determines the next cached token resolution state given an HTTP status code.
-    /// When receiving HTTP 401 or 403, authentication is latched into failure
-    /// so the Keychain item is never re-read for the life of the process.
+    /// When receiving HTTP 401 or 403, authentication enters a cooldown until `now + cooldown`
+    /// so the Keychain item is not re-read and network requests are not repeated during that window.
     /// Non-authentication status codes preserve the existing resolution state.
     static func transition(
         onHTTPStatus status: Int,
-        currentState: ClaudeOAuthTokenResolution?
+        currentState: ClaudeOAuthTokenResolution?,
+        now: Date = Date(),
+        cooldown: TimeInterval = authenticationFailureCooldown
     ) -> ClaudeOAuthTokenResolution? {
         if status == 401 || status == 403 {
-            return .authenticationFailed
+            return .authenticationFailed(retryAt: now.addingTimeInterval(cooldown))
         }
         return currentState
     }
 
     /// Resolves the token for a fetch request:
-    /// - If a cached state exists (including a latched authentication failure or
-    ///   missing/unreadable credential), it is returned directly without
-    ///   performing any Keychain or file reads.
-    /// - If no cached state exists, the initial resolution provider is invoked.
+    /// - If a cached token or missing/unreadable credential state exists, it is returned directly
+    ///   without performing any Keychain or file reads.
+    /// - If an authentication failure cooldown is active (`now < retryAt`), the failure state is
+    ///   returned without reading Keychain or files.
+    /// - If no cached state exists or the authentication cooldown has expired (`now >= retryAt`),
+    ///   the initial resolution provider is invoked.
     static func resolveToken(
         cachedState: ClaudeOAuthTokenResolution?,
+        now: Date = Date(),
         resolveInitial: () -> ClaudeOAuthTokenResolution
     ) -> (resolved: ClaudeOAuthTokenResolution, newCachedState: ClaudeOAuthTokenResolution) {
-        if let cachedState {
-            return (cachedState, cachedState)
+        switch cachedState {
+        case .token(let token):
+            return (.token(token), .token(token))
+        case .keychainUnreadable:
+            return (.keychainUnreadable, .keychainUnreadable)
+        case .noCredential:
+            return (.noCredential, .noCredential)
+        case .authenticationFailed(let retryAt):
+            if now < retryAt {
+                return (.authenticationFailed(retryAt: retryAt), .authenticationFailed(retryAt: retryAt))
+            }
+            let initial = resolveInitial()
+            return (initial, initial)
+        case nil:
+            let initial = resolveInitial()
+            return (initial, initial)
         }
-        let initial = resolveInitial()
-        return (initial, initial)
     }
 }
 
@@ -3062,10 +3085,9 @@ enum ClaudeOAuthUsageClient {
     /// regardless of how many usage fetches succeed afterward.
     @MainActor private static var attemptedProfileTokens = Set<String>()
     @MainActor private static var latestAccountInfo: ClaudeAccountInfo?
-    /// Process-local cached token resolution. After the initial read or after an
-    /// HTTP 401/403 authentication failure, the resolution state is latched for
-    /// the lifetime of this CCMB process so background refreshes never prompt
-    /// or re-read the Keychain item.
+    /// Process-local cached token resolution. After the initial read, tokens and
+    /// unreadable/missing states are latched. HTTP 401/403 authentication failures enter a
+    /// 10-minute cooldown, after which a non-interactive Keychain/file read is retried.
     @MainActor private static var cachedTokenResolution: ClaudeOAuthTokenResolution?
 
     // Mutated both when a fetch is kicked off (main actor caller) and when the
@@ -3099,12 +3121,13 @@ enum ClaudeOAuthUsageClient {
             completion(.skippedRateLimitBackoff(retryAt: rateLimitRetryAt))
             return
         }
-        if ClaudeUsageCore.shouldThrottleFetch(minimumInterval: minimumInterval, lastFetchDate: lastFetchDate, now: now) {
-            completion(.skippedThrottled)
+        if ClaudeUsageCore.shouldThrottleFetch(minimumInterval: minimumInterval, lastFetchDate: lastFetchDate, now: now),
+           let lastFetchDate {
+            completion(.skippedThrottled(retryAt: lastFetchDate.addingTimeInterval(minimumInterval)))
             return
         }
 
-        switch resolveToken() {
+        switch resolveToken(now: now) {
         case .token(let token):
             performFetch(token: token, completion: completion)
         case .keychainUnreadable:
@@ -3168,7 +3191,8 @@ enum ClaudeOAuthUsageClient {
                 if let statusCode {
                     cachedTokenResolution = ClaudeOAuthTokenCore.transition(
                         onHTTPStatus: statusCode,
-                        currentState: cachedTokenResolution
+                        currentState: cachedTokenResolution,
+                        now: now
                     )
                 }
                 switch outcome {
@@ -3343,8 +3367,11 @@ enum ClaudeOAuthUsageClient {
     /// that exists but can't be decoded is only reported as `keychainUnreadable`
     /// if the file fallback also has no usable token.
     @MainActor
-    private static func resolveToken() -> ClaudeOAuthTokenResolution {
-        let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(cachedState: cachedTokenResolution) {
+    private static func resolveToken(now: Date = Date()) -> ClaudeOAuthTokenResolution {
+        let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: cachedTokenResolution,
+            now: now
+        ) {
             ClaudeOAuthTokenCore.resolveInitialToken(
                 keychainResult: readKeychainToken(),
                 fileToken: readFileToken()

@@ -2218,8 +2218,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 self.recordClaudeConsumption()
                 self.lastClaudeFetchFailureLabel = nil
                 self.lastClaudeRateLimitRetryAt = nil
-            case .skippedInFlight, .skippedThrottled:
+            case .skippedInFlight:
                 break
+            case .skippedThrottled(let retryAt):
+                self.nextClaudeRefreshAt = retryAt
+                self.updateNextAutoRefreshAt()
+                self.scheduleNextAutoRefresh()
             case .rateLimited(let retryAt), .skippedRateLimitBackoff(let retryAt):
                 self.lastClaudeFetchFailureLabel = nil
                 self.lastClaudeRateLimitRetryAt = retryAt
