@@ -15,6 +15,25 @@ final class LowerControlsLayoutTests: XCTestCase {
         XCTAssertEqual(view.updateButton.frame.height, 42, accuracy: 0.001)
         XCTAssertEqual(view.updateButton.title, "업데이트 확인 · 2.0.9")
     }
+
+    func testHistoryCaptionsWrapWithoutTruncatingTheirBreakdown() throws {
+        let view = UsageHistoryChartView()
+        let strip = UsageHistoryStrip(
+            caption: "Codex · 갱신당 주간 0% · Spark 0%",
+            series: [],
+            slotCount: 3,
+            unitSuffix: "%",
+            accessibilityValue: "최근 갱신 소비 기록"
+        )
+
+        XCTAssertTrue(view.apply(codex: strip, claude: nil, gemini: nil, grok: nil))
+        let caption = try XCTUnwrap(view.subviews.compactMap { $0 as? NSTextField }.first { !$0.isHidden })
+        XCTAssertEqual(caption.stringValue, strip.caption)
+        XCTAssertEqual(caption.maximumNumberOfLines, 2)
+        XCTAssertEqual(caption.lineBreakMode, .byCharWrapping)
+        XCTAssertEqual(caption.cell?.truncatesLastVisibleLine, false)
+        XCTAssertEqual(caption.frame.height, 26, accuracy: 0.001)
+    }
 }
 
 final class UsageCoreTests: XCTestCase {
