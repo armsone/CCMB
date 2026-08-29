@@ -2584,7 +2584,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     /// Caption/accessibility text shared by the multi-bucket strips.
     private static func stackedStripTexts(
-        provider: String,
         series: [UsageHistorySeries],
         unit: String
     ) -> (caption: String, accessibilityValue: String) {
@@ -2596,7 +2595,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let latestAmounts = stacked.last?.amounts ?? unmeasured
         let breakdown = UsageConsumptionCore.breakdownTitle(amounts: latestAmounts, labels: labels, unit: unit)
         return (
-            "\(provider) · 갱신당 \(breakdown)",
+            "갱신당 \(breakdown)",
             "최근 \(stacked.count)회 갱신 소비 기록, 마지막 갱신 \(breakdown)"
         )
     }
@@ -2620,7 +2619,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 color: UsageBrandColors.codexSpark
             ))
         }
-        let texts = Self.stackedStripTexts(provider: "Codex", series: series, unit: unit)
+        let texts = Self.stackedStripTexts(series: series, unit: unit)
         return UsageHistoryStrip(
             caption: texts.caption,
             series: series,
@@ -2644,7 +2643,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 color: UsageBrandColors.claudeFable
             )
         ]
-        let texts = Self.stackedStripTexts(provider: "Claude", series: series, unit: "%")
+        let texts = Self.stackedStripTexts(series: series, unit: "%")
         return UsageHistoryStrip(
             caption: texts.caption,
             series: series,
@@ -2678,7 +2677,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let usesFiveHour = lastGeminiSnapshot?.fiveHourRemainingFraction != nil
         let latest = UsageConsumptionCore.amountTitle(samples.last?.amount ?? 0, unit: "%")
         return UsageHistoryStrip(
-            caption: "Gemini · 갱신당 \(usesFiveHour ? "세션" : "주간") \(latest)",
+            caption: "갱신당 \(usesFiveHour ? "세션" : "주간") \(latest)",
             samples: samples,
             slotCount: UsageConsumptionTracker.defaultCapacity,
             unitSuffix: "%",
@@ -2708,7 +2707,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let usesWeekly = lastGrokSnapshot?.weeklyUsedPercent != nil
         let latest = UsageConsumptionCore.amountTitle(samples.last?.amount ?? 0, unit: "%")
         return UsageHistoryStrip(
-            caption: "Grok · 갱신당 \(usesWeekly ? "주간" : "월간") \(latest)",
+            caption: "갱신당 \(usesWeekly ? "주간" : "월간") \(latest)",
             samples: samples,
             slotCount: UsageConsumptionTracker.defaultCapacity,
             unitSuffix: "%",

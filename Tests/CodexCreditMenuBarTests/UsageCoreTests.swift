@@ -16,10 +16,10 @@ final class LowerControlsLayoutTests: XCTestCase {
         XCTAssertEqual(view.updateButton.title, "업데이트 확인 · 2.0.9")
     }
 
-    func testHistoryCaptionsWrapWithoutTruncatingTheirBreakdown() throws {
+    func testHistoryCaptionsFitOnOneLineWithoutRepeatingProviderName() throws {
         let view = UsageHistoryChartView()
         let strip = UsageHistoryStrip(
-            caption: "Codex · 갱신당 주간 0% · Spark 0%",
+            caption: "갱신당 주간 0% · Spark 0%",
             series: [],
             slotCount: 3,
             unitSuffix: "%",
@@ -29,10 +29,23 @@ final class LowerControlsLayoutTests: XCTestCase {
         XCTAssertTrue(view.apply(codex: strip, claude: nil, gemini: nil, grok: nil))
         let caption = try XCTUnwrap(view.subviews.compactMap { $0 as? NSTextField }.first { !$0.isHidden })
         XCTAssertEqual(caption.stringValue, strip.caption)
-        XCTAssertEqual(caption.maximumNumberOfLines, 2)
-        XCTAssertEqual(caption.lineBreakMode, .byCharWrapping)
+        XCTAssertFalse(caption.stringValue.contains("Codex"))
+        XCTAssertEqual(caption.maximumNumberOfLines, 1)
+        XCTAssertEqual(caption.lineBreakMode, .byClipping)
         XCTAssertEqual(caption.cell?.truncatesLastVisibleLine, false)
-        XCTAssertEqual(caption.frame.height, 26, accuracy: 0.001)
+        XCTAssertEqual(caption.frame.height, 13, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(caption.intrinsicContentSize.width, caption.frame.width)
+    }
+
+    func testHistoryHoverTimeUsesTwentyFourHourMinutesOnly() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/CodexCreditMenuBar/ClaudeUsagePanel.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("formatter.dateFormat = \"HH:mm\""))
+        XCTAssertFalse(source.contains("formatter.dateFormat = \"a h:mm:ss\""))
     }
 }
 

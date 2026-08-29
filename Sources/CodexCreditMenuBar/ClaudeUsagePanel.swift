@@ -274,7 +274,7 @@ private final class UsageHistoryBarView: NSView {
     private static let hoverTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateFormat = "a h:mm:ss"
+        formatter.dateFormat = "HH:mm"
         return formatter
     }()
 
@@ -1505,9 +1505,7 @@ final class UsageHistoryChartView: NSView {
     private static let cardPadding: CGFloat = 8
     private static let cardCornerRadius: CGFloat = 10
 
-    // Two lines keep the complete per-refresh breakdown visible. A single
-    // line clips the trailing Spark/Fable amount in the fixed-width columns.
-    private static let captionHeight: CGFloat = 26
+    private static let captionHeight: CGFloat = 13
     private static let captionGap: CGFloat = 4
     private static let barsHeight: CGFloat = 56
     private static let bottomPadding: CGFloat = 5
@@ -1667,10 +1665,10 @@ final class UsageHistoryChartView: NSView {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
         field.textColor = .secondaryLabelColor
-        field.usesSingleLineMode = false
-        field.lineBreakMode = .byCharWrapping
-        field.maximumNumberOfLines = 2
-        field.cell?.wraps = true
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byClipping
+        field.maximumNumberOfLines = 1
+        field.cell?.wraps = false
         field.cell?.truncatesLastVisibleLine = false
         return field
     }
