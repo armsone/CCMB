@@ -18,6 +18,84 @@ struct RateLimitSnapshot {
     let updatedAt: Date
 }
 
+/// Provider-independent adaptive cadence. Each visible provider owns one
+/// instance, so activity in Claude does not unnecessarily accelerate Codex
+/// or Gemini. A value change greater than 0.01 immediately returns that
+/// provider to one-minute monitoring.
+struct SmartRefreshPolicy: Equatable {
+    enum Mode: Int, Equatable {
+        case active
+        case idleShort
+        case idleMedium
+        case idleLong
+
+        var interval: TimeInterval {
+            switch self {
+            case .active: return 60
+            case .idleShort: return 180
+            case .idleMedium: return 300
+            case .idleLong: return 600
+            }
+        }
+
+        var unchangedThreshold: Int? {
+            switch self {
+            case .active: return 3
+            case .idleShort: return 6
+            case .idleMedium: return 12
+            case .idleLong: return nil
+            }
+        }
+
+        var next: Mode {
+            switch self {
+            case .active: return .idleShort
+            case .idleShort: return .idleMedium
+            case .idleMedium, .idleLong: return .idleLong
+            }
+        }
+    }
+
+    private(set) var mode: Mode = .active
+    private(set) var unchangedCount = 0
+    private(set) var lastValues: [Double?]?
+
+    var interval: TimeInterval { mode.interval }
+
+    /// Returns true when the effective interval changed.
+    mutating func update(values: [Double?]) -> Bool {
+        guard let previous = lastValues else {
+            lastValues = values
+            return false
+        }
+        let changed = values.count != previous.count || zip(values, previous).contains { current, old in
+            switch (current, old) {
+            case let (current?, old?): return abs(current - old) > 0.01
+            case (nil, nil): return false
+            default: return true
+            }
+        }
+        lastValues = values
+        if changed {
+            let didChangeMode = mode != .active
+            mode = .active
+            unchangedCount = 0
+            return didChangeMode
+        }
+        unchangedCount += 1
+        guard let threshold = mode.unchangedThreshold, unchangedCount >= threshold else { return false }
+        mode = mode.next
+        unchangedCount = 0
+        return true
+    }
+
+    mutating func reset() {
+        mode = .active
+        unchangedCount = 0
+        lastValues = nil
+    }
+}
+
 struct CodexSparkWeeklyWindow: Equatable {
     let usedPercent: Double
     let windowDurationMinutes: Int?
@@ -387,16 +465,19 @@ enum UsageCore {
     /// Selectable auto-refresh cadences in seconds, `0` meaning off. The menu,
     /// the persistence normalizer, and the tests all read this one list so a
     /// new cadence cannot be added in one place and forgotten in another.
-    static let refreshIntervalOptions: [Int] = [0, 30, 60, 180, 300, 600]
-    static let claudeRefreshIntervalOptions: [Int] = [0, 600, 900, 1_800, 3_600]
-    static let geminiRefreshIntervalOptions: [Int] = [0, 120, 300, 600, 900, 1_800]
+    /// `-1` selects the adaptive 1→3→5→10 minute policy used by the
+    /// reference usage monitor; `0` disables automatic refresh.
+    static let smartRefreshPreference = -1
+    static let refreshIntervalOptions: [Int] = [-1, 0, 60, 180, 300, 600]
+    static let claudeRefreshIntervalOptions: [Int] = [-1, 0, 60, 180, 300, 600]
+    static let geminiRefreshIntervalOptions: [Int] = [-1, 0, 60, 180, 300, 600]
     static let grokRefreshIntervalOptions: [Int] = [0, 120, 300, 600, 900, 1_800]
 
     /// Provider-specific defaults balance freshness with each source's cost.
     /// Applies to a fresh install only; a stored valid choice always wins.
-    static let defaultRefreshIntervalSeconds = 30
-    static let defaultClaudeRefreshIntervalSeconds = 600
-    static let defaultGeminiRefreshIntervalSeconds = 300
+    static let defaultRefreshIntervalSeconds = smartRefreshPreference
+    static let defaultClaudeRefreshIntervalSeconds = smartRefreshPreference
+    static let defaultGeminiRefreshIntervalSeconds = smartRefreshPreference
     static let defaultGrokRefreshIntervalSeconds = 300
 
     static func normalizedRefreshInterval(_ seconds: Int?) -> TimeInterval {
@@ -604,10 +685,9 @@ enum ClaudePlanCore {
 /// fully testable without spawning a process.
 enum GeminiUsageCore {
     static let sharedFreshForSeconds: TimeInterval = 300
-    /// Each fetch launches the `agy` CLI twice (`/usage` and `/credits`),
-    /// each its own subprocess, so this floor sits above Claude's
-    /// unofficial-HTTP-endpoint floor.
-    static let minimumRequestIntervalSeconds: TimeInterval = 120
+    /// Smart cadence begins at one minute for all three visible providers.
+    /// `agy` still guards overlapping subprocesses internally.
+    static let minimumRequestIntervalSeconds: TimeInterval = 60
     static let weeklyBucketID = "gemini-weekly"
     static let fiveHourBucketID = "gemini-5h"
     static let geminiModelsGroupName = "Gemini Models"
@@ -943,12 +1023,12 @@ struct ClaudeUsageSnapshot {
 }
 
 enum ClaudeUsageCore {
-    /// OAuth is intentionally slower than UI refresh. Its freshness window
-    /// includes one minute of timer leeway so a healthy ten-minute cadence
-    /// does not look stale immediately before the next scheduled read.
+    /// The shared cache remains valid through the longest smart-refresh step
+    /// plus one minute of timer leeway. Fetch failures still hide its values
+    /// immediately rather than presenting stale numbers as live.
     static let sharedFreshForSeconds: TimeInterval = 660
     static let statusLineFreshForSeconds: TimeInterval = 300
-    static let minimumRequestIntervalSeconds: TimeInterval = 600
+    static let minimumRequestIntervalSeconds: TimeInterval = 60
 
     static func remainingPercent(from usedPercent: Double?) -> Double? {
         guard let usedPercent else { return nil }
@@ -976,8 +1056,7 @@ enum ClaudeUsageCore {
 
     /// Whether a Claude usage fetch should be skipped as too soon after the
     /// last one. The caller supplies the greater of the configured refresh
-    /// cadence and `minimumRequestIntervalSeconds`, including manual refresh,
-    /// so this unofficial endpoint is never polled more often than is safe.
+    /// cadence and `minimumRequestIntervalSeconds`, including manual refresh.
     static func shouldThrottleFetch(minimumInterval: TimeInterval, lastFetchDate: Date?, now: Date) -> Bool {
         guard minimumInterval > 0, let lastFetchDate else { return false }
         // The repeating timer has scheduling leeway, so requiring the full
@@ -1092,8 +1171,15 @@ enum ClaudeUsageCore {
         let freshForSeconds = snapshot.quotaSource == "claude-statusline"
             ? statusLineFreshForSeconds
             : sharedFreshForSeconds
+        let isCurrent = isFresh(
+            publishedAt: snapshot.publishedAt,
+            now: now,
+            freshForSeconds: freshForSeconds
+        )
         return [
-            "status": snapshot.weeklyUsedPercent == nil && snapshot.fiveHourUsedPercent == nil ? "partial" : "ok",
+            "status": !isCurrent
+                ? "stale"
+                : (snapshot.weeklyUsedPercent == nil && snapshot.fiveHourUsedPercent == nil ? "partial" : "ok"),
             "source": snapshot.quotaSource ?? "unknown",
             "weeklyRemainingPercent": remainingPercent(from: snapshot.weeklyUsedPercent) ?? NSNull(),
             "weeklyUsedPercent": snapshot.weeklyUsedPercent ?? NSNull(),
@@ -1105,11 +1191,7 @@ enum ClaudeUsageCore {
             "fetchedAt": snapshot.publishedAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
             "ageSeconds": ageSeconds ?? NSNull(),
             "freshForSeconds": Int(freshForSeconds),
-            "fresh": isFresh(
-                publishedAt: snapshot.publishedAt,
-                now: now,
-                freshForSeconds: freshForSeconds
-            ),
+            "fresh": isCurrent,
             "modelWeeklyLimits": snapshot.modelWeeklyLimits.map { limit -> [String: Any] in
                 [
                     "model": limit.modelName,

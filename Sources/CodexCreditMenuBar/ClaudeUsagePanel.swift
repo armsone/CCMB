@@ -1,7 +1,5 @@
 import AppKit
 import Foundation
-import LocalAuthentication
-import Security
 
 /// Reads Claude Code's non-secret cached account metadata only. The OAuth
 /// credential file and Keychain token are intentionally outside this path.
@@ -1805,6 +1803,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     var onGeminiRefreshIntervalChange: ((Int) -> Void)?
     var onGrokRefreshIntervalChange: ((Int) -> Void)?
     var onGrokUsageAction: (() -> Void)?
+    var onClaudeUsageAction: (() -> Void)?
     /// Same lower-control actions as the status menu, performed through
     /// callbacks into `AppDelegate` rather than duplicating any business
     /// logic here. "항상 보기" needs no callback of its own when this panel
@@ -1813,7 +1812,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     /// `onToggleAlwaysView` to hand off to that persistent panel.
     var onOpacityChange: ((Double) -> Void)?
     var onCheckForUpdates: (() -> Void)?
-    var onAutomaticDownloadsChange: ((Bool) -> Void)?
     var onOpenDiagnosticLog: (() -> Void)?
     var onOpenGitHub: (() -> Void)?
     var onToggleLaunchAtLogin: (() -> Void)?
@@ -1894,8 +1892,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
         updateVersionView.updateButton.target = self
         updateVersionView.updateButton.action = #selector(triggerCheckForUpdates)
-        updateVersionView.automaticDownloadsButton.target = self
-        updateVersionView.automaticDownloadsButton.action = #selector(toggleAutomaticDownloads(_:))
         updateVersionView.opacitySlider.target = self
         updateVersionView.opacitySlider.action = #selector(changeOpacity(_:))
 
@@ -2148,7 +2144,11 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func openClaudeUsagePage() {
-        NSWorkspace.shared.open(UsageDashboardURLs.claude)
+        if let onClaudeUsageAction {
+            onClaudeUsageAction()
+        } else {
+            NSWorkspace.shared.open(UsageDashboardURLs.claude)
+        }
     }
 
     @objc private func openGeminiUsagePage() {
@@ -2177,14 +2177,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func triggerCheckForUpdates() {
         onCheckForUpdates?()
-    }
-
-    @objc private func toggleAutomaticDownloads(_ sender: NSButton) {
-        onAutomaticDownloadsChange?(sender.state == .on)
-    }
-
-    func setAutomaticDownloadsEnabled(_ enabled: Bool) {
-        updateVersionView.setAutomaticDownloadsEnabled(enabled)
     }
 
     @objc private func triggerOpenDiagnosticLog() {
@@ -2397,7 +2389,9 @@ private final class IntervalControlButton: RolloverButton {
         let menu = NSMenu()
         for seconds in options {
             let item = NSMenuItem(
-                title: seconds == 0 ? "끔" : Self.durationTitle(seconds),
+                title: seconds == UsageCore.smartRefreshPreference
+                    ? "스마트 (1→3→5→10분)"
+                    : (seconds == 0 ? "끔" : Self.durationTitle(seconds)),
                 action: #selector(selectInterval(_:)),
                 keyEquivalent: ""
             )
@@ -2734,13 +2728,13 @@ final class LifecycleActionsRowView: NSView {
 /// Three-column settings row: always-on-top, combined update/version, opacity.
 @MainActor
 final class VersionOpacityRowView: NSView {
-    private static let viewHeight: CGFloat = 46
+    private static let viewHeight: CGFloat = 48
+    private static let cellInset: CGFloat = UsagePanelLayout.controlVerticalInset
 
     let alwaysViewButton: NSButton
     /// One clickable control carrying both the update action and the current
     /// version text, via `setVersionText(_:)`.
     let updateButton: NSButton
-    let automaticDownloadsButton: NSButton
     let opacitySlider: NSSlider
     private let updateTitle: String
     private let opacityLabel = NSTextField(labelWithString: "투명도")
@@ -2753,11 +2747,6 @@ final class VersionOpacityRowView: NSView {
         self.updateTitle = updateTitle
         alwaysViewButton = Self.makeButton(title: alwaysTitle)
         updateButton = Self.makeButton(title: updateTitle)
-        automaticDownloadsButton = NSButton(
-            checkboxWithTitle: "자동 다운로드",
-            target: nil,
-            action: nil
-        )
         opacitySlider = NSSlider(
             value: 1,
             minValue: UsageCore.minimumPanelOpacity,
@@ -2774,16 +2763,12 @@ final class VersionOpacityRowView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
         addSubview(alwaysViewButton)
         addSubview(updateButton)
-        addSubview(automaticDownloadsButton)
         addSubview(opacityLabel)
         addSubview(opacitySlider)
         addSubview(opacityValueLabel)
         dividers.forEach(addSubview)
 
         opacitySlider.controlSize = .small
-        automaticDownloadsButton.controlSize = .small
-        automaticDownloadsButton.font = .systemFont(ofSize: 10, weight: .regular)
-        automaticDownloadsButton.setAccessibilityLabel("업데이트 자동 다운로드")
         opacitySlider.isContinuous = true
         opacitySlider.setAccessibilityLabel("패널 투명도")
         opacityLabel.font = .systemFont(ofSize: 11, weight: .regular)
@@ -2799,17 +2784,16 @@ final class VersionOpacityRowView: NSView {
 
     /// Shows the current version on the same clickable update control.
     func setVersionText(_ text: String) {
-        updateButton.title = text.isEmpty ? updateTitle : "\(updateTitle) · \(text)"
+        let compactVersion = text
+            .replacingOccurrences(of: "현재 버전 ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let compactUpdateTitle = updateTitle.replacingOccurrences(of: "…", with: "")
+        updateButton.title = compactVersion.isEmpty
+            ? updateTitle
+            : "\(compactUpdateTitle) · \(compactVersion)"
         updateButton.setAccessibilityLabel(
             text.isEmpty ? updateTitle : "\(updateTitle), \(text)"
         )
-    }
-
-    func setAutomaticDownloadsEnabled(_ enabled: Bool) {
-        automaticDownloadsButton.state = enabled ? .on : .off
-        automaticDownloadsButton.toolTip = enabled
-            ? "새 버전을 확인하면 미리 다운로드합니다."
-            : "업데이트 확인 후 직접 다운로드합니다."
     }
 
     required init?(coder: NSCoder) {
@@ -2834,34 +2818,38 @@ final class VersionOpacityRowView: NSView {
     }
 
     private func layoutSubviews() {
-        let verticalInset = UsagePanelLayout.controlVerticalInset
+        let verticalInset = Self.cellInset
         alwaysViewButton.frame = NSRect(
             x: UsagePanelLayout.columnX[0],
             y: verticalInset,
             width: UsagePanelLayout.columnWidth,
             height: Self.viewHeight - verticalInset * 2
         )
+        let updateX = UsagePanelLayout.columnX[1]
         updateButton.frame = NSRect(
-            x: UsagePanelLayout.columnX[1],
-            y: 2,
+            x: updateX,
+            y: verticalInset,
             width: UsagePanelLayout.columnWidth,
-            height: 20
-        )
-        automaticDownloadsButton.frame = NSRect(
-            x: UsagePanelLayout.columnX[1] + 20,
-            y: 26,
-            width: UsagePanelLayout.columnWidth - 40,
-            height: 16
+            height: Self.viewHeight - verticalInset * 2
         )
         let opacityX = UsagePanelLayout.columnX[2]
-        opacityLabel.frame = NSRect(x: opacityX + 8, y: 15, width: 42, height: 16)
+        let textY = (Self.viewHeight - 16) / 2
+        let sliderY = (Self.viewHeight - 20) / 2
+        let contentX = opacityX + 8
+        let valueWidth: CGFloat = 38
+        let labelWidth: CGFloat = 42
+        let controlGap: CGFloat = 6
+        let valueX = opacityX + UsagePanelLayout.columnWidth - 8 - valueWidth
+        let sliderX = contentX + labelWidth + controlGap
+        let sliderWidth = valueX - controlGap - sliderX
+        opacityLabel.frame = NSRect(x: contentX, y: textY, width: labelWidth, height: 16)
         opacitySlider.frame = NSRect(
-            x: opacityX + 52,
-            y: (Self.viewHeight - 20) / 2,
-            width: 80,
+            x: sliderX,
+            y: sliderY,
+            width: sliderWidth,
             height: 20
         )
-        opacityValueLabel.frame = NSRect(x: opacityX + 138, y: 15, width: 32, height: 16)
+        opacityValueLabel.frame = NSRect(x: valueX, y: textY, width: valueWidth, height: 16)
 
         for (index, divider) in dividers.enumerated() {
             divider.frame = NSRect(
@@ -2897,7 +2885,6 @@ enum ClaudeUsageFetchOutcome {
     /// outcome stored, so the UI's countdown stays accurate.
     case skippedRateLimitBackoff(retryAt: Date)
     case noCredential
-    case keychainCredentialUnreadable
     /// An actual 429 response, with the backoff deadline computed from its
     /// `Retry-After` header (or the conservative fallback).
     case rateLimited(retryAt: Date)
@@ -2917,8 +2904,6 @@ enum ClaudeUsageFetchOutcome {
             return nil
         case .noCredential:
             return "no Claude credential found"
-        case .keychainCredentialUnreadable:
-            return "keychain credential unreadable"
         case .rateLimited(let retryAt):
             return "http 429, backoff until epoch \(Int(retryAt.timeIntervalSince1970))"
         case .authenticationRecoveryFailed:
@@ -2939,12 +2924,10 @@ enum ClaudeUsageFetchOutcome {
             return nil
         case .noCredential:
             return "인증 정보 없음"
-        case .keychainCredentialUnreadable:
-            return "키체인 인증 정보를 읽을 수 없음"
         case .rateLimited:
             return "요청 제한(429)"
         case .authenticationRecoveryFailed:
-            return "Claude Code 실행 또는 다시 로그인"
+            return "아래 버튼으로 Claude 다시 연결"
         case .httpFailure(let status) where status == 401 || status == 403:
             return "인증 만료"
         case .httpFailure(let status):
@@ -2969,193 +2952,9 @@ enum ClaudeUsageFetchOutcome {
     }
 }
 
-/// Resolved token status for the Claude OAuth usage client.
-enum ClaudeOAuthTokenResolution: Equatable {
-    case token(String)
-    case keychainUnreadable
-    case noCredential
-    case authenticationFailed(retryAt: Date)
-}
-
-/// Pure helper for resolving and transitioning Claude OAuth token resolution state.
-enum ClaudeOAuthTokenCore {
-    /// Bounded cooldown period after receiving an HTTP 401/403 authentication error,
-    /// aligned with the 10-minute Claude OAuth shared freshness cadence.
-    static let authenticationFailureCooldown: TimeInterval = 600
-
-    enum KeychainReadResult: Equatable {
-        case token(String)
-        case notFound
-        case unreadable
-    }
-
-    /// Resolves the initial token resolution from a Keychain lookup result and
-    /// an optional file token fallback.
-    static func resolveInitialToken(
-        keychainResult: KeychainReadResult,
-        fileToken: String?
-    ) -> ClaudeOAuthTokenResolution {
-        switch keychainResult {
-        case .token(let token):
-            return .token(token)
-        case .unreadable:
-            if let fileToken, !fileToken.isEmpty {
-                return .token(fileToken)
-            }
-            return .keychainUnreadable
-        case .notFound:
-            if let fileToken, !fileToken.isEmpty {
-                return .token(fileToken)
-            }
-            return .noCredential
-        }
-    }
-
-    /// Determines the next cached token resolution state given an HTTP status code.
-    /// When receiving HTTP 401 or 403, authentication enters a cooldown until `now + cooldown`
-    /// so the Keychain item is not re-read and network requests are not repeated during that window.
-    /// Non-authentication status codes preserve the existing resolution state.
-    static func transition(
-        onHTTPStatus status: Int,
-        currentState: ClaudeOAuthTokenResolution?,
-        now: Date = Date(),
-        cooldown: TimeInterval = authenticationFailureCooldown
-    ) -> ClaudeOAuthTokenResolution? {
-        if status == 401 || status == 403 {
-            return .authenticationFailed(retryAt: now.addingTimeInterval(cooldown))
-        }
-        return currentState
-    }
-
-    /// Resolves the token for a fetch request:
-    /// - If a cached token or missing/unreadable credential state exists, it is returned directly
-    ///   without performing any Keychain or file reads.
-    /// - If an authentication failure cooldown is active (`now < retryAt`), the failure state is
-    ///   returned without reading Keychain or files.
-    /// - If no cached state exists or the authentication cooldown has expired (`now >= retryAt`),
-    ///   the initial resolution provider is invoked.
-    static func resolveToken(
-        cachedState: ClaudeOAuthTokenResolution?,
-        now: Date = Date(),
-        resolveInitial: () -> ClaudeOAuthTokenResolution
-    ) -> (resolved: ClaudeOAuthTokenResolution, newCachedState: ClaudeOAuthTokenResolution) {
-        switch cachedState {
-        case .token(let token):
-            return (.token(token), .token(token))
-        case .keychainUnreadable:
-            return (.keychainUnreadable, .keychainUnreadable)
-        case .noCredential:
-            return (.noCredential, .noCredential)
-        case .authenticationFailed(let retryAt):
-            if now < retryAt {
-                return (.authenticationFailed(retryAt: retryAt), .authenticationFailed(retryAt: retryAt))
-            }
-            let initial = resolveInitial()
-            return (initial, initial)
-        case nil:
-            let initial = resolveInitial()
-            return (initial, initial)
-        }
-    }
-}
-
-enum ClaudeAuthenticationOutcome: Equatable {
-    case success
-    case commandNotFound
-    case timedOut
-    case failed
-}
-
-/// Asks the official Claude CLI to exercise its own authenticated session so
-/// Claude Code, rather than CCMB, owns access-token refresh and Keychain
-/// updates. The command runs without a TTY, tools, project customizations, or
-/// session persistence and never invokes an auth/login command. If the Claude
-/// session has actually been revoked, it simply fails and CCMB keeps the last
-/// known usage snapshot.
-enum ClaudeAuthenticationClient {
-    private static let refreshTimeoutSeconds: TimeInterval = 30
-
-    static let refreshArguments = [
-        "-p",
-        "--safe-mode",
-        "--no-session-persistence",
-        "--tools", "",
-        "--model", "haiku",
-        "--max-turns", "1",
-        "Reply only OK."
-    ]
-
-    static func refreshCredential(completion: @escaping (ClaudeAuthenticationOutcome) -> Void) {
-        DispatchQueue.global(qos: .utility).async {
-            guard let executableURL = claudeExecutableURL() else {
-                completion(.commandNotFound)
-                return
-            }
-
-            let process = Process()
-            process.executableURL = executableURL
-            process.arguments = refreshArguments
-            process.standardInput = FileHandle.nullDevice
-            let outputPipe = Pipe()
-            let errorPipe = Pipe()
-            process.standardOutput = outputPipe
-            process.standardError = errorPipe
-            outputPipe.fileHandleForReading.readabilityHandler = { handle in
-                if handle.availableData.isEmpty { handle.readabilityHandler = nil }
-            }
-            errorPipe.fileHandleForReading.readabilityHandler = { handle in
-                if handle.availableData.isEmpty { handle.readabilityHandler = nil }
-            }
-
-            let exited = DispatchSemaphore(value: 0)
-            process.terminationHandler = { _ in exited.signal() }
-            do {
-                try process.run()
-            } catch {
-                outputPipe.fileHandleForReading.readabilityHandler = nil
-                errorPipe.fileHandleForReading.readabilityHandler = nil
-                completion(.commandNotFound)
-                return
-            }
-
-            let timedOut = exited.wait(timeout: .now() + refreshTimeoutSeconds) == .timedOut
-            if timedOut {
-                process.terminate()
-                if exited.wait(timeout: .now() + 2) == .timedOut {
-                    kill(process.processIdentifier, SIGKILL)
-                    _ = exited.wait(timeout: .now() + 2)
-                }
-            }
-            process.waitUntilExit()
-            outputPipe.fileHandleForReading.readabilityHandler = nil
-            errorPipe.fileHandleForReading.readabilityHandler = nil
-
-            if timedOut {
-                completion(.timedOut)
-            } else {
-                completion(process.terminationStatus == 0 ? .success : .failed)
-            }
-        }
-    }
-
-    private static func claudeExecutableURL() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        var candidates = [
-            home.appendingPathComponent(".local/bin/claude"),
-            home.appendingPathComponent(".claude/local/claude"),
-            URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
-            URL(fileURLWithPath: "/usr/local/bin/claude")
-        ]
-        candidates.append(contentsOf: (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":")
-            .map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude") })
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
-    }
-}
-
 /// Fetches Claude account rate-limit usage directly from Anthropic's
-/// undocumented OAuth usage endpoint, using the long-lived token from
-/// `claude setup-token` already stored locally. This endpoint is not
+/// undocumented OAuth usage endpoint, using CCMB's own browser-authorized
+/// OAuth account and automatically refreshed access token. This endpoint is not
 /// officially documented for third-party use and may change or stop
 /// working without notice — the caller receives a `ClaudeUsageFetchOutcome`
 /// so it can fall back to the passive statusLine cache (`ClaudeUsageStore`)
@@ -3165,12 +2964,6 @@ enum ClaudeOAuthUsageClient {
     private static let lastFetchDefaultsKey = "claudeUsageLastFetchAt"
     private static let rateLimitRetryDefaultsKey = "claudeUsageRateLimitRetryAt"
     private static let consecutiveRateLimitsDefaultsKey = "claudeUsageConsecutiveRateLimits"
-    private static let tokenURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library")
-        .appendingPathComponent("Application Support")
-        .appendingPathComponent("CCMB")
-        .appendingPathComponent("claude-oauth-token")
-
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let profileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
 
@@ -3179,11 +2972,6 @@ enum ClaudeOAuthUsageClient {
     /// regardless of how many usage fetches succeed afterward.
     @MainActor private static var attemptedProfileTokens = Set<String>()
     @MainActor private static var latestAccountInfo: ClaudeAccountInfo?
-    /// Process-local cached token resolution. After the initial read, tokens and
-    /// unreadable/missing states are latched. HTTP 401/403 authentication failures enter a
-    /// 10-minute cooldown, after which a non-interactive Keychain/file read is retried.
-    @MainActor private static var cachedTokenResolution: ClaudeOAuthTokenResolution?
-
     // Mutated both when a fetch is kicked off (main actor caller) and when the
     // background URLSession completion handler finishes; isolate to the main
     // actor and hop back onto it in the completion handler instead of touching
@@ -3221,16 +3009,26 @@ enum ClaudeOAuthUsageClient {
             return
         }
 
-        switch resolveToken(now: now) {
-        case .token(let token):
-            performFetch(token: token, completion: completion)
-        case .keychainUnreadable:
-            completion(.keychainCredentialUnreadable)
-        case .noCredential:
-            completion(.noCredential)
-        case .authenticationFailed:
-            completion(.authenticationRecoveryFailed)
+        ClaudeOAuthAccountClient.accessToken { result in
+            switch result {
+            case .success(let token):
+                performFetch(token: token, completion: completion)
+            case .failure(let error as ClaudeOAuthAccountError) where error.isNoCredential:
+                completion(.noCredential)
+            case .failure:
+                completion(.authenticationRecoveryFailed)
+            }
         }
+    }
+
+    @MainActor
+    static func resetAfterAccountConnection() {
+        lastFetchDate = nil
+        rateLimitRetryAt = nil
+        consecutiveRateLimits = 0
+        UserDefaults.standard.removeObject(forKey: lastFetchDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: rateLimitRetryDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: consecutiveRateLimitsDefaultsKey)
     }
 
     @MainActor
@@ -3256,9 +3054,7 @@ enum ClaudeOAuthUsageClient {
         URLSession.shared.dataTask(with: request) { data, response, _ in
             let now = Date()
             let outcome: ClaudeUsageFetchOutcome
-            let statusCode: Int?
             if let http = response as? HTTPURLResponse {
-                statusCode = http.statusCode
                 if http.statusCode == 200 {
                     if let data, let snapshot = parse(data) {
                         outcome = .success(snapshot)
@@ -3278,19 +3074,10 @@ enum ClaudeOAuthUsageClient {
                     outcome = .httpFailure(status: http.statusCode)
                 }
             } else {
-                statusCode = nil
                 outcome = .transportFailure
             }
             DispatchQueue.main.async { @MainActor in
                 isFetchInFlight = false
-                if let statusCode,
-                   !(allowAuthenticationRecovery && (statusCode == 401 || statusCode == 403)) {
-                    cachedTokenResolution = ClaudeOAuthTokenCore.transition(
-                        onHTTPStatus: statusCode,
-                        currentState: cachedTokenResolution,
-                        now: now
-                    )
-                }
                 switch outcome {
                 case .success(let snapshot):
                     rateLimitRetryAt = nil
@@ -3301,38 +3088,22 @@ enum ClaudeOAuthUsageClient {
                         completion(.success(accountInfo.map(snapshot.withAccount) ?? snapshot))
                     }
                 case .authenticationRecoveryFailed where allowAuthenticationRecovery:
-                    // Let the official CLI refresh its own rotating credential.
-                    // CCMB never reads or writes the refresh token and never
-                    // launches an interactive login flow.
+                    // Discard only the short-lived access token. The CCMB-owned
+                    // refresh token remains in Keychain and obtains a new access
+                    // token before the one permitted retry.
                     isFetchInFlight = true
-                    ClaudeAuthenticationClient.refreshCredential { authenticationOutcome in
-                        DispatchQueue.main.async { @MainActor in
-                            isFetchInFlight = false
-                            guard authenticationOutcome == .success else {
-                                cachedTokenResolution = ClaudeOAuthTokenCore.transition(
-                                    onHTTPStatus: statusCode ?? 401,
-                                    currentState: cachedTokenResolution,
-                                    now: Date()
-                                )
-                                completion(.authenticationRecoveryFailed)
-                                return
-                            }
-
-                            cachedTokenResolution = nil
-                            guard case .token(let refreshedToken) = resolveToken() else {
-                                cachedTokenResolution = ClaudeOAuthTokenCore.transition(
-                                    onHTTPStatus: statusCode ?? 401,
-                                    currentState: cachedTokenResolution,
-                                    now: Date()
-                                )
-                                completion(.authenticationRecoveryFailed)
-                                return
-                            }
+                    ClaudeOAuthAccountClient.clearCachedAccessToken()
+                    ClaudeOAuthAccountClient.accessToken { result in
+                        isFetchInFlight = false
+                        switch result {
+                        case .success(let refreshedToken):
                             performFetch(
                                 token: refreshedToken,
                                 allowAuthenticationRecovery: false,
                                 completion: completion
                             )
+                        case .failure:
+                            completion(.authenticationRecoveryFailed)
                         }
                     }
                 case .rateLimited(let retryAt):
@@ -3340,9 +3111,6 @@ enum ClaudeOAuthUsageClient {
                     UserDefaults.standard.set(retryAt, forKey: rateLimitRetryDefaultsKey)
                     consecutiveRateLimits = nextRateLimitCount
                     UserDefaults.standard.set(nextRateLimitCount, forKey: consecutiveRateLimitsDefaultsKey)
-                    // A rate-limit response does not invalidate the token.
-                    // Keep it cached so the half-open probe cannot trigger
-                    // another Keychain authorization prompt.
                     completion(outcome)
                 default:
                     completion(outcome)
@@ -3410,92 +3178,6 @@ enum ClaudeOAuthUsageClient {
         let organizationUUID = response.organization?.uuid
         guard email != nil || organizationName != nil || organizationUUID != nil else { return nil }
         return ClaudeAccountInfo(email: email, organizationName: organizationName, organizationUUID: organizationUUID)
-    }
-
-    private enum KeychainCredentialDataResult {
-        case success(Data)
-        case failure(OSStatus)
-    }
-
-    /// The interactive `claude` CLI session's own OAuth token, stored by Claude
-    /// Code in the login keychain. Unlike the `claude setup-token` file token,
-    /// this one carries `user:profile` scope, which this usage endpoint
-    /// requires. The caller keeps a successful read in process memory and
-    /// latches failures across the process lifetime, avoiding recurring
-    /// Keychain authorization prompts.
-    static func keychainTokenQuery() -> [String: Any] {
-        let authenticationContext = LAContext()
-        authenticationContext.interactionNotAllowed = true
-        return [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            // Usage refresh runs without an explicit credential action from
-            // the user. The installed app still presented the legacy
-            // Keychain access-control dialog with `...UISkip`; `...UIFail` is
-            // the value explicitly documented to fail immediately
-            // (`errSecInteractionNotAllowed`) instead of ever presenting a
-            // password or "Always Allow/Deny" prompt.
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
-            kSecUseAuthenticationContext as String: authenticationContext
-        ]
-    }
-
-    private static func readKeychainCredentialData() -> KeychainCredentialDataResult {
-        let query = keychainTokenQuery()
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else {
-            return .failure(status == errSecSuccess ? errSecDecode : status)
-        }
-        return .success(data)
-    }
-
-    private static func readKeychainToken() -> ClaudeOAuthTokenCore.KeychainReadResult {
-        let data: Data
-        switch readKeychainCredentialData() {
-        case .success(let credentialData):
-            data = credentialData
-        case .failure(let status):
-            return status == errSecItemNotFound ? .notFound : .unreadable
-        }
-        guard
-              let credentials = try? JSONDecoder().decode(StoredCredentials.self, from: data)
-        else { return .unreadable }
-        return .token(credentials.claudeAiOauth.accessToken)
-    }
-
-    private struct StoredCredentials: Decodable {
-        struct OAuth: Decodable {
-            let accessToken: String
-        }
-        let claudeAiOauth: OAuth
-    }
-
-    private static func readFileToken() -> String? {
-        guard let data = try? Data(contentsOf: tokenURL) else { return nil }
-        let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (token?.isEmpty ?? true) ? nil : token
-    }
-
-    /// Tries the keychain first, then falls back to the `claude setup-token`
-    /// file — preserving both existing credential sources. A keychain item
-    /// that exists but can't be decoded is only reported as `keychainUnreadable`
-    /// if the file fallback also has no usable token.
-    @MainActor
-    private static func resolveToken(now: Date = Date()) -> ClaudeOAuthTokenResolution {
-        let (resolved, newCached) = ClaudeOAuthTokenCore.resolveToken(
-            cachedState: cachedTokenResolution,
-            now: now
-        ) {
-            ClaudeOAuthTokenCore.resolveInitialToken(
-                keychainResult: readKeychainToken(),
-                fileToken: readFileToken()
-            )
-        }
-        cachedTokenResolution = newCached
-        return resolved
     }
 
     private struct UsageWindow: Decodable {

@@ -1197,23 +1197,37 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         updaterDelegate: nil,
         userDriverDelegate: nil
     )
-    private lazy var updateDownloadPreference = UpdateDownloadPreference(
-        read: { [unowned self] in self.updaterController.updater.automaticallyDownloadsUpdates },
-        write: { [unowned self] enabled in
-            self.updaterController.updater.automaticallyDownloadsUpdates = enabled
-        }
-    )
     private var countdownTimer: DispatchSourceTimer?
     private var autoRefreshTimer: DispatchSourceTimer?
-    private var refreshInterval: TimeInterval = AppDelegate.savedRefreshInterval()
-    private var claudeRefreshInterval: TimeInterval = AppDelegate.savedClaudeRefreshInterval()
-    private var geminiRefreshInterval: TimeInterval = AppDelegate.savedGeminiRefreshInterval()
+    private var refreshIntervalPreference = Int(AppDelegate.savedRefreshInterval())
+    private var claudeRefreshIntervalPreference = Int(AppDelegate.savedClaudeRefreshInterval())
+    private var geminiRefreshIntervalPreference = Int(AppDelegate.savedGeminiRefreshInterval())
+    private var codexSmartRefreshPolicy = SmartRefreshPolicy()
+    private var claudeSmartRefreshPolicy = SmartRefreshPolicy()
+    private var geminiSmartRefreshPolicy = SmartRefreshPolicy()
+    private var refreshInterval: TimeInterval {
+        refreshIntervalPreference == UsageCore.smartRefreshPreference
+            ? codexSmartRefreshPolicy.interval
+            : TimeInterval(refreshIntervalPreference)
+    }
+    private var claudeRefreshInterval: TimeInterval {
+        claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference
+            ? claudeSmartRefreshPolicy.interval
+            : TimeInterval(claudeRefreshIntervalPreference)
+    }
+    private var geminiRefreshInterval: TimeInterval {
+        geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference
+            ? geminiSmartRefreshPolicy.interval
+            : TimeInterval(geminiRefreshIntervalPreference)
+    }
     private var grokRefreshInterval: TimeInterval = AppDelegate.savedGrokRefreshInterval()
     private var nextAutoRefreshAt = Date()
     private var nextCodexRefreshAt = Date()
     private var nextClaudeRefreshAt = Date()
     private var nextGeminiRefreshAt = Date()
     private var nextGrokRefreshAt = Date()
+    private var resetVerificationDates: [SmartProvider: Date] = [:]
+    private var resetVerificationWorkItems: [SmartProvider: [DispatchWorkItem]] = [:]
     private var activity: NSObjectProtocol?
     private var instanceLockFileDescriptor: Int32 = -1
 
@@ -1230,7 +1244,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// that wake-up never turns into an early request for another provider.
     private lazy var refreshIntervalItems: [NSMenuItem] = UsageCore.refreshIntervalOptions.map { seconds in
         let item = NSMenuItem(
-            title: seconds == 0 ? "끔" : Self.durationTitle(seconds: seconds),
+            title: Self.refreshPreferenceTitle(seconds),
             action: #selector(AppDelegate.setCodexRefreshInterval(_:)),
             keyEquivalent: ""
         )
@@ -1239,7 +1253,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
     private lazy var claudeRefreshIntervalItems: [NSMenuItem] = UsageCore.claudeRefreshIntervalOptions.map { seconds in
         let item = NSMenuItem(
-            title: seconds == 0 ? "끔" : Self.durationTitle(seconds: seconds),
+            title: Self.refreshPreferenceTitle(seconds),
             action: #selector(AppDelegate.setClaudeRefreshInterval(_:)),
             keyEquivalent: ""
         )
@@ -1248,7 +1262,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
     private lazy var geminiRefreshIntervalItems: [NSMenuItem] = UsageCore.geminiRefreshIntervalOptions.map { seconds in
         let item = NSMenuItem(
-            title: seconds == 0 ? "끔" : Self.durationTitle(seconds: seconds),
+            title: Self.refreshPreferenceTitle(seconds),
             action: #selector(AppDelegate.setGeminiRefreshInterval(_:)),
             keyEquivalent: ""
         )
@@ -1357,11 +1371,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
         controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
         controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
+        controller.onClaudeUsageAction = { [weak self] in self?.performClaudeUsageAction() }
         controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
         controller.setShareMenu(makeShareMenu())
         controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
-        controller.onAutomaticDownloadsChange = { [weak self] in self?.setAutomaticDownloadsEnabled($0) }
-        controller.setAutomaticDownloadsEnabled(updateDownloadPreference.isEnabled)
         controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
         controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
         controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
@@ -1377,11 +1390,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastSnapshot: RateLimitSnapshot?
     private var lastClaudeSnapshot: ClaudeUsageSnapshot?
     private var lastClaudeFetchFailureLabel: String?
+    private var claudeNeedsReconnect = false
     /// Set only while a 429 backoff is active; drives a live "N초 후 재시도"
     /// countdown in the panel instead of a static label frozen at fetch time.
     private var lastClaudeRateLimitRetryAt: Date?
     private var lastGeminiSnapshot: GeminiUsageSnapshot?
     private var lastGeminiFetchFailureLabel: String?
+    private var lastManualRefreshAt: Date?
     private var lastGrokSnapshot: GrokUsageSnapshot?
     private var lastGrokFetchFailureLabel: String?
     private var grokLoginRequired = false
@@ -1401,30 +1416,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
     }
 
-    @objc private func toggleAutomaticDownloads(_ sender: NSButton) {
-        setAutomaticDownloadsEnabled(sender.state == .on)
-    }
-
-    private func setAutomaticDownloadsEnabled(_ enabled: Bool) {
-        updateDownloadPreference.setEnabled(enabled)
-        let effectiveValue = updateDownloadPreference.isEnabled
-        updateVersionView.setAutomaticDownloadsEnabled(effectiveValue)
-        statusDropdownController.setAutomaticDownloadsEnabled(effectiveValue)
-        pinnedUsageWindowController?.setAutomaticDownloadsEnabled(effectiveValue)
-        appLog("update automatic downloads: \(updateDownloadPreference.statusText)")
-    }
     deinit {
         writePrivateLog("app delegate deinit")
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         appLog("delegate did finish launching")
+        updaterController.updater.automaticallyDownloadsUpdates = true
         diagnosticLog.log("app_launch", ["version": .string(appVersion)])
         NSApp.setActivationPolicy(.accessory)
         guard acquireSingleInstanceLock() else {
             NSApp.terminate(nil)
             return
         }
+        migrateVisibleProvidersToSmartRefreshIfNeeded()
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
             reason: "Keep Codex, Claude, Gemini, and Grok usage auto-refresh running"
@@ -1448,6 +1453,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         refreshClaudeUsage()
         refreshGeminiUsage()
         refreshGrokUsage()
+        if UserDefaults.standard.bool(forKey: "claudeOAuthConnectOnLaunch") {
+            UserDefaults.standard.removeObject(forKey: "claudeOAuthConnectOnLaunch")
+            DispatchQueue.main.async { [weak self] in self?.beginClaudeOAuthLogin() }
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -1457,6 +1466,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     func applicationWillTerminate(_ notification: Notification) {
         diagnosticLog.log("app_terminate")
         countdownTimer?.cancel()
+        resetVerificationWorkItems.values.flatMap { $0 }.forEach { $0.cancel() }
         networkMonitor.cancel()
         stopAutoRefreshLoop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -1700,6 +1710,72 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         nextAutoRefreshAt = [nextCodexRefreshAt, nextClaudeRefreshAt, nextGeminiRefreshAt, nextGrokRefreshAt].min() ?? .distantFuture
     }
 
+    private enum SmartProvider: String, Hashable {
+        case codex, claude, gemini
+    }
+
+    private func smartCadenceDidChange(for provider: SmartProvider) {
+        let now = Date()
+        let interval: TimeInterval
+        switch provider {
+        case .codex:
+            interval = refreshInterval
+            nextCodexRefreshAt = now.addingTimeInterval(interval)
+            client.setAutoRefreshInterval(interval)
+        case .claude:
+            interval = claudeRefreshInterval
+            nextClaudeRefreshAt = now.addingTimeInterval(interval)
+        case .gemini:
+            interval = geminiRefreshInterval
+            nextGeminiRefreshAt = now.addingTimeInterval(interval)
+        }
+        updateNextAutoRefreshAt()
+        scheduleNextAutoRefresh()
+        updateRefreshIntervalMenu()
+        updateCountdown()
+        diagnosticLog.log("smart_refresh_mode_changed", [
+            "provider": .string(provider.rawValue),
+            "intervalSeconds": .int(Int(interval))
+        ])
+    }
+
+    /// Runs targeted reads just after a quota reset, when an adaptive timer
+    /// could otherwise leave the old percentage visible for several minutes.
+    private func scheduleResetVerification(for provider: SmartProvider, candidates: [Date?]) {
+        let now = Date()
+        let graceStart = now.addingTimeInterval(-35)
+        guard let resetDate = candidates.compactMap({ $0 }).filter({ $0 > graceStart }).min() else {
+            resetVerificationWorkItems.removeValue(forKey: provider)?.forEach { $0.cancel() }
+            resetVerificationDates.removeValue(forKey: provider)
+            return
+        }
+        // Preserve the +10s/+30s probes if +1s still returns the old reset
+        // date while the provider is updating its usage data.
+        if resetVerificationDates[provider] == resetDate { return }
+
+        resetVerificationWorkItems.removeValue(forKey: provider)?.forEach { $0.cancel() }
+        resetVerificationDates[provider] = resetDate
+        let workItems = [1.0, 10.0, 30.0].compactMap { offset -> DispatchWorkItem? in
+            let delay = resetDate.addingTimeInterval(offset).timeIntervalSince(now)
+            guard delay > 0 else { return nil }
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.resetVerificationDates[provider] == resetDate else { return }
+                self.diagnosticLog.log("reset_verification", [
+                    "provider": .string(provider.rawValue),
+                    "offsetSeconds": .int(Int(offset))
+                ])
+                switch provider {
+                case .codex: self.client.refreshRateLimits()
+                case .claude: self.refreshClaudeUsage(force: true)
+                case .gemini: self.refreshGeminiUsage(force: true)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            return item
+        }
+        resetVerificationWorkItems[provider] = workItems
+    }
+
     private func updateCountdown() {
         updateShareStatus()
         let remaining: (Date, TimeInterval) -> Int? = { deadline, interval in
@@ -1743,29 +1819,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func updateRefreshIntervalMenu() {
         for item in refreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
-            item.state = Int(refreshInterval) == seconds ? .on : .off
+            item.state = refreshIntervalPreference == seconds ? .on : .off
             setDetailTitle(item.title, for: item)
         }
         for item in claudeRefreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
-            item.state = Int(claudeRefreshInterval) == seconds ? .on : .off
+            item.state = claudeRefreshIntervalPreference == seconds ? .on : .off
         }
         for item in geminiRefreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
-            item.state = Int(geminiRefreshInterval) == seconds ? .on : .off
+            item.state = geminiRefreshIntervalPreference == seconds ? .on : .off
         }
         for item in grokRefreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
             item.state = Int(grokRefreshInterval) == seconds ? .on : .off
         }
-        codexIntervalItem.title = "Codex · \(Self.intervalTitle(refreshInterval))"
-        claudeIntervalItem.title = "Claude · \(Self.intervalTitle(claudeRefreshInterval))"
-        geminiIntervalItem.title = "Gemini · \(Self.intervalTitle(geminiRefreshInterval))"
+        codexIntervalItem.title = "Codex · \(refreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(refreshInterval)))" : Self.intervalTitle(refreshInterval))"
+        claudeIntervalItem.title = "Claude · \(claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(claudeRefreshInterval)))" : Self.intervalTitle(claudeRefreshInterval))"
+        geminiIntervalItem.title = "Gemini · \(geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(geminiRefreshInterval)))" : Self.intervalTitle(geminiRefreshInterval))"
         grokIntervalItem.title = "Grok · \(Self.intervalTitle(grokRefreshInterval))"
         menuRefreshControlsView.apply(
-            codex: Int(refreshInterval),
-            claude: Int(claudeRefreshInterval),
-            gemini: Int(geminiRefreshInterval),
+            codex: refreshIntervalPreference,
+            claude: claudeRefreshIntervalPreference,
+            gemini: geminiRefreshIntervalPreference,
             grok: Int(grokRefreshInterval)
         )
         setDetailTitle("자동 새로 고침 · 앱별 설정", for: intervalItem)
@@ -1855,7 +1931,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         usagePageLinksView.codexButton.target = self
         usagePageLinksView.codexButton.action = #selector(openDashboard)
         usagePageLinksView.claudeButton.target = self
-        usagePageLinksView.claudeButton.action = #selector(openClaudeDashboard)
+        usagePageLinksView.claudeButton.action = #selector(performClaudeUsageAction)
         usagePageLinksView.geminiButton.target = self
         usagePageLinksView.geminiButton.action = #selector(openGeminiDashboard)
         usagePageLinksView.grokButton.target = self
@@ -1903,9 +1979,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(.separator())
         updateVersionView.updateButton.target = updaterController
         updateVersionView.updateButton.action = #selector(SPUStandardUpdaterController.checkForUpdates(_:))
-        updateVersionView.automaticDownloadsButton.target = self
-        updateVersionView.automaticDownloadsButton.action = #selector(toggleAutomaticDownloads(_:))
-        updateVersionView.setAutomaticDownloadsEnabled(updateDownloadPreference.isEnabled)
         updateVersionView.opacitySlider.target = self
         updateVersionView.opacitySlider.action = #selector(changePanelOpacity(_:))
         updateVersionView.setOpacity(panelOpacity)
@@ -2094,6 +2167,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func apply(_ snapshot: RateLimitSnapshot) {
+        if refreshIntervalPreference == UsageCore.smartRefreshPreference,
+           codexSmartRefreshPolicy.update(values: [
+               snapshot.usedPercent,
+               snapshot.sparkUsedPercent,
+               snapshot.creditBalance
+           ]) {
+            smartCadenceDidChange(for: .codex)
+        }
+        scheduleResetVerification(
+            for: .codex,
+            candidates: [snapshot.resetsAt, snapshot.sparkResetsAt]
+        )
         lastSnapshot = snapshot
         recordCodexConsumption(from: snapshot)
         refreshStatusTitle()
@@ -2179,7 +2264,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
-    private func refreshClaudeUsage() {
+    private func refreshClaudeUsage(force: Bool = false) {
         lastClaudeSnapshot = ClaudeUsageCore.mergingCacheSnapshot(
             current: lastClaudeSnapshot,
             cache: SharedUsageStore.readClaudeSnapshot()
@@ -2195,28 +2280,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         refreshStatusTitle()
         updateSplitPanel()
 
-        // A complete, recent statusLine observation came from Claude Code's
-        // own response path. Prefer it over an extra request to the
-        // undocumented OAuth endpoint.
-        if let snapshot = lastClaudeSnapshot,
-           snapshot.quotaSource == "claude-statusline",
-           snapshot.hasRateLimitUsage,
-           ClaudeUsageCore.isFresh(
-               publishedAt: snapshot.publishedAt,
-               now: Date(),
-               freshForSeconds: ClaudeUsageCore.statusLineFreshForSeconds
-           ) {
-            return
-        }
-
-        let claudeFetchInterval = max(claudeRefreshInterval, ClaudeUsageCore.minimumRequestIntervalSeconds)
+        // Claude's OAuth response is the canonical live value. Passive
+        // statusLine data remains a restart/failure fallback but never skips
+        // a due OAuth read, avoiding two sources drifting on screen.
+        let claudeFetchInterval = force ? 0 : max(claudeRefreshInterval, ClaudeUsageCore.minimumRequestIntervalSeconds)
         ClaudeOAuthUsageClient.fetchIfDue(minimumInterval: claudeFetchInterval) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case .success(let snapshot):
                 self.lastClaudeSnapshot = ClaudeUsageCore.merge(preferred: snapshot, fallback: self.lastClaudeSnapshot)
+                if self.claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+                   self.claudeSmartRefreshPolicy.update(values: [
+                       snapshot.fiveHourUsedPercent,
+                       snapshot.weeklyUsedPercent,
+                       ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
+                   ]) {
+                    self.smartCadenceDidChange(for: .claude)
+                }
                 self.recordClaudeConsumption()
+                self.scheduleResetVerification(
+                    for: .claude,
+                    candidates: [snapshot.fiveHourResetsAt, snapshot.weeklyResetsAt]
+                        + snapshot.modelWeeklyLimits.map(\.resetsAt)
+                )
                 self.lastClaudeFetchFailureLabel = nil
+                self.claudeNeedsReconnect = false
                 self.lastClaudeRateLimitRetryAt = nil
             case .skippedInFlight:
                 break
@@ -2233,8 +2321,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 if let diagnostic = outcome.diagnosticDescription {
                     self.appLog("claude usage fetch failed: \(diagnostic)")
                 }
-            case .noCredential, .keychainCredentialUnreadable, .authenticationRecoveryFailed,
-                 .httpFailure, .transportFailure, .decodeFailure:
+            case .noCredential, .authenticationRecoveryFailed:
+                self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
+                self.claudeNeedsReconnect = true
+                self.lastClaudeRateLimitRetryAt = nil
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("claude usage fetch failed: \(diagnostic)")
+                }
+            case .httpFailure, .transportFailure, .decodeFailure:
                 self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
                 self.lastClaudeRateLimitRetryAt = nil
                 if let diagnostic = outcome.diagnosticDescription {
@@ -2254,7 +2348,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// minutes ago), then asks `agy` for a fresh read on the same throttled
     /// cadence Claude uses. Each call to `agy` spawns a subprocess, so this
     /// is deliberately more conservative than Claude's HTTP floor.
-    private func refreshGeminiUsage() {
+    private func refreshGeminiUsage(force: Bool = false) {
         if lastGeminiSnapshot == nil, let cached = SharedUsageStore.readGeminiSnapshot() {
             lastGeminiSnapshot = cached
             recordGeminiConsumption()
@@ -2262,13 +2356,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             updateSplitPanel()
         }
 
-        let minimumInterval = max(geminiRefreshInterval, GeminiUsageCore.minimumRequestIntervalSeconds)
+        let minimumInterval = force ? 0 : max(geminiRefreshInterval, GeminiUsageCore.minimumRequestIntervalSeconds)
         GeminiUsageClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case .success(let snapshot):
                 self.lastGeminiSnapshot = snapshot
+                if self.geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+                   self.geminiSmartRefreshPolicy.update(values: [
+                       snapshot.fiveHourRemainingFraction,
+                       snapshot.weeklyRemainingFraction,
+                       snapshot.creditBalance.map(Double.init)
+                   ]) {
+                    self.smartCadenceDidChange(for: .gemini)
+                }
                 self.recordGeminiConsumption()
+                self.scheduleResetVerification(
+                    for: .gemini,
+                    candidates: [snapshot.fiveHourResetsAt, snapshot.weeklyResetsAt]
+                )
                 self.lastGeminiFetchFailureLabel = nil
             case .skippedInFlight, .skippedThrottled:
                 break
@@ -2804,7 +2910,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             } else if let failureLabel {
                 statusLines.append("갱신 실패: \(failureLabel)")
             }
-            statusLines.append("터미널에서 Claude Code 실행 시 자동으로 채워집니다")
+            statusLines.append("아래 Claude 버튼을 눌러 계정을 연결하세요")
             return UsagePanelColumn(
                 title: "Claude",
                 accentColor: accent,
@@ -2815,6 +2921,42 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 refreshLine: nil,
                 statusLines: statusLines,
                 statusColor: rateLimitLabel != nil ? .systemOrange : (failureLabel == nil ? .secondaryLabelColor : .systemRed)
+            )
+        }
+
+        let freshnessWindow = snapshot.quotaSource == "claude-statusline"
+            ? ClaudeUsageCore.statusLineFreshForSeconds
+            : ClaudeUsageCore.sharedFreshForSeconds
+        let isCurrent = ClaudeUsageCore.isFresh(
+            publishedAt: snapshot.publishedAt,
+            now: Date(),
+            freshForSeconds: freshnessWindow
+        ) && failureLabel == nil
+        if !isCurrent {
+            let refreshLine = snapshot.publishedAt.map {
+                "마지막 확인 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
+            }
+            var statusLines: [String] = []
+            if let rateLimitLabel {
+                statusLines.append(rateLimitLabel)
+            } else if let failureLabel {
+                statusLines.append("갱신 실패: \(failureLabel)")
+            } else {
+                statusLines.append("오래된 사용량 숫자를 숨겼습니다")
+            }
+            if !ClaudeOAuthCredentialStore.hasCredential {
+                statusLines.append("아래 Claude 버튼을 눌러 계정을 연결하세요")
+            }
+            return UsagePanelColumn(
+                title: "Claude",
+                accentColor: accent,
+                quota: nil,
+                secondaryQuota: nil,
+                rows: [UsagePanelRow(label: "Claude", value: "최신 정보 없음")],
+                accountLines: snapshot.account?.email.map { ["계정 \($0)"] } ?? ["계정 정보 없음"],
+                refreshLine: refreshLine,
+                statusLines: statusLines,
+                statusColor: rateLimitLabel != nil ? .systemOrange : .systemRed
             )
         }
 
@@ -3363,6 +3505,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             showOfflineStatus()
             return
         }
+        let now = Date()
+        if let lastManualRefreshAt, now.timeIntervalSince(lastManualRefreshAt) < 10 {
+            setDetailTitle("잠시 후 다시 새로고침해 주세요", for: updatedItem)
+            return
+        }
+        lastManualRefreshAt = now
 
         restartAutoRefreshTimer()
         resetCountdown()
@@ -3370,8 +3518,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         setDetailTitle("수동 가져오기 중...", for: updatedItem)
         statusItem.button?.setAccessibilityValue("사용량 새로 고침 중")
         client.refreshRateLimits()
-        refreshClaudeUsage()
-        refreshGeminiUsage()
+        refreshClaudeUsage(force: true)
+        refreshGeminiUsage(force: true)
         refreshGrokUsage()
     }
 
@@ -3381,7 +3529,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func applyCodexRefreshInterval(_ seconds: Int) {
-        refreshInterval = TimeInterval(seconds)
+        refreshIntervalPreference = seconds
+        if seconds == UsageCore.smartRefreshPreference { codexSmartRefreshPolicy.reset() }
         UserDefaults.standard.set(seconds, forKey: Self.refreshIntervalDefaultsKey)
         if let lastSnapshot {
             do {
@@ -3403,7 +3552,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         client.setAutoRefreshInterval(refreshInterval)
         restartAutoRefreshTimer()
         if refreshInterval > 0 {
-            setDetailTitle("Codex 자동 갱신 · \(Self.durationTitle(seconds: seconds))", for: updatedItem)
+            let title = seconds == UsageCore.smartRefreshPreference
+                ? "Codex 스마트 갱신 · 현재 1분"
+                : "Codex 자동 갱신 · \(Self.durationTitle(seconds: seconds))"
+            setDetailTitle(title, for: updatedItem)
             if isOffline {
                 showOfflineStatus()
             } else {
@@ -3415,21 +3567,41 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         updateSplitPanel()
     }
 
+    /// Opts existing installations into smart cadence once. A later explicit
+    /// fixed-interval choice remains untouched because this migration never
+    /// runs again.
+    private func migrateVisibleProvidersToSmartRefreshIfNeeded() {
+        let migrationKey = "visibleProviderSmartRefreshV1Migrated"
+        guard !UserDefaults.standard.bool(forKey: migrationKey) else { return }
+
+        refreshIntervalPreference = UsageCore.smartRefreshPreference
+        claudeRefreshIntervalPreference = UsageCore.smartRefreshPreference
+        geminiRefreshIntervalPreference = UsageCore.smartRefreshPreference
+        codexSmartRefreshPolicy.reset()
+        claudeSmartRefreshPolicy.reset()
+        geminiSmartRefreshPolicy.reset()
+        UserDefaults.standard.set(UsageCore.smartRefreshPreference, forKey: Self.refreshIntervalDefaultsKey)
+        UserDefaults.standard.set(UsageCore.smartRefreshPreference, forKey: Self.claudeRefreshIntervalDefaultsKey)
+        UserDefaults.standard.set(UsageCore.smartRefreshPreference, forKey: Self.geminiRefreshIntervalDefaultsKey)
+        UserDefaults.standard.set(true, forKey: migrationKey)
+    }
+
     @objc private func setClaudeRefreshInterval(_ sender: NSMenuItem) {
         guard let seconds = sender.representedObject as? Int else { return }
         applyClaudeRefreshInterval(seconds)
     }
 
     private func applyClaudeRefreshInterval(_ seconds: Int) {
-        claudeRefreshInterval = TimeInterval(seconds)
+        claudeRefreshIntervalPreference = seconds
+        if seconds == UsageCore.smartRefreshPreference { claudeSmartRefreshPolicy.reset() }
         UserDefaults.standard.set(seconds, forKey: Self.claudeRefreshIntervalDefaultsKey)
         updateRefreshIntervalMenu()
         restartAutoRefreshTimer()
-        setDetailTitle(
-            seconds > 0 ? "Claude 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Claude 자동 갱신 꺼짐",
-            for: updatedItem
-        )
-        if seconds > 0, !isOffline {
+        let title = seconds == UsageCore.smartRefreshPreference
+            ? "Claude 스마트 갱신 · 현재 1분"
+            : (seconds > 0 ? "Claude 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Claude 자동 갱신 꺼짐")
+        setDetailTitle(title, for: updatedItem)
+        if claudeRefreshInterval > 0, !isOffline {
             refreshClaudeUsage()
         }
         updateSplitPanel()
@@ -3441,15 +3613,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func applyGeminiRefreshInterval(_ seconds: Int) {
-        geminiRefreshInterval = TimeInterval(seconds)
+        geminiRefreshIntervalPreference = seconds
+        if seconds == UsageCore.smartRefreshPreference { geminiSmartRefreshPolicy.reset() }
         UserDefaults.standard.set(seconds, forKey: Self.geminiRefreshIntervalDefaultsKey)
         updateRefreshIntervalMenu()
         restartAutoRefreshTimer()
-        setDetailTitle(
-            seconds > 0 ? "Gemini 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Gemini 자동 갱신 꺼짐",
-            for: updatedItem
-        )
-        if seconds > 0, !isOffline {
+        let title = seconds == UsageCore.smartRefreshPreference
+            ? "Gemini 스마트 갱신 · 현재 1분"
+            : (seconds > 0 ? "Gemini 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Gemini 자동 갱신 꺼짐")
+        setDetailTitle(title, for: updatedItem)
+        if geminiRefreshInterval > 0, !isOffline {
             refreshGeminiUsage()
         }
         updateSplitPanel()
@@ -3501,11 +3674,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
             controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
             controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
+            controller.onClaudeUsageAction = { [weak self] in self?.performClaudeUsageAction() }
             controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
             controller.setShareMenu(makeShareMenu())
             controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
-            controller.onAutomaticDownloadsChange = { [weak self] in self?.setAutomaticDownloadsEnabled($0) }
-            controller.setAutomaticDownloadsEnabled(updateDownloadPreference.isEnabled)
             controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
             controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
             controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
@@ -3608,8 +3780,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         NSWorkspace.shared.open(UsageDashboardURLs.codex)
     }
 
-    @objc private func openClaudeDashboard() {
-        NSWorkspace.shared.open(UsageDashboardURLs.claude)
+    @objc private func performClaudeUsageAction() {
+        guard !ClaudeOAuthAccountClient.hasCredential || claudeNeedsReconnect else {
+            NSWorkspace.shared.open(UsageDashboardURLs.claude)
+            return
+        }
+        beginClaudeOAuthLogin()
+    }
+
+    private func beginClaudeOAuthLogin() {
+        lastClaudeFetchFailureLabel = "브라우저에서 Claude 계정 연결 중"
+        updateSplitPanel()
+        ClaudeOAuthAccountClient.startLogin { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                ClaudeOAuthUsageClient.resetAfterAccountConnection()
+                self.lastClaudeFetchFailureLabel = nil
+                self.claudeNeedsReconnect = false
+                self.lastClaudeRateLimitRetryAt = nil
+                self.refreshClaudeUsage()
+            case .failure:
+                self.lastClaudeFetchFailureLabel = "Claude 계정 연결 실패"
+                self.claudeNeedsReconnect = true
+                self.updateSplitPanel()
+            }
+        }
     }
 
     @objc private func openGeminiDashboard() {
@@ -3810,6 +4006,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static func intervalTitle(_ interval: TimeInterval) -> String {
         interval > 0 ? durationTitle(seconds: Int(interval)) : "끔"
+    }
+
+    private static func refreshPreferenceTitle(_ seconds: Int) -> String {
+        if seconds == UsageCore.smartRefreshPreference { return "스마트 (1→3→5→10분)" }
+        return seconds == 0 ? "끔" : durationTitle(seconds: seconds)
     }
 
     private static let timeFormatter: DateFormatter = {

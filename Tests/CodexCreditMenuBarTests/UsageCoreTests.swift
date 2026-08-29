@@ -1,9 +1,52 @@
 import XCTest
-import LocalAuthentication
-import Security
 @testable import CodexCreditMenuBar
 
+@MainActor
+final class LowerControlsLayoutTests: XCTestCase {
+    func testVersionOpacityRowUsesOneAlignedVisualGrid() {
+        let view = VersionOpacityRowView(
+            alwaysTitle: "항상 보기",
+            updateTitle: "업데이트 확인…",
+            versionTitle: "현재 버전 2.0.9"
+        )
+
+        XCTAssertEqual(view.frame.height, 48, accuracy: 0.001)
+        XCTAssertEqual(view.alwaysViewButton.frame.minY, view.updateButton.frame.minY, accuracy: 0.001)
+        XCTAssertEqual(view.updateButton.frame.height, 42, accuracy: 0.001)
+        XCTAssertEqual(view.updateButton.title, "업데이트 확인 · 2.0.9")
+    }
+}
+
 final class UsageCoreTests: XCTestCase {
+    func testSmartRefreshPolicySlowsFromOneToThreeToFiveToTenMinutes() {
+        var policy = SmartRefreshPolicy()
+        XCTAssertEqual(policy.interval, 60)
+        XCTAssertFalse(policy.update(values: [10, 20]))
+
+        for _ in 0..<2 { XCTAssertFalse(policy.update(values: [10, 20])) }
+        XCTAssertTrue(policy.update(values: [10, 20]))
+        XCTAssertEqual(policy.interval, 180)
+
+        for _ in 0..<5 { XCTAssertFalse(policy.update(values: [10, 20])) }
+        XCTAssertTrue(policy.update(values: [10, 20]))
+        XCTAssertEqual(policy.interval, 300)
+
+        for _ in 0..<11 { XCTAssertFalse(policy.update(values: [10, 20])) }
+        XCTAssertTrue(policy.update(values: [10, 20]))
+        XCTAssertEqual(policy.interval, 600)
+    }
+
+    func testSmartRefreshPolicyReturnsToOneMinuteWhenAnyValueChanges() {
+        var policy = SmartRefreshPolicy()
+        XCTAssertFalse(policy.update(values: [10, 20]))
+        for _ in 0..<3 { _ = policy.update(values: [10, 20]) }
+        XCTAssertEqual(policy.interval, 180)
+
+        XCTAssertTrue(policy.update(values: [10, 20.02]))
+        XCTAssertEqual(policy.interval, 60)
+        XCTAssertEqual(policy.unchangedCount, 0)
+    }
+
     @MainActor
     func testPinnedPanelContentScaleIsCompactAndClamped() {
         XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(0.2), 0.4)
@@ -106,32 +149,35 @@ final class UsageCoreTests: XCTestCase {
     }
 
     func testRefreshIntervalOnlyAcceptsSupportedValues() {
-        XCTAssertEqual(UsageCore.normalizedRefreshInterval(nil), 30)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(nil), -1)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(-1), -1)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(0), 0)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(60), 60)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(180), 180)
         XCTAssertEqual(UsageCore.normalizedRefreshInterval(600), 600)
         // An unknown stored value falls back to the default, not to whatever
         // the first option happens to be.
-        XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), 30)
-        XCTAssertEqual(UsageCore.normalizedRefreshInterval(30), 30)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(42), -1)
+        XCTAssertEqual(UsageCore.normalizedRefreshInterval(30), -1)
 
-        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(nil), 600)
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(nil), -1)
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(-1), -1)
         XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(0), 0)
-        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(300), 600)
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(300), 300)
         XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(600), 600)
-        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(42), 600)
+        XCTAssertEqual(UsageCore.normalizedClaudeRefreshInterval(42), -1)
 
-        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(nil), 300)
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(nil), -1)
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(-1), -1)
         XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(0), 0)
-        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(120), 120)
-        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(42), 300)
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(180), 180)
+        XCTAssertEqual(UsageCore.normalizedGeminiRefreshInterval(42), -1)
     }
 
     func testRefreshIntervalOptionsCoverTheAdvertisedCadences() {
-        XCTAssertEqual(UsageCore.refreshIntervalOptions, [0, 30, 60, 180, 300, 600])
-        XCTAssertEqual(UsageCore.claudeRefreshIntervalOptions, [0, 600, 900, 1_800, 3_600])
-        XCTAssertEqual(UsageCore.geminiRefreshIntervalOptions, [0, 120, 300, 600, 900, 1_800])
+        XCTAssertEqual(UsageCore.refreshIntervalOptions, [-1, 0, 60, 180, 300, 600])
+        XCTAssertEqual(UsageCore.claudeRefreshIntervalOptions, [-1, 0, 60, 180, 300, 600])
+        XCTAssertEqual(UsageCore.geminiRefreshIntervalOptions, [-1, 0, 60, 180, 300, 600])
         XCTAssertTrue(UsageCore.refreshIntervalOptions.contains(UsageCore.defaultRefreshIntervalSeconds))
         XCTAssertTrue(UsageCore.claudeRefreshIntervalOptions.contains(UsageCore.defaultClaudeRefreshIntervalSeconds))
         XCTAssertTrue(UsageCore.geminiRefreshIntervalOptions.contains(UsageCore.defaultGeminiRefreshIntervalSeconds))
@@ -1624,25 +1670,20 @@ final class ClaudeUsageCoreTests: XCTestCase {
     }
 }
 
-final class ClaudeOAuthTokenResolutionTests: XCTestCase {
-    func testClaudeCredentialRefreshIsStrictlyNonInteractive() {
-        XCTAssertEqual(
-            ClaudeAuthenticationClient.refreshArguments,
-            [
-                "-p",
-                "--safe-mode",
-                "--no-session-persistence",
-                "--tools", "",
-                "--model", "haiku",
-                "--max-turns", "1",
-                "Reply only OK."
-            ]
-        )
-        XCTAssertFalse(ClaudeAuthenticationClient.refreshArguments.contains("auth"))
-        XCTAssertFalse(ClaudeAuthenticationClient.refreshArguments.contains("login"))
-        XCTAssertFalse(ClaudeAuthenticationClient.refreshArguments.contains("setup-token"))
+final class ClaudeOAuthSecurityRegressionTests: XCTestCase {
+    func testClaudeUsageNoLongerRunsClaudeCLIOrReadsSetupTokenFile() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/CodexCreditMenuBar/ClaudeUsagePanel.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertFalse(source.contains("ClaudeAuthenticationClient"))
+        XCTAssertFalse(source.contains("claude-oauth-token"))
+        XCTAssertFalse(source.contains("setup-token"))
     }
 
+#if false // Removed legacy token-file resolver tests kept temporarily for diff history.
     func testInitialTokenResolutionPrefersKeychainToken() {
         let resolution = ClaudeOAuthTokenCore.resolveInitialToken(
             keychainResult: .token("keychain-token"),
@@ -1779,25 +1820,54 @@ final class ClaudeOAuthTokenResolutionTests: XCTestCase {
         XCTAssertEqual(newCached, .token("existing-token"))
     }
 
-    func testCachedMissingOrUnreadableCredentialNeverRetriesResolution() {
+    /// A missing/unreadable credential file is retried on every subsequent
+    /// due fetch (no restart required), since resolution is file-only and
+    /// re-reading the file costs nothing beyond the existing fetch cadence.
+    /// This mirrors the observed bug: CCMB showed a stale "갱신 실패: Claude
+    /// Code 실행" state until relaunch, even after the credential file
+    /// became readable again.
+    func testCachedMissingOrUnreadableCredentialRetriesOnNextResolution() {
         var resolveCount = 0
-        let (unreadableResolved, _) = ClaudeOAuthTokenCore.resolveToken(
+        let (unreadableResolved, unreadableCached) = ClaudeOAuthTokenCore.resolveToken(
             cachedState: .keychainUnreadable
         ) {
             resolveCount += 1
-            return .token("retry")
+            return .token("recovered-token")
         }
-        XCTAssertEqual(resolveCount, 0)
-        XCTAssertEqual(unreadableResolved, .keychainUnreadable)
+        XCTAssertEqual(resolveCount, 1)
+        XCTAssertEqual(unreadableResolved, .token("recovered-token"))
+        XCTAssertEqual(unreadableCached, .token("recovered-token"))
 
-        let (noCredResolved, _) = ClaudeOAuthTokenCore.resolveToken(
+        let (noCredResolved, noCredCached) = ClaudeOAuthTokenCore.resolveToken(
             cachedState: .noCredential
         ) {
             resolveCount += 1
-            return .token("retry")
+            return .token("recovered-token")
         }
-        XCTAssertEqual(resolveCount, 0)
+        XCTAssertEqual(resolveCount, 2)
+        XCTAssertEqual(noCredResolved, .token("recovered-token"))
+        XCTAssertEqual(noCredCached, .token("recovered-token"))
+    }
+
+    /// If the credential file is still missing/unreadable on the retry, the
+    /// same failure state is re-cached (not a crash, not silently latched
+    /// forever) so the panel keeps surfacing the failure until it's fixed.
+    func testCachedMissingOrUnreadableCredentialStaysFailedIfStillUnresolved() {
+        let (unreadableResolved, unreadableCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .keychainUnreadable
+        ) {
+            .keychainUnreadable
+        }
+        XCTAssertEqual(unreadableResolved, .keychainUnreadable)
+        XCTAssertEqual(unreadableCached, .keychainUnreadable)
+
+        let (noCredResolved, noCredCached) = ClaudeOAuthTokenCore.resolveToken(
+            cachedState: .noCredential
+        ) {
+            .noCredential
+        }
         XCTAssertEqual(noCredResolved, .noCredential)
+        XCTAssertEqual(noCredCached, .noCredential)
     }
 
     func testUncachedStateInvokesResolutionOnceAndCachesResult() {
@@ -1813,26 +1883,32 @@ final class ClaudeOAuthTokenResolutionTests: XCTestCase {
         XCTAssertEqual(resolved, .token("resolved-token"))
         XCTAssertEqual(newCached, .token("resolved-token"))
     }
+#endif
 }
 
 final class ClaudeOAuthUsageParsingTests: XCTestCase {
-    func testPassiveKeychainLookupCannotPresentAuthenticationUI() {
-        let query = ClaudeOAuthUsageClient.keychainTokenQuery()
-        let context = query[kSecUseAuthenticationContext as String] as? LAContext
+    /// Guards against reintroducing an in-process Keychain query for
+    /// `Claude Code-credentials`. Even a non-interactive `SecItemCopyMatching`
+    /// lookup was observed to still present Keychain's legacy
+    /// application-access-control dialog in the signed installed app, so
+    /// CCMB must never call it for this item — statically checking the
+    /// source is the only way to prove the call site itself is gone, since a
+    /// runtime test would need the very Keychain item this test forbids
+    /// reading.
+    func testSourceNeverQueriesKeychainForClaudeCodeCredentials() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/CodexCreditMenuBar/ClaudeUsagePanel.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
 
-        XCTAssertEqual(context?.interactionNotAllowed, true)
-        // `...UIFail` is explicitly documented to fail immediately instead
-        // of presenting authentication UI when this single-item lookup needs
-        // user interaction.
-        // Compare the exported CFString value directly so the test itself
-        // does not introduce a deprecation warning for this legacy-Keychain
-        // compatibility safeguard.
-        XCTAssertEqual(query[kSecUseAuthenticationUI as String] as? String, "u_AuthUIF")
-        XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
-        XCTAssertEqual(query[kSecAttrService as String] as? String, "Claude Code-credentials")
-        XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
-        XCTAssertNil(query[kSecReturnAttributes as String])
-        XCTAssertEqual(query[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
+        // Matches the call form, not the API name in this test's own
+        // explanatory comment or the source file's doc comment about why the
+        // call was removed.
+        XCTAssertFalse(source.contains("SecItemCopyMatching("))
+        XCTAssertFalse(source.contains("kSecClassGenericPassword"))
+        XCTAssertFalse(source.contains("import Security"))
+        XCTAssertFalse(source.contains("import LocalAuthentication"))
     }
 
     private func data(_ json: String) -> Data {
@@ -2027,7 +2103,6 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
     func testFailureOutcomesAlwaysCarryADiagnosticAndLabel() {
         let failures: [ClaudeUsageFetchOutcome] = [
             .noCredential,
-            .keychainCredentialUnreadable,
             .rateLimited(retryAt: Date(timeIntervalSince1970: 1_000)),
             .authenticationRecoveryFailed,
             .httpFailure(status: 401),
@@ -2044,7 +2119,7 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
     func testAuthenticationRecoveryFailureExplainsTheNextBeginnerAction() {
         XCTAssertEqual(
             ClaudeUsageFetchOutcome.authenticationRecoveryFailed.staleReasonLabel,
-            "Claude Code 실행 또는 다시 로그인"
+            "아래 버튼으로 Claude 다시 연결"
         )
     }
 
