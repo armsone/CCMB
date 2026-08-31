@@ -105,7 +105,7 @@ The script creates and verifies a notarized Universal app and DMG, signs the upd
 
 ## Privacy and diagnostics
 
-CCMB reads account usage data from the locally installed Codex CLI, Claude Code session, Antigravity `agy` CLI, and the Grok CLI's local OAuth credential, and displays it on the Mac where it runs. It does not add its own analytics or telemetry. Diagnostic messages use macOS unified logging with private string fields; raw service responses and credentials are not logged. Gemini's account-specific upgrade link (`upgrade_uri`) is never read, persisted, or displayed, and the Grok access token is never logged, displayed, or persisted by CCMB.
+CCMB reads account usage data from the locally installed Codex CLI, Claude Code session, Antigravity `agy` CLI, Gemini's signed-in usage page, and the Grok CLI's local OAuth credential, and displays it on the Mac where it runs. The Gemini web connection stores only the parsed usage percentages and reset captions; it does not extract or persist cookies, tokens, passwords, or page content. CCMB does not add its own analytics or telemetry. Diagnostic messages use macOS unified logging with private string fields; raw service responses and credentials are not logged. Gemini's account-specific upgrade link (`upgrade_uri`) is never read, persisted, or displayed, and the Grok access token is never logged, displayed, or persisted by CCMB.
 
 ## Contributing
 

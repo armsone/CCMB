@@ -859,13 +859,17 @@ enum GeminiUsageCore {
 
     /// Recomputes a stored `gemini` payload's `ageSeconds`/`fresh` from its
     /// own `fetchedAt`, the same role `refreshedSharedPayload` plays for
-    /// Claude on a cache read.
+    /// Claude on a cache read. A nested `online` object (the Gemini web
+    /// snapshot) gets the same recomputation from its own `fetchedAt`.
     static func refreshedSharedPayload(_ payload: [String: Any], now: Date = Date()) -> [String: Any] {
         var output = payload
         let fetchedAt = (payload["fetchedAt"] as? String).flatMap(sharedISO8601Formatter.date(from:))
         let freshForSeconds = (payload["freshForSeconds"] as? NSNumber)?.doubleValue ?? sharedFreshForSeconds
         output["ageSeconds"] = fetchedAt.map { max(0, Int(now.timeIntervalSince($0))) } ?? NSNull()
         output["fresh"] = isFresh(publishedAt: fetchedAt, now: now, freshForSeconds: freshForSeconds)
+        if let online = payload["online"] as? [String: Any] {
+            output["online"] = GeminiOnlineUsageCore.refreshedSharedPayload(online, now: now)
+        }
         return output
     }
 
@@ -917,6 +921,197 @@ enum GeminiUsageCore {
     private static let sharedISO8601FormatterWholeSeconds: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+}
+
+/// Snapshot parsed from the visible text of `https://gemini.google.com/usage`
+/// ("Gemini 온라인"). Only the two usage percentages and their visible reset
+/// captions are kept — never any other page content — and the reset captions
+/// stay as the page's own wording (e.g. "오전 2:08에 초기화") rather than a
+/// guessed timestamp CCMB cannot verify.
+struct GeminiOnlineUsageSnapshot: Sendable, Equatable, Codable {
+    /// "현재 사용량" section, the web app's session window.
+    let sessionUsedPercent: Double?
+    let sessionResetText: String?
+    /// "주간 한도" section.
+    let weeklyUsedPercent: Double?
+    let weeklyResetText: String?
+    let fetchedAt: Date
+}
+
+/// Pure parsing, freshness, persistence, and shared-payload logic for the
+/// Gemini web usage page. Deliberately has no knowledge of WebKit — the
+/// AppKit-side `GeminiOnlineWebController` hands it the rendered page's
+/// visible text, and this either returns real numbers or `nil`. It never
+/// guesses when the page structure has changed.
+enum GeminiOnlineUsageCore {
+    /// The page is only re-read on a conservative background cadence, so its
+    /// values stay presentable for a longer window than CLI-fetched data
+    /// before being flagged as stale.
+    static let sharedFreshForSeconds: TimeInterval = 1_800
+    static let minimumQuietRefreshIntervalSeconds: TimeInterval = 900
+
+    static let snapshotDefaultsKey = "geminiOnlineUsageSnapshotV1"
+    static let hasConnectedDefaultsKey = "geminiOnlineHasConnectedV1"
+
+    static func remainingPercent(from usedPercent: Double?) -> Double? {
+        guard let usedPercent else { return nil }
+        return min(max(100 - usedPercent, 0), 100)
+    }
+
+    static func isFresh(fetchedAt: Date?, now: Date, freshForSeconds: TimeInterval = sharedFreshForSeconds) -> Bool {
+        guard let fetchedAt else { return false }
+        return now.timeIntervalSince(fetchedAt) <= freshForSeconds
+    }
+
+    /// Parses the usage page's visible text. The Korean and English section
+    /// headers are both recognized; any other shape returns `nil`, so a page
+    /// redesign degrades to "확인 불가" instead of a wrong number. Sections
+    /// are bounded so parsing never wanders into unrelated page content.
+    static func parse(visibleText: String, now: Date = Date()) -> GeminiOnlineUsageSnapshot? {
+        guard let sessionHeader = firstRange(
+                  of: ["현재 사용량", "Current usage"],
+                  in: visibleText,
+                  from: visibleText.startIndex
+              ),
+              let weeklyHeader = firstRange(
+                  of: ["주간 한도", "Weekly limit"],
+                  in: visibleText,
+                  from: sessionHeader.upperBound
+              )
+        else { return nil }
+
+        let sessionSection = boundedSection(of: visibleText, from: sessionHeader.upperBound, to: weeklyHeader.lowerBound)
+        let weeklySection = boundedSection(of: visibleText, from: weeklyHeader.upperBound, to: visibleText.endIndex)
+        let sessionUsed = usedPercent(in: sessionSection)
+        let weeklyUsed = usedPercent(in: weeklySection)
+        guard sessionUsed != nil || weeklyUsed != nil else { return nil }
+
+        return GeminiOnlineUsageSnapshot(
+            sessionUsedPercent: sessionUsed,
+            sessionResetText: resetText(in: sessionSection),
+            weeklyUsedPercent: weeklyUsed,
+            weeklyResetText: resetText(in: weeklySection),
+            fetchedAt: now
+        )
+    }
+
+    /// Distinguishes "signed out" from "page structure changed" after a
+    /// parse failure, so the recovery message can honestly say which one.
+    static func textLooksSignedOut(_ text: String) -> Bool {
+        let markers = ["로그인", "Sign in", "계정 선택", "Choose an account"]
+        return markers.contains { text.range(of: $0, options: [.caseInsensitive]) != nil }
+    }
+
+    // MARK: - Persistence (parsed snapshot only, never page content)
+
+    static func loadPersistedSnapshot(defaults: UserDefaults = .standard) -> GeminiOnlineUsageSnapshot? {
+        guard let data = defaults.data(forKey: snapshotDefaultsKey) else { return nil }
+        return try? JSONDecoder().decode(GeminiOnlineUsageSnapshot.self, from: data)
+    }
+
+    static func persist(_ snapshot: GeminiOnlineUsageSnapshot, defaults: UserDefaults = .standard) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: snapshotDefaultsKey)
+        defaults.set(true, forKey: hasConnectedDefaultsKey)
+    }
+
+    /// Whether a CCMB-owned WebKit session has ever produced a snapshot.
+    /// Background quiet refresh is gated on this, so CCMB never loads the
+    /// sign-in flow behind the user's back.
+    static func hasConnectedBefore(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: hasConnectedDefaultsKey)
+    }
+
+    /// Nested `online` object written under the shared file's `gemini`
+    /// payload. Returns `nil` when there is no snapshot, so the shared file
+    /// only ever carries truthful fields. `fiveHour*` names mirror the
+    /// sibling CLI fields; reset values stay as the page's visible captions.
+    static func sharedPayload(from snapshot: GeminiOnlineUsageSnapshot?, now: Date = Date()) -> [String: Any]? {
+        guard let snapshot else { return nil }
+        let ageSeconds = max(0, Int(now.timeIntervalSince(snapshot.fetchedAt)))
+        let fresh = isFresh(fetchedAt: snapshot.fetchedAt, now: now)
+        return [
+            "source": "gemini-web-usage-page",
+            "status": (snapshot.sessionUsedPercent == nil && snapshot.weeklyUsedPercent == nil)
+                ? "partial"
+                : (fresh ? "ok" : "stale"),
+            "fiveHourUsedPercent": snapshot.sessionUsedPercent ?? NSNull(),
+            "fiveHourRemainingPercent": remainingPercent(from: snapshot.sessionUsedPercent) ?? NSNull(),
+            "fiveHourResetText": snapshot.sessionResetText ?? NSNull(),
+            "weeklyUsedPercent": snapshot.weeklyUsedPercent ?? NSNull(),
+            "weeklyRemainingPercent": remainingPercent(from: snapshot.weeklyUsedPercent) ?? NSNull(),
+            "weeklyResetText": snapshot.weeklyResetText ?? NSNull(),
+            "fetchedAt": sharedISO8601Formatter.string(from: snapshot.fetchedAt),
+            "ageSeconds": ageSeconds,
+            "freshForSeconds": Int(sharedFreshForSeconds),
+            "fresh": fresh
+        ]
+    }
+
+    /// Recomputes a stored `online` payload's `ageSeconds`/`fresh` from its
+    /// own `fetchedAt` on a cache read, mirroring the sibling providers.
+    static func refreshedSharedPayload(_ payload: [String: Any], now: Date = Date()) -> [String: Any] {
+        var output = payload
+        let fetchedAt = (payload["fetchedAt"] as? String).flatMap(sharedISO8601Formatter.date(from:))
+        let freshForSeconds = (payload["freshForSeconds"] as? NSNumber)?.doubleValue ?? sharedFreshForSeconds
+        output["ageSeconds"] = fetchedAt.map { max(0, Int(now.timeIntervalSince($0))) } ?? NSNull()
+        output["fresh"] = isFresh(fetchedAt: fetchedAt, now: now, freshForSeconds: freshForSeconds)
+        return output
+    }
+
+    // MARK: - Private helpers
+
+    private static func firstRange(
+        of candidates: [String],
+        in text: String,
+        from start: String.Index
+    ) -> Range<String.Index>? {
+        candidates
+            .compactMap { text.range(of: $0, options: [.caseInsensitive], range: start..<text.endIndex) }
+            .min { $0.lowerBound < $1.lowerBound }
+    }
+
+    /// Caps a section at a few hundred characters so a reset caption or a
+    /// percentage is never matched from unrelated content further down the
+    /// page.
+    private static func boundedSection(of text: String, from: String.Index, to: String.Index) -> String {
+        let end = text.index(from, offsetBy: 600, limitedBy: to) ?? to
+        return String(text[from..<end])
+    }
+
+    private static let usedPercentRegex = try? NSRegularExpression(
+        pattern: "([0-9]+(?:[.,][0-9]+)?)\\s*%\\s*(?:사용됨|used)",
+        options: [.caseInsensitive]
+    )
+
+    private static func usedPercent(in section: String) -> Double? {
+        guard let regex = usedPercentRegex else { return nil }
+        let range = NSRange(section.startIndex..., in: section)
+        guard let match = regex.firstMatch(in: section, options: [], range: range),
+              let valueRange = Range(match.range(at: 1), in: section),
+              let value = Double(section[valueRange].replacingOccurrences(of: ",", with: "."))
+        else { return nil }
+        return min(max(value, 0), 100)
+    }
+
+    /// The page's own short reset caption (e.g. "오전 2:08에 초기화"). Long
+    /// lines are rejected so an unrelated sentence can never be captured.
+    private static func resetText(in section: String) -> String? {
+        for line in section.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.count >= 4, trimmed.count <= 60 else { continue }
+            if trimmed.contains("초기화") || trimmed.range(of: "reset", options: [.caseInsensitive]) != nil {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    private static let sharedISO8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
 }

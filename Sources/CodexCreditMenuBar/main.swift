@@ -28,6 +28,7 @@ private enum SharedUsageStore {
         claudeRetryAt: Date?,
         claudeFailureLabel: String?,
         geminiSnapshot: GeminiUsageSnapshot?,
+        geminiOnlineSnapshot: GeminiOnlineUsageSnapshot?,
         grokSnapshot: GrokUsageSnapshot?,
         refreshInterval: TimeInterval
     ) throws {
@@ -41,6 +42,14 @@ private enum SharedUsageStore {
         claudePayload["nextEligibleAt"] = claudeRetryAt.map(iso8601Formatter.string(from:)) ?? NSNull()
         let staleReason: Any = circuitOpen ? "rate-limited" : (claudeFailureLabel as Any? ?? NSNull())
         claudePayload["staleReason"] = staleReason
+
+        // The Gemini web snapshot nests under `gemini.online` only when a
+        // truthful parsed snapshot exists; consumers that predate it keep
+        // reading the unchanged top-level `gemini` fields.
+        var geminiPayload = GeminiUsageCore.sharedPayload(from: geminiSnapshot)
+        if let onlinePayload = GeminiOnlineUsageCore.sharedPayload(from: geminiOnlineSnapshot) {
+            geminiPayload["online"] = onlinePayload
+        }
 
         let payload: [String: Any] = [
             "schemaVersion": 1,
@@ -66,7 +75,7 @@ private enum SharedUsageStore {
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
             "claude": claudePayload,
             "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: freshForSeconds),
-            "gemini": GeminiUsageCore.sharedPayload(from: geminiSnapshot),
+            "gemini": geminiPayload,
             "grok": GrokUsageCore.sharedPayload(from: grokSnapshot)
         ]
 
@@ -1373,6 +1382,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
         controller.onClaudeUsageAction = { [weak self] in self?.performClaudeUsageAction() }
         controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
+        controller.onRefreshAll = { [weak self] in self?.refresh() }
+        controller.onThemeChange = { [weak self] in self?.applyPanelTheme($0) }
         controller.setShareMenu(makeShareMenu())
         controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
         controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
@@ -1396,6 +1407,39 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastClaudeRateLimitRetryAt: Date?
     private var lastGeminiSnapshot: GeminiUsageSnapshot?
     private var lastGeminiFetchFailureLabel: String?
+    /// Gemini web ("Gemini 온라인") snapshot — sourced only from the CCMB-owned
+    /// WebKit session's read of gemini.google.com/usage, never inferred from
+    /// the CLI values.
+    private var lastGeminiOnlineSnapshot: GeminiOnlineUsageSnapshot?
+    private var geminiOnlineNeedsConnection = false
+    private var geminiOnlineParseFailed = false
+    private lazy var geminiOnlineController: GeminiOnlineWebController = {
+        let controller = GeminiOnlineWebController()
+        controller.onUpdate = { [weak self] update in
+            guard let self else { return }
+            switch update {
+            case .snapshot(let snapshot):
+                self.lastGeminiOnlineSnapshot = snapshot
+                self.geminiOnlineNeedsConnection = false
+                self.geminiOnlineParseFailed = false
+                self.diagnosticLog.log("gemini_online_snapshot")
+            case .connectionRequired:
+                self.geminiOnlineNeedsConnection = true
+                self.geminiOnlineParseFailed = false
+                self.diagnosticLog.log("gemini_online_connection_required")
+            case .parseFailed:
+                self.geminiOnlineParseFailed = true
+                self.diagnosticLog.log("gemini_online_parse_failed")
+            }
+            if let lastSnapshot = self.lastSnapshot {
+                self.publishSharedUsage(lastSnapshot, origin: "cache-republish")
+            }
+            self.updateSplitPanel()
+        }
+        return controller
+    }()
+    private let menuHeaderView = UsagePanelHeaderView()
+    private let menuHeaderItem = NSMenuItem()
     private var lastManualRefreshAt: Date?
     private var lastGrokSnapshot: GrokUsageSnapshot?
     private var lastGrokFetchFailureLabel: String?
@@ -1441,6 +1485,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             object: nil
         )
         loadConsumptionTrackers()
+        // Restore the last parsed Gemini web snapshot; its age is reported
+        // honestly instead of pretending it is a fresh reading.
+        lastGeminiOnlineSnapshot = GeminiOnlineUsageCore.loadPersistedSnapshot()
         configureStatusItem()
         installUsageHelper()
         configureClient()
@@ -1684,8 +1731,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         updateCountdown()
         if refreshCodex { client.refreshRateLimits() }
         if refreshClaude { refreshClaudeUsage() }
-        if refreshGemini { refreshGeminiUsage() }
+        if refreshGemini {
+            refreshGeminiUsage()
+            // Quiet Gemini web re-read: only after a prior successful
+            // connection, and never below its own 15-minute floor.
+            refreshGeminiOnlineQuietly()
+        }
         if refreshGrok { refreshGrokUsage() }
+    }
+
+    /// Background/global quiet refresh of the Gemini web snapshot. Skipped
+    /// entirely while reconnection is required, so CCMB never loads Google
+    /// sign-in behind the user's back.
+    private func refreshGeminiOnlineQuietly(force: Bool = false) {
+        guard !geminiOnlineNeedsConnection else { return }
+        geminiOnlineController.refreshQuietlyIfDue(force: force)
+    }
+
+    /// Explicit first-connection/reconnection action for Gemini 온라인.
+    private func connectGeminiOnline() {
+        diagnosticLog.log("gemini_online_connect")
+        geminiOnlineParseFailed = false
+        geminiOnlineNeedsConnection = false
+        geminiOnlineController.connect()
     }
 
     private func resetCountdown() {
@@ -1702,6 +1770,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         nextGrokRefreshAt = grokRefreshInterval > 0 ? now.addingTimeInterval(grokRefreshInterval) : .distantFuture
         if let retryAt = lastClaudeRateLimitRetryAt, retryAt > nextClaudeRefreshAt {
             nextClaudeRefreshAt = retryAt
+        }
+        if claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+           let snapshot = lastClaudeSnapshot,
+           let unavailable = Self.claudeUnavailableState(from: snapshot, now: now) {
+            nextClaudeRefreshAt = unavailable.until.addingTimeInterval(1)
         }
         updateNextAutoRefreshAt()
     }
@@ -1774,6 +1847,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             return item
         }
         resetVerificationWorkItems[provider] = workItems
+    }
+
+    private func pauseClaudeRefreshUntilAvailable(_ snapshot: ClaudeUsageSnapshot) {
+        guard claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+              let unavailable = Self.claudeUnavailableState(from: snapshot, now: Date())
+        else { return }
+        resetVerificationWorkItems.removeValue(forKey: .claude)?.forEach { $0.cancel() }
+        resetVerificationDates.removeValue(forKey: .claude)
+        nextClaudeRefreshAt = unavailable.until.addingTimeInterval(1)
+        updateNextAutoRefreshAt()
+        scheduleNextAutoRefresh()
+        updateCountdown()
+        diagnosticLog.log("claude_refresh_paused_until_reset")
     }
 
     private func updateCountdown() {
@@ -1898,6 +1984,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         setDetailTitle(refreshItem.title, for: refreshItem)
         setDetailTitle(intervalItem.title, for: intervalItem)
         resetCreditsItem.isHidden = true
+
+        menuHeaderView.onRefresh = { [weak self] in self?.refresh() }
+        menuHeaderView.onSelectTheme = { [weak self] in self?.applyPanelTheme($0) }
+        menuHeaderItem.view = menuHeaderView
+        menuHeaderItem.isEnabled = true
+        menu.addItem(menuHeaderItem)
 
         splitPanelItem.view = splitPanelView
         splitPanelItem.isHidden = true
@@ -2245,6 +2337,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 claudeRetryAt: lastClaudeRateLimitRetryAt,
                 claudeFailureLabel: lastClaudeFetchFailureLabel,
                 geminiSnapshot: lastGeminiSnapshot,
+                geminiOnlineSnapshot: lastGeminiOnlineSnapshot,
                 grokSnapshot: lastGrokSnapshot,
                 refreshInterval: refreshInterval
             )
@@ -2303,6 +2396,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     candidates: [snapshot.fiveHourResetsAt, snapshot.weeklyResetsAt]
                         + snapshot.modelWeeklyLimits.map(\.resetsAt)
                 )
+                self.pauseClaudeRefreshUntilAvailable(snapshot)
                 self.lastClaudeFetchFailureLabel = nil
                 self.claudeNeedsReconnect = false
                 self.lastClaudeRateLimitRetryAt = nil
@@ -2742,14 +2836,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func refreshStatusTitle() {
         guard let snapshot = lastSnapshot else { return }
-        setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot))
+        setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot))
         statusItem.button?.setAccessibilityValue(
-            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot)
+            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot)
         )
     }
 
     private func updateSplitPanel() {
         updateHistoryChart()
+        updatePanelHeaders()
         usagePageLinksView.applyGrokAuthState(
             loginRequired: grokLoginRequired,
             loginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
@@ -2766,7 +2861,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 fetchFailureLabel: lastClaudeFetchFailureLabel,
                 rateLimitRetryAt: lastClaudeRateLimitRetryAt
             ),
-            gemini: Self.geminiColumn(
+            gemini: geminiColumn(
                 from: lastGeminiSnapshot,
                 fetchFailureLabel: lastGeminiFetchFailureLabel
             ),
@@ -2790,14 +2885,35 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         splitPanelItem.isHidden = false
     }
 
+    /// Applies a theme choice from any panel header, then re-renders every
+    /// panel instance from the same stored value so they never disagree.
+    private func applyPanelTheme(_ theme: UsagePanelTheme) {
+        UsagePanelThemeStore.current = theme
+        diagnosticLog.log("panel_theme_changed", ["theme": .string(theme.rawValue)])
+        updateSplitPanel()
+    }
+
+    /// Shared header state: last global refresh caption plus the stored
+    /// theme, mirrored into the menu header and both panel controllers.
+    private func updatePanelHeaders() {
+        let updatedAt = lastRateLimitUpdatedAt ?? lastSnapshot?.updatedAt
+        let text = updatedAt.map { "마지막 갱신 \(Self.timeFormatter.string(from: $0))" } ?? ""
+        menuHeaderView.setLastUpdatedText(text)
+        menuHeaderView.applyThemeState()
+        statusDropdownController.applyHeaderState(lastUpdatedText: text)
+        pinnedUsageWindowController?.applyHeaderState(lastUpdatedText: text)
+    }
+
     private static func codexColumn(from snapshot: RateLimitSnapshot) -> UsagePanelColumn {
         let accent = UsageBrandColors.codex
         var quota: UsagePanelQuota?
         var sparkQuota: UsagePanelQuota?
-        var rows: [UsagePanelRow] = []
+        var summaryRows: [UsagePanelRow] = []
+        var resetRows: [UsagePanelRow] = []
+        var creditRows: [UsagePanelRow] = []
 
         if let planTitle = CodexPlanCore.title(for: snapshot.planType) {
-            rows.append(UsagePanelRow(label: "요금제", value: planTitle))
+            summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
         }
 
         if let usedPercent = snapshot.usedPercent {
@@ -2825,7 +2941,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 )
             }
         } else {
-            rows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
+            summaryRows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
         }
 
         if let sparkUsedPercent = snapshot.sparkUsedPercent {
@@ -2839,50 +2955,52 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             )
         }
 
-        if let resetCredits = snapshot.resetCredits {
-            rows.append(UsagePanelRow(label: "초기화", value: "\(resetCredits)개"))
-        }
-
         if let resetsAt = snapshot.resetsAt {
-            rows.append(UsagePanelRow(
-                label: "주간",
+            resetRows.append(UsagePanelRow(
+                label: "주간 초기화",
                 value: resetDateTimeFormatter.string(from: resetsAt),
                 isEmphasized: true
             ))
         } else if let minutes = snapshot.windowDurationMinutes {
-            rows.append(UsagePanelRow(label: "주간", value: "\(minutes)분 창", isEmphasized: true))
+            resetRows.append(UsagePanelRow(label: "주간 초기화", value: "\(minutes)분 창", isEmphasized: true))
         }
 
         if let sparkResetsAt = snapshot.sparkResetsAt {
-            rows.append(UsagePanelRow(
-                label: "Spark 주간",
+            resetRows.append(UsagePanelRow(
+                label: "Spark 초기화",
                 value: resetDateTimeFormatter.string(from: sparkResetsAt),
                 isEmphasized: true
             ))
         } else if let minutes = snapshot.sparkWindowDurationMinutes {
-            rows.append(UsagePanelRow(label: "Spark 주간", value: "\(minutes)분 창", isEmphasized: true))
+            resetRows.append(UsagePanelRow(label: "Spark 초기화", value: "\(minutes)분 창", isEmphasized: true))
         }
 
+        if let resetCredits = snapshot.resetCredits {
+            creditRows.append(UsagePanelRow(label: "초기화 가능", value: "\(resetCredits)개"))
+        }
         if let creditBalance = snapshot.creditBalance {
-            rows.append(UsagePanelRow(
-                label: "크레딧",
+            creditRows.append(UsagePanelRow(
+                label: "남은 크레딧",
                 value: creditDetailTitle(from: creditBalance),
                 isEmphasized: true
             ))
         } else {
-            rows.append(UsagePanelRow(
-                label: "크레딧",
+            creditRows.append(UsagePanelRow(
+                label: "남은 크레딧",
                 value: snapshot.detailedCreditsReturned ? "형식 확인 필요" : "정보 없음",
                 isEmphasized: true
             ))
         }
+
+        let detailRows = summaryRows + resetRows + creditRows
+        let rowGroups = detailRows.isEmpty ? [] : [UsagePanelRowGroup(rows: detailRows)]
 
         return UsagePanelColumn(
             title: "Codex",
             accentColor: accent,
             quota: quota,
             secondaryQuota: sparkQuota,
-            rows: rows,
+            rowGroups: rowGroups,
             accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
             refreshLine: "업데이트 \(relativeFormatter.localizedString(for: snapshot.updatedAt, relativeTo: Date()))",
             statusLines: [],
@@ -2915,7 +3033,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 accentColor: accent,
                 quota: nil,
                 secondaryQuota: nil,
-                rows: [UsagePanelRow(label: "Claude", value: "정보 없음")],
+                rowGroups: [UsagePanelRowGroup(rows: [UsagePanelRow(label: "Claude", value: "정보 없음")])],
                 accountLines: ["계정 정보 없음"],
                 refreshLine: nil,
                 statusLines: statusLines,
@@ -2931,42 +3049,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             now: Date(),
             freshForSeconds: freshnessWindow
         ) && failureLabel == nil
-        if !isCurrent {
-            let refreshLine = snapshot.publishedAt.map {
-                "마지막 확인 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
-            }
-            var statusLines: [String] = []
-            if let rateLimitLabel {
-                statusLines.append(rateLimitLabel)
-            } else if let failureLabel {
-                statusLines.append("갱신 실패: \(failureLabel)")
-            } else {
-                statusLines.append("오래된 사용량 숫자를 숨겼습니다")
-            }
-            if !ClaudeOAuthCredentialStore.hasCredential {
-                statusLines.append("아래 Claude 버튼을 눌러 계정을 연결하세요")
-            }
-            return UsagePanelColumn(
-                title: "Claude",
-                accentColor: accent,
-                quota: nil,
-                secondaryQuota: nil,
-                rows: [UsagePanelRow(label: "Claude", value: "최신 정보 없음")],
-                accountLines: snapshot.account?.email.map { ["계정 \($0)"] } ?? ["계정 정보 없음"],
-                refreshLine: refreshLine,
-                statusLines: statusLines,
-                statusColor: rateLimitLabel != nil ? .systemOrange : .systemRed
-            )
-        }
-
         var quota: UsagePanelQuota?
         var weeklyQuota: UsagePanelQuota?
         var fableQuota: UsagePanelQuota?
-        var rows: [UsagePanelRow] = []
+        var summaryRows: [UsagePanelRow] = []
+        var resetRows: [UsagePanelRow] = []
+        var modelLimitRows: [UsagePanelRow] = []
+        var extraRows: [UsagePanelRow] = []
         let fableLimit = ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)
 
         if let planTitle = ClaudePlanStore.readTitle() {
-            rows.append(UsagePanelRow(label: "요금제", value: planTitle))
+            summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        }
+        if let model = snapshot.model {
+            summaryRows.append(UsagePanelRow(label: "모델", value: model))
         }
 
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent) {
@@ -2978,19 +3074,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 accessibilityValue: "남은 Claude 세션 사용량 \(percentTitle(from: remaining))"
             )
         } else {
-            rows.append(UsagePanelRow(label: "세션 남음", value: "정보 없음", isEmphasized: true))
+            summaryRows.append(UsagePanelRow(label: "세션 남음", value: "정보 없음", isEmphasized: true))
         }
 
         if let resetsAt = snapshot.fiveHourResetsAt {
-            rows.append(UsagePanelRow(
-                label: "세션",
+            resetRows.append(UsagePanelRow(
+                label: "세션 초기화",
                 value: resetDateTimeFormatter.string(from: resetsAt),
                 isEmphasized: true
             ))
         }
         if let resetsAt = fableLimit?.resetsAt {
-            rows.append(UsagePanelRow(
-                label: "Fable",
+            resetRows.append(UsagePanelRow(
+                label: "Fable 초기화",
                 value: resetDateTimeFormatter.string(from: resetsAt)
             ))
         }
@@ -3004,13 +3100,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             )
         }
         if let resetsAt = snapshot.weeklyResetsAt {
-            rows.append(UsagePanelRow(
-                label: "주간",
+            resetRows.append(UsagePanelRow(
+                label: "주간 초기화",
                 value: resetDateTimeFormatter.string(from: resetsAt)
             ))
-        }
-        if let model = snapshot.model {
-            rows.append(UsagePanelRow(label: "모델", value: model))
         }
         // The Fable weekly limit is promoted to its own top ring (session,
         // Fable, weekly), so it is excluded from the lower model-limit rows
@@ -3028,14 +3121,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             guard limit != fableLimit else { continue }
             guard let remaining = ClaudeUsageCore.remainingPercent(from: limit.usedPercent) else { continue }
             let detail = limit.resetsAt.map { resetDateTimeFormatter.string(from: $0) }
-            rows.append(UsagePanelRow(
+            modelLimitRows.append(UsagePanelRow(
                 label: "\(limit.modelName) 주간",
                 value: "\(percentTitle(from: remaining)) 남음",
                 detail: detail
             ))
         }
         if let extraUsage = snapshot.extraUsage {
-            rows.append(UsagePanelRow(label: "추가 사용량", value: extraUsageTitle(extraUsage), valueColor: .systemPurple))
+            extraRows.append(UsagePanelRow(label: "추가 사용량", value: extraUsageTitle(extraUsage), valueColor: .systemPurple))
+        }
+
+        var rowGroups: [UsagePanelRowGroup] = []
+        let primaryRows = summaryRows + resetRows
+        if !primaryRows.isEmpty {
+            rowGroups.append(UsagePanelRowGroup(rows: primaryRows))
+        }
+        if !modelLimitRows.isEmpty {
+            rowGroups.append(UsagePanelRowGroup(title: "모델별 주간 한도", glyph: .chart, rows: modelLimitRows))
+        }
+        if !extraRows.isEmpty {
+            rowGroups.append(UsagePanelRowGroup(title: "추가 사용량", glyph: .creditCard, rows: extraRows))
         }
         var accountLines: [String] = []
         if let account = snapshot.account {
@@ -3047,13 +3152,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             accountLines.append("계정 정보 없음")
         }
         let refreshLine = snapshot.publishedAt.map {
-            "업데이트 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
+            "\(isCurrent ? "업데이트" : "마지막 확인") \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
         }
         var statusLines: [String] = []
-        if let rateLimitLabel {
-            statusLines.append(rateLimitLabel)
+        if let unavailable = claudeUnavailableState(from: snapshot, now: Date()) {
+            statusLines.append("\(unavailable.reason) · \(resetDateTimeFormatter.string(from: unavailable.until))에 다시 확인")
+        } else if let rateLimitLabel {
+            statusLines.append(isCurrent ? rateLimitLabel : "오래된 정보 · \(rateLimitLabel)")
         } else if let failureLabel {
-            statusLines.append("갱신 실패: \(failureLabel)")
+            statusLines.append(isCurrent ? "갱신 실패: \(failureLabel)" : "오래된 정보 · 갱신 실패: \(failureLabel)")
+        } else if !isCurrent {
+            statusLines.append("오래된 정보")
         }
 
         return UsagePanelColumn(
@@ -3062,115 +3171,147 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             quota: quota,
             secondaryQuota: fableQuota ?? weeklyQuota,
             tertiaryQuota: fableQuota != nil ? weeklyQuota : nil,
-            rows: rows,
+            rowGroups: rowGroups,
             accountLines: accountLines,
             refreshLine: refreshLine,
             statusLines: statusLines,
-            statusColor: rateLimitLabel != nil ? .systemOrange : (failureLabel == nil ? .secondaryLabelColor : .systemRed)
+            statusColor: rateLimitLabel != nil || !isCurrent ? .systemOrange : (failureLabel == nil ? .secondaryLabelColor : .systemRed)
         )
     }
 
-    /// Gemini's primary ring intentionally uses `primaryQuotaGradientColors`
-    /// instead of a solid accent — the only column of the three with no
-    /// single official brand color to fall back to.
-    private static func geminiColumn(
+    private static func claudeUnavailableState(
+        from snapshot: ClaudeUsageSnapshot,
+        now: Date
+    ) -> (reason: String, until: Date)? {
+        let sessionExhausted = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent).map { $0 <= 0.001 } ?? false
+        let weeklyExhausted = ClaudeUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent).map { $0 <= 0.001 } ?? false
+        guard sessionExhausted || weeklyExhausted else { return nil }
+
+        var resetDates: [Date] = []
+        if sessionExhausted, let reset = snapshot.fiveHourResetsAt, reset > now { resetDates.append(reset) }
+        if weeklyExhausted, let reset = snapshot.weeklyResetsAt, reset > now { resetDates.append(reset) }
+        let exhaustedCount = (sessionExhausted ? 1 : 0) + (weeklyExhausted ? 1 : 0)
+        guard resetDates.count == exhaustedCount, let until = resetDates.max() else { return nil }
+        let reason = sessionExhausted && weeklyExhausted
+            ? "세션·주간 소진"
+            : (sessionExhausted ? "세션 소진" : "주간 소진")
+        return (reason, until)
+    }
+
+    /// Four compact peer rings directly under the Gemini title. Their fixed
+    /// order is CLI session/weekly, then online session/weekly; the canonical
+    /// blue/red/yellow/green Google palette provides a second visual key.
+    private func geminiColumn(
         from snapshot: GeminiUsageSnapshot?,
         fetchFailureLabel: String?
     ) -> UsagePanelColumn {
         let accent = UsageBrandColors.geminiText
-
-        guard let snapshot else {
-            var statusLines: [String] = []
-            if let fetchFailureLabel {
-                statusLines.append("갱신 실패: \(fetchFailureLabel)")
-            } else {
-                statusLines.append("Antigravity CLI(agy) 설치와 로그인이 필요합니다")
-            }
-            return UsagePanelColumn(
-                title: "Gemini",
-                accentColor: accent,
-                quota: nil,
-                secondaryQuota: nil,
-                rows: [UsagePanelRow(label: "Gemini", value: "정보 없음")],
-                accountLines: ["계정 정보 없음"],
-                refreshLine: nil,
-                statusLines: statusLines,
-                statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+        let now = Date()
+        let online = lastGeminiOnlineSnapshot
+        let colors = UsageBrandColors.geminiGradient
+        func makeQuota(caption: String, remaining: Double?, color: NSColor, accessibilityLabel: String) -> UsagePanelQuota {
+            UsagePanelQuota(
+                caption: caption,
+                percentText: remaining.map(Self.percentTitle(from:)) ?? "—",
+                fraction: (remaining ?? 0) / 100,
+                color: color,
+                accessibilityValue: remaining.map { "\(accessibilityLabel) \(Self.percentTitle(from: $0))" }
+                    ?? "\(accessibilityLabel) 정보 없음"
             )
         }
+        func onlineResetValue(_ text: String?) -> String {
+            guard var text, !text.isEmpty else { return "정보 없음" }
+            for suffix in ["에 초기화", "에 재설정", " resets"] where text.hasSuffix(suffix) {
+                text.removeLast(suffix.count)
+                break
+            }
 
-        var quota: UsagePanelQuota?
-        var weeklyQuota: UsagePanelQuota?
+            let locale = Locale(identifier: "ko_KR")
+            let timeZone = TimeZone.autoupdatingCurrent
+            let output = DateFormatter()
+            output.locale = locale
+            output.timeZone = timeZone
+
+            let datedInput = DateFormatter()
+            datedInput.locale = locale
+            datedInput.timeZone = timeZone
+            datedInput.dateFormat = "yyyy년 M월 d일 a h:mm"
+            let currentYear = Calendar.current.component(.year, from: now)
+            if let date = datedInput.date(from: "\(currentYear)년 \(text)") {
+                output.dateFormat = "M/d(EEEEE) HH:mm"
+                return output.string(from: date)
+            }
+
+            let timeInput = DateFormatter()
+            timeInput.locale = locale
+            timeInput.timeZone = timeZone
+            timeInput.dateFormat = "a h:mm"
+            if let date = timeInput.date(from: text) {
+                output.dateFormat = "HH:mm"
+                return output.string(from: date)
+            }
+            return text
+        }
+
+        let cliSessionRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.fiveHourRemainingFraction) }
+        let cliWeeklyRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.weeklyRemainingFraction) }
+        let onlineSessionRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.sessionUsedPercent) }
+        let onlineWeeklyRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.weeklyUsedPercent) }
+
+        let cliSessionQuota = makeQuota(caption: "C세션", remaining: cliSessionRemaining, color: colors[0], accessibilityLabel: "남은 Gemini CLI 세션 사용량")
+        let cliWeeklyQuota = makeQuota(caption: "C주간", remaining: cliWeeklyRemaining, color: colors[1], accessibilityLabel: "남은 Gemini CLI 주간 사용량")
+        let onlineSessionQuota = makeQuota(caption: "O세션", remaining: onlineSessionRemaining, color: colors[2], accessibilityLabel: "남은 Gemini 온라인 세션 사용량")
+        let onlineWeeklyQuota = makeQuota(caption: "O주간", remaining: onlineWeeklyRemaining, color: colors[3], accessibilityLabel: "남은 Gemini 온라인 주간 사용량")
+
+        var rowGroups: [UsagePanelRowGroup] = []
         var rows: [UsagePanelRow] = []
-
-        if let planTitle = snapshot.planTitle {
+        if let planTitle = snapshot?.planTitle {
             rows.append(UsagePanelRow(label: "요금제", value: planTitle))
         }
-
-        if let remaining = GeminiUsageCore.remainingPercent(from: snapshot.fiveHourRemainingFraction) {
-            quota = UsagePanelQuota(
-                caption: "세션 남음",
-                percentText: percentTitle(from: remaining),
-                fraction: remaining / 100,
-                color: accent,
-                accessibilityValue: "남은 Gemini 세션 사용량 \(percentTitle(from: remaining))"
-            )
-        } else {
-            rows.append(UsagePanelRow(label: "세션 남음", value: "정보 없음", isEmphasized: true))
-        }
-        if let resetsAt = snapshot.fiveHourResetsAt {
-            rows.append(UsagePanelRow(
-                label: "세션",
-                value: resetDateTimeFormatter.string(from: resetsAt),
-                isEmphasized: true
-            ))
-        }
-        if let remaining = GeminiUsageCore.remainingPercent(from: snapshot.weeklyRemainingFraction) {
-            weeklyQuota = UsagePanelQuota(
-                caption: "주간 남음",
-                percentText: percentTitle(from: remaining),
-                fraction: remaining / 100,
-                color: accent,
-                accessibilityValue: "남은 Gemini 주간 사용량 \(percentTitle(from: remaining))"
-            )
-        }
-        if let resetsAt = snapshot.weeklyResetsAt {
-            rows.append(UsagePanelRow(
-                label: "주간",
-                value: resetDateTimeFormatter.string(from: resetsAt)
-            ))
-        }
-        if let creditBalance = snapshot.creditBalance {
-            rows.append(UsagePanelRow(
-                label: "크레딧",
-                value: "\(creditBalance)",
-                valueColor: creditBalance > 0 ? .systemGreen : .labelColor
-            ))
-        } else {
-            rows.append(UsagePanelRow(label: "크레딧", value: "정보 없음"))
-        }
+        rows.append(UsagePanelRow(label: "C세션 초기화", value: snapshot?.fiveHourResetsAt.map(Self.resetDateTimeFormatter.string(from:)) ?? "정보 없음"))
+        rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeFormatter.string(from:)) ?? "정보 없음"))
+        rows.append(UsagePanelRow(label: "O세션 초기화", value: onlineResetValue(online?.sessionResetText)))
+        rows.append(UsagePanelRow(label: "O주간 초기화", value: onlineResetValue(online?.weeklyResetText)))
+        rowGroups.append(UsagePanelRowGroup(rows: rows))
 
         var statusLines: [String] = []
+        var statusColor = NSColor.secondaryLabelColor
         if let fetchFailureLabel {
-            statusLines.append("갱신 실패: \(fetchFailureLabel)")
+            statusLines.append("CLI 갱신 실패: \(fetchFailureLabel)")
+            statusColor = .systemRed
         }
-
-        let accountLines = [snapshot.accountEmail.map { "계정 \($0)" } ?? "계정 정보 없음"]
+        if geminiOnlineNeedsConnection {
+            statusLines.append("온라인 연결 필요")
+            statusColor = .systemOrange
+        } else if geminiOnlineParseFailed {
+            statusLines.append("온라인 확인 불가")
+            statusColor = .systemOrange
+        } else if let online, !GeminiOnlineUsageCore.isFresh(fetchedAt: online.fetchedAt, now: now) {
+            statusLines.append("온라인 마지막 값")
+            statusColor = .systemOrange
+        }
 
         return UsagePanelColumn(
             title: "Gemini",
             accentColor: accent,
-            quota: quota,
-            secondaryQuota: weeklyQuota,
-            rows: rows,
-            accountLines: accountLines,
-            refreshLine: snapshot.publishedAt.map {
-                "업데이트 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
-            },
+            quota: cliSessionQuota,
+            secondaryQuota: cliWeeklyQuota,
+            tertiaryQuota: onlineSessionQuota,
+            quaternaryQuota: onlineWeeklyQuota,
+            rowGroups: rowGroups,
+            accountLines: [snapshot?.accountEmail.map { "계정 \($0)" } ?? "계정 정보 없음"],
+            refreshLine: {
+                var parts: [String] = []
+                if let publishedAt = snapshot?.publishedAt {
+                    parts.append("C \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))")
+                }
+                if let fetchedAt = online?.fetchedAt {
+                    parts.append("O \(Self.relativeFormatter.localizedString(for: fetchedAt, relativeTo: now))")
+                }
+                return parts.isEmpty ? nil : parts.joined(separator: " · ")
+            }(),
             statusLines: statusLines,
-            statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed,
-            primaryQuotaGradientColors: nil,
-            secondaryQuotaGradientColors: nil
+            statusColor: statusColor
         )
     }
 
@@ -3200,7 +3341,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     accessibilityValue: "Grok 주간 사용량 정보 없음"
                 ),
                 secondaryQuota: nil,
-                rows: [UsagePanelRow(label: "Grok", value: "정보 없음")],
+                rowGroups: [UsagePanelRowGroup(rows: [UsagePanelRow(label: "Grok", value: "정보 없음")])],
                 accountLines: ["계정 정보 없음"],
                 refreshLine: nil,
                 statusLines: statusLines,
@@ -3209,7 +3350,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         var quota: UsagePanelQuota?
-        var rows: [UsagePanelRow] = []
+        var summaryRows: [UsagePanelRow] = []
+        var estimateRows: [UsagePanelRow] = []
+        var resetCreditRows: [UsagePanelRow] = []
 
         if let estimate = snapshot.rollingTokenUsage {
             quota = UsagePanelQuota(
@@ -3236,32 +3379,38 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 accessibilityValue: "Grok 주간 사용량 정보 없음"
             )
         }
-        rows.append(UsagePanelRow(label: "요금제", value: snapshot.subscriptionTier ?? "정보 없음"))
+        summaryRows.append(UsagePanelRow(label: "요금제", value: snapshot.subscriptionTier ?? "정보 없음"))
         if let estimate = snapshot.rollingTokenUsage {
             let used = NumberFormatter.localizedString(from: NSNumber(value: estimate.usedTokens), number: .decimal)
             let limit = NumberFormatter.localizedString(from: NSNumber(value: estimate.limitTokens), number: .decimal)
-            rows.append(UsagePanelRow(label: "토큰 추정", value: "\(used) / \(limit)"))
+            estimateRows.append(UsagePanelRow(label: "토큰 추정", value: "\(used) / \(limit)"))
             if let recoveryAt = estimate.recoveryAt {
-                rows.append(UsagePanelRow(
+                estimateRows.append(UsagePanelRow(
                     label: "회복 예상",
                     value: resetDateTimeFormatter.string(from: recoveryAt),
                     isEmphasized: true
                 ))
             }
         }
-        rows.append(UsagePanelRow(
+        resetCreditRows.append(UsagePanelRow(
             label: "월간",
             value: snapshot.monthlyUsedCredits.map { "\(creditDetailTitle(from: $0)) 크레딧 사용" } ?? "정보 없음"
         ))
-        rows.append(UsagePanelRow(
+        resetCreditRows.append(UsagePanelRow(
             label: "주간",
             value: snapshot.weeklyResetsAt.map(resetDateTimeFormatter.string(from:)) ?? "정보 없음",
             isEmphasized: true
         ))
-        rows.append(UsagePanelRow(
+        resetCreditRows.append(UsagePanelRow(
             label: "크레딧",
             value: snapshot.extraCreditBalance.map { "\(creditDetailTitle(from: $0)) 크레딧" } ?? "정보 없음"
         ))
+
+        var rowGroups: [UsagePanelRowGroup] = [UsagePanelRowGroup(rows: summaryRows)]
+        if !estimateRows.isEmpty {
+            rowGroups.append(UsagePanelRowGroup(title: "이 Mac 추정", glyph: .gauge, rows: estimateRows))
+        }
+        rowGroups.append(UsagePanelRowGroup(title: "초기화·크레딧", glyph: .clock, rows: resetCreditRows))
 
         var statusLines: [String] = []
         if snapshot.weeklyUsedPercent == nil, snapshot.rollingTokenUsage != nil {
@@ -3280,7 +3429,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             accentColor: accent,
             quota: quota,
             secondaryQuota: nil,
-            rows: rows,
+            rowGroups: rowGroups,
             accountLines: accountLines,
             refreshLine: snapshot.publishedAt.map {
                 "업데이트 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
@@ -3519,6 +3668,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         client.refreshRateLimits()
         refreshClaudeUsage(force: true)
         refreshGeminiUsage(force: true)
+        refreshGeminiOnlineQuietly(force: true)
         refreshGrokUsage()
     }
 
@@ -3539,6 +3689,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     claudeRetryAt: lastClaudeRateLimitRetryAt,
                     claudeFailureLabel: lastClaudeFetchFailureLabel,
                     geminiSnapshot: lastGeminiSnapshot,
+                    geminiOnlineSnapshot: lastGeminiOnlineSnapshot,
                     grokSnapshot: lastGrokSnapshot,
                     refreshInterval: refreshInterval
                 )
@@ -3675,6 +3826,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
             controller.onClaudeUsageAction = { [weak self] in self?.performClaudeUsageAction() }
             controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
+            controller.onRefreshAll = { [weak self] in self?.refresh() }
+            controller.onThemeChange = { [weak self] in self?.applyPanelTheme($0) }
             controller.setShareMenu(makeShareMenu())
             controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
             controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
@@ -3940,7 +4093,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func statusTitleParts(
         from snapshot: RateLimitSnapshot,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?
+        gemini: GeminiUsageSnapshot?,
+        geminiOnline: GeminiOnlineUsageSnapshot?
     ) -> [(text: String, color: NSColor)] {
         var parts: [(text: String, color: NSColor)] = []
 
@@ -3955,7 +4109,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append((percentTitle(from: claudeRemaining), UsageBrandColors.claude))
         }
 
-        if let geminiRemaining = GeminiUsageCore.remainingPercent(from: gemini?.fiveHourRemainingFraction) {
+        if let geminiRemaining = geminiRemainingValue(cli: gemini, online: geminiOnline) {
             parts.append((percentTitle(from: geminiRemaining), UsageBrandColors.geminiText))
         }
 
@@ -3969,7 +4123,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func accessibilityStatus(
         from snapshot: RateLimitSnapshot,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?
+        gemini: GeminiUsageSnapshot?,
+        geminiOnline: GeminiOnlineUsageSnapshot?
     ) -> String {
         var parts: [String] = []
         if let usedPercent = snapshot.usedPercent {
@@ -3978,10 +4133,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
             parts.append("남은 Claude 세션 \(percentTitle(from: claudeRemaining))")
         }
-        if let geminiRemaining = GeminiUsageCore.remainingPercent(from: gemini?.fiveHourRemainingFraction) {
-            parts.append("남은 Gemini 5시간 사용량 \(percentTitle(from: geminiRemaining))")
+        if let geminiRemaining = geminiRemainingValue(cli: gemini, online: geminiOnline) {
+            parts.append("남은 Gemini 세션 사용량 \(percentTitle(from: geminiRemaining))")
         }
         return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
+    }
+
+    private static func geminiRemainingValue(
+        cli: GeminiUsageSnapshot?,
+        online: GeminiOnlineUsageSnapshot?
+    ) -> Double? {
+        let cliSession = GeminiUsageCore.remainingPercent(from: cli?.fiveHourRemainingFraction)
+        let onlineSession = GeminiOnlineUsageCore.remainingPercent(from: online?.sessionUsedPercent)
+
+        guard cliSession != nil || onlineSession != nil else { return nil }
+
+        guard let onlineWeekly = GeminiOnlineUsageCore.remainingPercent(from: online?.weeklyUsedPercent) else {
+            return cliSession ?? onlineSession
+        }
+
+        if onlineWeekly <= 50 {
+            return cliSession ?? onlineSession
+        }
+
+        return onlineSession ?? cliSession
     }
 
     private static func percentTitle(from percent: Double) -> String {

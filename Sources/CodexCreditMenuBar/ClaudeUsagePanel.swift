@@ -123,6 +123,78 @@ struct UsagePanelQuota {
     }
 }
 
+/// A single recovery/refresh action attached to a quota group, e.g. the
+/// Gemini 온라인 bay's 연결/새로고침 button. The handler runs on the main
+/// actor from the button's own action.
+struct UsagePanelGroupAction {
+    let title: String
+    let accessibilityLabel: String
+    let handler: () -> Void
+}
+
+/// One labeled bay of quota rings inside a provider column. Gemini uses two
+/// of these as peer groups — `Gemini CLI`(Antigravity) and `Gemini 온라인`
+/// (gemini.google.com) — each with its own 세션/주간 ring pair sourced only
+/// from that group's own data.
+struct UsagePanelQuotaGroup {
+    let title: String
+    /// Small trailing context after the title, e.g. "Antigravity".
+    let contextLabel: String?
+    /// Quiet "사용 중" tag marking the currently preferred routing path.
+    /// Rendered as a structural accent, never as an alert.
+    let badgeText: String?
+    /// Up to two rings, sharing the column's standard ring grid.
+    let quotas: [UsagePanelQuota]
+    /// Optional gradient per quota, parallel to `quotas`.
+    let quotaGradients: [[NSColor]?]
+    /// Concise secondary lines under the rings (reset captions, freshness).
+    let detailLines: [String]
+    /// Connection/stale/parse-failure state, kept calm and separate from
+    /// the column-level status band.
+    let statusLine: String?
+    let statusColor: NSColor
+    let action: UsagePanelGroupAction?
+    let glyph: BKIconGlyph
+
+    init(
+        title: String,
+        contextLabel: String? = nil,
+        badgeText: String? = nil,
+        quotas: [UsagePanelQuota] = [],
+        quotaGradients: [[NSColor]?] = [],
+        detailLines: [String] = [],
+        statusLine: String? = nil,
+        statusColor: NSColor = .secondaryLabelColor,
+        action: UsagePanelGroupAction? = nil,
+        glyph: BKIconGlyph = .gauge
+    ) {
+        self.title = title
+        self.contextLabel = contextLabel
+        self.badgeText = badgeText
+        self.quotas = quotas
+        self.quotaGradients = quotaGradients
+        self.detailLines = detailLines
+        self.statusLine = statusLine
+        self.statusColor = statusColor
+        self.action = action
+        self.glyph = glyph
+    }
+}
+
+/// A compact labeled group of metric rows, replacing the old undifferentiated
+/// row list below the rings. A `nil` title renders the rows without a header.
+struct UsagePanelRowGroup {
+    let title: String?
+    let glyph: BKIconGlyph
+    let rows: [UsagePanelRow]
+
+    init(title: String? = nil, glyph: BKIconGlyph = .gauge, rows: [UsagePanelRow]) {
+        self.title = title
+        self.glyph = glyph
+        self.rows = rows
+    }
+}
+
 /// One bucket of work drawn in a column's strip: the ordinary meter, or a
 /// worker/model meter (Codex Spark, Claude Fable) measured alongside it.
 struct UsageHistorySeries {
@@ -198,7 +270,15 @@ struct UsagePanelColumn {
     /// Claude uses this for its overall weekly window when a model-specific
     /// (Fable) weekly limit has already taken the secondary ring slot.
     let tertiaryQuota: UsagePanelQuota?
-    let rows: [UsagePanelRow]
+    /// Optional fourth quota ring. Gemini uses four compact peer rings for
+    /// CLI session/weekly and online session/weekly.
+    let quaternaryQuota: UsagePanelQuota?
+    /// When non-empty, the plain ring row is replaced by these labeled bays
+    /// (Gemini: CLI vs. 온라인) and `quota`/`secondaryQuota`/`tertiaryQuota`
+    /// are ignored.
+    let quotaGroups: [UsagePanelQuotaGroup]
+    /// Metric rows in compact labeled groups.
+    let rowGroups: [UsagePanelRowGroup]
     /// Account identity and refresh age are laid out in separate, shared-height
     /// footer bands so all columns line up immediately above the chart.
     let accountLines: [String]
@@ -220,7 +300,9 @@ struct UsagePanelColumn {
         quota: UsagePanelQuota?,
         secondaryQuota: UsagePanelQuota?,
         tertiaryQuota: UsagePanelQuota? = nil,
-        rows: [UsagePanelRow],
+        quaternaryQuota: UsagePanelQuota? = nil,
+        quotaGroups: [UsagePanelQuotaGroup] = [],
+        rowGroups: [UsagePanelRowGroup],
         accountLines: [String],
         refreshLine: String?,
         statusLines: [String],
@@ -233,7 +315,9 @@ struct UsagePanelColumn {
         self.quota = quota
         self.secondaryQuota = secondaryQuota
         self.tertiaryQuota = tertiaryQuota
-        self.rows = rows
+        self.quaternaryQuota = quaternaryQuota
+        self.quotaGroups = quotaGroups
+        self.rowGroups = rowGroups
         self.accountLines = accountLines
         self.refreshLine = refreshLine
         self.statusLines = statusLines
@@ -241,6 +325,9 @@ struct UsagePanelColumn {
         self.primaryQuotaGradientColors = primaryQuotaGradientColors
         self.secondaryQuotaGradientColors = secondaryQuotaGradientColors
     }
+
+    /// Every metric row across all groups, in display order.
+    var allRows: [UsagePanelRow] { rowGroups.flatMap(\.rows) }
 }
 
 /// Fixed-height bar strip, newest sample on the left.
@@ -768,7 +855,7 @@ private final class UsageMetricRowView: NSView {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: size, weight: weight)
         field.textColor = color
-        field.lineBreakMode = .byTruncatingTail
+        field.lineBreakMode = .byClipping
         return field
     }
 
@@ -923,6 +1010,337 @@ private final class ProviderTitleMarkView: NSView {
     }
 }
 
+/// Quiet capsule tag ("사용 중") marking the preferred routing path. A thin
+/// hairline pill in the theme's structural accent — deliberately small and
+/// calm so it never reads as an alert.
+private final class UsageInUseBadgeView: NSView {
+    private let label: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 9, weight: .semibold)
+        field.alignment = .center
+        return field
+    }()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Returns the width the badge needs at the standard 14pt height.
+    @discardableResult
+    func apply(text: String, theme: UsagePanelTheme) -> CGFloat {
+        label.stringValue = text
+        label.textColor = theme == .bk ? BKStyleTokens.signalRed : .controlAccentColor
+        let width = ceil(label.intrinsicContentSize.width) + 12
+        label.frame = NSRect(x: 0, y: 1.5, width: width, height: 12)
+        needsDisplay = true
+        setAccessibilityElement(true)
+        setAccessibilityLabel(text)
+        return width
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let accent = label.textColor ?? .controlAccentColor
+        let pill = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: bounds.height / 2,
+            yRadius: bounds.height / 2
+        )
+        accent.withAlphaComponent(0.08).setFill()
+        pill.fill()
+        accent.withAlphaComponent(0.55).setStroke()
+        pill.lineWidth = 1
+        pill.stroke()
+    }
+}
+
+/// Section title for a labeled row group: a small icon well plus a quiet
+/// heading, shared by every principal section so same-role headers keep one
+/// optical scale.
+private final class UsageSectionHeaderView: NSView {
+    static let viewHeight: CGFloat = 21
+
+    private let wellView = BKIconWellView()
+    private let titleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10, weight: .semibold)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byClipping
+        return field
+    }()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(wellView)
+        addSubview(titleLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(title: String, glyph: BKIconGlyph, theme: UsagePanelTheme, width: CGFloat) {
+        wellView.glyph = glyph
+        wellView.theme = theme
+        titleLabel.stringValue = title
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk.withAlphaComponent(0.75) : .secondaryLabelColor
+        wellView.frame = NSRect(x: 4, y: 3, width: 15, height: 15)
+        titleLabel.frame = NSRect(x: 25, y: 4, width: max(0, width - 29), height: 13)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(title)
+    }
+}
+
+/// One labeled bay of quota rings (`UsagePanelQuotaGroup`): its own icon-well
+/// header with an optional quiet "사용 중" tag, up to two rings on the shared
+/// ring grid, concise secondary detail lines, and a calm status line with at
+/// most one recovery/refresh action.
+private final class UsageQuotaGroupView: NSView {
+    private static let headerHeight: CGFloat = 17
+    private static let headerGap: CGFloat = 5
+    private static let ringDiameter: CGFloat = 54
+    private static let ringLineWidth: CGFloat = 5
+    private static let ringGroupGap: CGFloat = 6
+    private static let captionGap: CGFloat = 3
+    private static let captionHeight: CGFloat = 14
+    private static let detailLineHeight: CGFloat = 13
+    private static let statusLineHeight: CGFloat = 15
+    private static let actionHeight: CGFloat = 21
+    private static let innerGap: CGFloat = 4
+
+    private let wellView = BKIconWellView()
+    private let titleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        field.lineBreakMode = .byClipping
+        return field
+    }()
+    private let contextLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 9, weight: .regular)
+        field.textColor = .tertiaryLabelColor
+        field.lineBreakMode = .byClipping
+        return field
+    }()
+    private let badgeView = UsageInUseBadgeView()
+    private let ringViews = [UsageRingView(), UsageRingView()]
+    private let percentLabels: [NSTextField] = (0..<2).map { _ in
+        let field = NSTextField(labelWithString: "")
+        field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        field.alignment = .center
+        field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
+        return field
+    }
+    private let captionLabels: [NSTextField] = (0..<2).map { _ in
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10, weight: .medium)
+        field.textColor = .secondaryLabelColor
+        field.alignment = .center
+        field.lineBreakMode = .byClipping
+        return field
+    }
+    private let detailLabel: NSTextField = {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.font = .systemFont(ofSize: 9.5)
+        field.textColor = .secondaryLabelColor
+        return field
+    }()
+    private let statusLabel: NSTextField = {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.font = .systemFont(ofSize: 10, weight: .medium)
+        return field
+    }()
+    private let actionButton: RolloverButton = {
+        let button = RolloverButton(title: "", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 10.5)
+        button.setAccessibilityRole(.button)
+        return button
+    }()
+    private var actionHandler: (() -> Void)?
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(wellView)
+        addSubview(titleLabel)
+        addSubview(contextLabel)
+        addSubview(badgeView)
+        ringViews.forEach(addSubview)
+        percentLabels.forEach(addSubview)
+        captionLabels.forEach(addSubview)
+        addSubview(detailLabel)
+        addSubview(statusLabel)
+        addSubview(actionButton)
+        actionButton.target = self
+        actionButton.action = #selector(performAction)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func performAction() {
+        actionHandler?()
+    }
+
+    /// Lays the group out for the given width and returns its height.
+    @discardableResult
+    func apply(_ group: UsagePanelQuotaGroup, width: CGFloat, theme: UsagePanelTheme) -> CGFloat {
+        wellView.glyph = group.glyph
+        wellView.theme = theme
+        titleLabel.stringValue = group.title
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
+        contextLabel.stringValue = group.contextLabel ?? ""
+        contextLabel.isHidden = group.contextLabel == nil
+
+        var y: CGFloat = 0
+        wellView.frame = NSRect(x: 0, y: y + 1, width: 15, height: 15)
+        let badgeWidth: CGFloat
+        if let badgeText = group.badgeText {
+            badgeView.isHidden = false
+            badgeWidth = badgeView.apply(text: badgeText, theme: theme)
+            badgeView.frame = NSRect(x: width - badgeWidth, y: y + 1, width: badgeWidth, height: 15)
+        } else {
+            badgeView.isHidden = true
+            badgeWidth = 0
+        }
+        let badgeReservation = badgeWidth > 0 ? badgeWidth + 6 : 0
+        let titleAvailableWidth = max(0, width - 21 - badgeReservation)
+        let titleWidth = min(ceil(titleLabel.intrinsicContentSize.width) + 8, titleAvailableWidth)
+        titleLabel.frame = NSRect(x: 21, y: y + 1, width: titleWidth, height: 14)
+        var trailingX = 21 + titleWidth + 4
+        if group.contextLabel != nil {
+            let contextWidth = min(
+                ceil(contextLabel.intrinsicContentSize.width) + 6,
+                max(0, width - trailingX - badgeReservation)
+            )
+            contextLabel.frame = NSRect(x: trailingX, y: y + 4, width: contextWidth, height: 11)
+            trailingX += contextWidth + 4
+        }
+        y += Self.headerHeight
+
+        let quotas = Array(group.quotas.prefix(2))
+        if quotas.isEmpty {
+            for index in 0..<2 {
+                ringViews[index].isHidden = true
+                percentLabels[index].isHidden = true
+                captionLabels[index].isHidden = true
+            }
+        } else {
+            y += Self.headerGap
+            let slotCount = CGFloat(quotas.count)
+            let groupWidth = (width - Self.ringGroupGap * (slotCount - 1)) / slotCount
+            for index in 0..<2 {
+                guard index < quotas.count else {
+                    ringViews[index].isHidden = true
+                    percentLabels[index].isHidden = true
+                    captionLabels[index].isHidden = true
+                    continue
+                }
+                let quota = quotas[index]
+                let ring = ringViews[index]
+                let percentLabel = percentLabels[index]
+                let captionLabel = captionLabels[index]
+                ring.isHidden = false
+                percentLabel.isHidden = false
+                captionLabel.isHidden = false
+                ring.lineWidth = Self.ringLineWidth
+                ring.progressColor = quota.color
+                ring.trackColor = quota.fraction <= 0
+                    ? quota.color.withAlphaComponent(0.55)
+                    : quota.color.withAlphaComponent(0.18)
+                ring.fraction = quota.fraction
+                ring.gradientColors = index < group.quotaGradients.count ? group.quotaGradients[index] : nil
+                percentLabel.stringValue = quota.percentText
+                percentLabel.font = .monospacedDigitSystemFont(
+                    ofSize: quota.percentText.count >= 4 ? 11 : 13,
+                    weight: .regular
+                )
+                captionLabel.stringValue = quota.caption
+                ring.setAccessibilityElement(true)
+                ring.setAccessibilityLabel("\(group.title) \(quota.caption)")
+                ring.setAccessibilityValue(quota.accessibilityValue)
+
+                let slotX = CGFloat(index) * (groupWidth + Self.ringGroupGap)
+                let ringX = slotX + (groupWidth - Self.ringDiameter) / 2
+                ring.frame = NSRect(x: ringX, y: y, width: Self.ringDiameter, height: Self.ringDiameter)
+                percentLabel.frame = NSRect(
+                    x: ringX,
+                    y: y + (Self.ringDiameter - 16) / 2,
+                    width: Self.ringDiameter,
+                    height: 16
+                )
+                captionLabel.frame = NSRect(
+                    x: slotX,
+                    y: y + Self.ringDiameter + Self.captionGap,
+                    width: groupWidth,
+                    height: Self.captionHeight
+                )
+            }
+            y += Self.ringDiameter + Self.captionGap + Self.captionHeight
+        }
+
+        if group.detailLines.isEmpty {
+            detailLabel.isHidden = true
+        } else {
+            detailLabel.isHidden = false
+            detailLabel.stringValue = group.detailLines.joined(separator: "\n")
+            y += Self.innerGap
+            let detailHeight = CGFloat(group.detailLines.count) * Self.detailLineHeight
+            detailLabel.frame = NSRect(x: 4, y: y, width: max(0, width - 8), height: detailHeight)
+            y += detailHeight
+        }
+
+        if let statusLine = group.statusLine {
+            statusLabel.isHidden = false
+            statusLabel.stringValue = statusLine
+            statusLabel.textColor = group.statusColor
+            y += Self.innerGap
+            statusLabel.frame = NSRect(x: 4, y: y, width: max(0, width - 8), height: Self.statusLineHeight)
+            y += Self.statusLineHeight
+        } else {
+            statusLabel.isHidden = true
+        }
+
+        if let action = group.action {
+            actionButton.isHidden = false
+            actionButton.title = action.title
+            actionButton.setAccessibilityLabel(action.accessibilityLabel)
+            actionHandler = action.handler
+            y += Self.innerGap
+            actionButton.frame = NSRect(x: 4, y: y, width: max(0, width - 8), height: Self.actionHeight)
+            y += Self.actionHeight
+        } else {
+            actionButton.isHidden = true
+            actionHandler = nil
+        }
+
+        var accessibilityParts: [String] = [group.title]
+        if let contextLabel = group.contextLabel { accessibilityParts.append(contextLabel) }
+        if let badgeText = group.badgeText { accessibilityParts.append(badgeText) }
+        accessibilityParts.append(contentsOf: quotas.map(\.accessibilityValue))
+        accessibilityParts.append(contentsOf: group.detailLines)
+        if let statusLine = group.statusLine { accessibilityParts.append(statusLine) }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel(accessibilityParts.joined(separator: ", "))
+        return y
+    }
+}
+
 /// One column of the panel: a title, an optional primary quota ring, a
 /// stack of metric rows, and an aligned account/refresh footer.
 private final class UsageColumnView: NSView {
@@ -958,7 +1376,7 @@ private final class UsageColumnView: NSView {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byTruncatingTail
+        field.lineBreakMode = .byClipping
         field.alignment = .center
         return field
     }()
@@ -974,7 +1392,7 @@ private final class UsageColumnView: NSView {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byTruncatingTail
+        field.lineBreakMode = .byClipping
         field.alignment = .center
         return field
     }()
@@ -990,7 +1408,23 @@ private final class UsageColumnView: NSView {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byTruncatingTail
+        field.lineBreakMode = .byClipping
+        field.alignment = .center
+        return field
+    }()
+    private let quaternaryRingView = UsageRingView()
+    private let quaternaryPercentLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        field.alignment = .center
+        field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
+        return field
+    }()
+    private let quaternaryQuotaCaptionLabel: NSTextField = {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.font = .systemFont(ofSize: 10, weight: .medium)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byClipping
         field.alignment = .center
         return field
     }()
@@ -998,14 +1432,14 @@ private final class UsageColumnView: NSView {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 11)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byTruncatingMiddle
+        field.lineBreakMode = .byWordWrapping
         return field
     }()
     private let refreshLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 11)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byTruncatingTail
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let statusLabel: NSTextField = {
@@ -1015,9 +1449,13 @@ private final class UsageColumnView: NSView {
     }()
 
     private var rowViews: [UsageMetricRowView] = []
+    private var groupViews: [UsageQuotaGroupView] = []
+    private var sectionHeaderViews: [UsageSectionHeaderView] = []
     private var accountLineCount = 0
     private var hasRefreshLine = false
     private var statusLineCount = 0
+
+    private static let quotaGroupSectionGap: CGFloat = 10
 
     override var isFlipped: Bool { true }
 
@@ -1034,6 +1472,9 @@ private final class UsageColumnView: NSView {
         addSubview(tertiaryRingView)
         addSubview(tertiaryPercentLabel)
         addSubview(tertiaryQuotaCaptionLabel)
+        addSubview(quaternaryRingView)
+        addSubview(quaternaryPercentLabel)
+        addSubview(quaternaryQuotaCaptionLabel)
         addSubview(accountLabel)
         addSubview(refreshLabel)
         addSubview(statusLabel)
@@ -1047,7 +1488,7 @@ private final class UsageColumnView: NSView {
     /// returns the body height. The caller then gives all columns one shared
     /// footer origin so account and refresh information align horizontally.
     @discardableResult
-    func apply(_ column: UsagePanelColumn, width: CGFloat) -> CGFloat {
+    func apply(_ column: UsagePanelColumn, width: CGFloat, theme: UsagePanelTheme) -> CGFloat {
         titleLabel.stringValue = column.title
         titleLabel.textColor = column.accentColor
         titleMarkView.style = ProviderTitleMarkView.Style(providerTitle: column.title)
@@ -1056,7 +1497,35 @@ private final class UsageColumnView: NSView {
 
         var y: CGFloat = Self.titleHeight
 
-        if let quota = column.quota {
+        syncGroupViews(column.quotaGroups.count)
+        if !column.quotaGroups.isEmpty {
+            hidePlainQuotaViews()
+            y += Self.titleGap
+            if groupViews.count == 2 {
+                let gap: CGFloat = 10
+                let groupWidth = (width - gap) / 2
+                let heights = groupViews.enumerated().map { index, groupView in
+                    groupView.apply(column.quotaGroups[index], width: groupWidth, theme: theme)
+                }
+                let groupHeight = heights.max() ?? 0
+                for (index, groupView) in groupViews.enumerated() {
+                    groupView.frame = NSRect(
+                        x: CGFloat(index) * (groupWidth + gap),
+                        y: y,
+                        width: groupWidth,
+                        height: groupHeight
+                    )
+                }
+                y += groupHeight
+            } else {
+                for (index, groupView) in groupViews.enumerated() {
+                    if index > 0 { y += Self.quotaGroupSectionGap }
+                    let height = groupView.apply(column.quotaGroups[index], width: width, theme: theme)
+                    groupView.frame = NSRect(x: 0, y: y, width: width, height: height)
+                    y += height
+                }
+            }
+        } else if let quota = column.quota {
             y += Self.titleGap
             let showsRing = quota.displayStyle == .ring
             ringView.isHidden = !showsRing
@@ -1080,15 +1549,14 @@ private final class UsageColumnView: NSView {
             let quotaCount = 1
                 + (column.secondaryQuota == nil ? 0 : 1)
                 + (column.tertiaryQuota == nil ? 0 : 1)
+                + (column.quaternaryQuota == nil ? 0 : 1)
             let groupWidth = (
                 width - Self.quotaGroupGap * CGFloat(max(0, quotaCount - 1))
             ) / CGFloat(quotaCount)
             let diameter = Self.quotaDiameter
-            ringView.lineWidth = Self.quotaLineWidth
-            percentLabel.font = .monospacedDigitSystemFont(
-                ofSize: quota.percentText.count >= 4 ? 11 : 13,
-                weight: .regular
-            )
+            let lineWidth = Self.quotaLineWidth
+            ringView.lineWidth = lineWidth
+            percentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
             let primaryRingX = (groupWidth - diameter) / 2
             ringView.frame = NSRect(x: primaryRingX, y: y, width: diameter, height: diameter)
             if quota.displayStyle == .prominentValue {
@@ -1116,12 +1584,9 @@ private final class UsageColumnView: NSView {
                     : secondaryQuota.color.withAlphaComponent(0.18)
                 secondaryRingView.fraction = secondaryQuota.fraction
                 secondaryRingView.gradientColors = column.secondaryQuotaGradientColors
-                secondaryRingView.lineWidth = Self.quotaLineWidth
+                secondaryRingView.lineWidth = lineWidth
                 secondaryPercentLabel.stringValue = secondaryQuota.percentText
-                secondaryPercentLabel.font = .monospacedDigitSystemFont(
-                    ofSize: secondaryQuota.percentText.count >= 4 ? 11 : 13,
-                    weight: .regular
-                )
+                secondaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
                 secondaryQuotaCaptionLabel.stringValue = secondaryQuota.caption
                 secondaryRingView.setAccessibilityElement(true)
                 secondaryRingView.setAccessibilityLabel(secondaryQuota.caption)
@@ -1152,12 +1617,9 @@ private final class UsageColumnView: NSView {
                     ? tertiaryQuota.color.withAlphaComponent(0.55)
                     : tertiaryQuota.color.withAlphaComponent(0.18)
                 tertiaryRingView.fraction = tertiaryQuota.fraction
-                tertiaryRingView.lineWidth = Self.quotaLineWidth
+                tertiaryRingView.lineWidth = lineWidth
                 tertiaryPercentLabel.stringValue = tertiaryQuota.percentText
-                tertiaryPercentLabel.font = .monospacedDigitSystemFont(
-                    ofSize: tertiaryQuota.percentText.count >= 4 ? 11 : 13,
-                    weight: .regular
-                )
+                tertiaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
                 tertiaryQuotaCaptionLabel.stringValue = tertiaryQuota.caption
                 tertiaryRingView.setAccessibilityElement(true)
                 tertiaryRingView.setAccessibilityLabel(tertiaryQuota.caption)
@@ -1179,30 +1641,69 @@ private final class UsageColumnView: NSView {
                 tertiaryQuotaCaptionLabel.isHidden = true
             }
 
+            if let quaternaryQuota = column.quaternaryQuota {
+                quaternaryRingView.isHidden = false
+                quaternaryPercentLabel.isHidden = false
+                quaternaryQuotaCaptionLabel.isHidden = false
+                quaternaryRingView.progressColor = quaternaryQuota.color
+                quaternaryRingView.trackColor = quaternaryQuota.fraction <= 0
+                    ? quaternaryQuota.color.withAlphaComponent(0.55)
+                    : quaternaryQuota.color.withAlphaComponent(0.18)
+                quaternaryRingView.fraction = quaternaryQuota.fraction
+                quaternaryRingView.lineWidth = lineWidth
+                quaternaryPercentLabel.stringValue = quaternaryQuota.percentText
+                quaternaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+                quaternaryQuotaCaptionLabel.stringValue = quaternaryQuota.caption
+                quaternaryRingView.setAccessibilityElement(true)
+                quaternaryRingView.setAccessibilityLabel(quaternaryQuota.caption)
+                quaternaryRingView.setAccessibilityValue(quaternaryQuota.accessibilityValue)
+
+                let quaternaryGroupX = groupWidth * 3 + Self.quotaGroupGap * 3
+                let ringX = quaternaryGroupX + (groupWidth - diameter) / 2
+                quaternaryRingView.frame = NSRect(x: ringX, y: y, width: diameter, height: diameter)
+                quaternaryPercentLabel.frame = NSRect(x: ringX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
+                quaternaryQuotaCaptionLabel.frame = NSRect(
+                    x: quaternaryGroupX,
+                    y: y + diameter + Self.quotaCaptionGap,
+                    width: groupWidth,
+                    height: Self.quotaCaptionHeight
+                )
+            } else {
+                quaternaryRingView.isHidden = true
+                quaternaryPercentLabel.isHidden = true
+                quaternaryQuotaCaptionLabel.isHidden = true
+            }
+
             y += diameter + Self.quotaCaptionGap + Self.quotaCaptionHeight
         } else {
-            ringView.isHidden = true
-            percentLabel.isHidden = true
-            quotaCaptionLabel.isHidden = true
-            secondaryRingView.isHidden = true
-            secondaryPercentLabel.isHidden = true
-            secondaryQuotaCaptionLabel.isHidden = true
-            tertiaryRingView.isHidden = true
-            tertiaryPercentLabel.isHidden = true
-            tertiaryQuotaCaptionLabel.isHidden = true
+            hidePlainQuotaViews()
         }
 
-        syncRows(column.rows)
-        if !rowViews.isEmpty {
+        let allRows = column.allRows
+        syncRows(allRows)
+        let titledGroupCount = column.rowGroups.filter { $0.title != nil && !$0.rows.isEmpty }.count
+        syncSectionHeaders(titledGroupCount)
+        if !allRows.isEmpty {
             y += Self.rowsTopGap
-            for (index, rowView) in rowViews.enumerated() {
-                let row = column.rows[index]
-                let height = row.detail == nil ? Self.singleLineRowHeight : Self.detailRowHeight
-                rowView.apply(row, width: width, height: height)
-                rowView.frame = NSRect(x: 0, y: y, width: width, height: height)
-                y += height + Self.rowGap
+            var rowIndex = 0
+            var headerIndex = 0
+            for group in column.rowGroups where !group.rows.isEmpty {
+                if let groupTitle = group.title {
+                    let headerView = sectionHeaderViews[headerIndex]
+                    headerIndex += 1
+                    headerView.apply(title: groupTitle, glyph: group.glyph, theme: theme, width: width)
+                    headerView.frame = NSRect(x: 0, y: y, width: width, height: UsageSectionHeaderView.viewHeight)
+                    y += UsageSectionHeaderView.viewHeight
+                }
+                for row in group.rows {
+                    let rowView = rowViews[rowIndex]
+                    rowIndex += 1
+                    let height = row.detail == nil ? Self.singleLineRowHeight : Self.detailRowHeight
+                    rowView.apply(row, width: width, height: height)
+                    rowView.frame = NSRect(x: 0, y: y, width: width, height: height)
+                    y += height + Self.rowGap
+                }
             }
-            y -= Self.rowGap
         }
 
         accountLineCount = column.accountLines.count
@@ -1217,16 +1718,28 @@ private final class UsageColumnView: NSView {
         statusLabel.isHidden = column.statusLines.isEmpty
 
         var accessibilityParts = [column.title]
-        if let quota = column.quota {
-            accessibilityParts.append(quota.accessibilityValue)
+        if !column.quotaGroups.isEmpty {
+            for group in column.quotaGroups {
+                accessibilityParts.append(group.title)
+                if let badgeText = group.badgeText { accessibilityParts.append(badgeText) }
+                accessibilityParts.append(contentsOf: group.quotas.map(\.accessibilityValue))
+                if let statusLine = group.statusLine { accessibilityParts.append(statusLine) }
+            }
+        } else {
+            if let quota = column.quota {
+                accessibilityParts.append(quota.accessibilityValue)
+            }
+            if let secondaryQuota = column.secondaryQuota {
+                accessibilityParts.append(secondaryQuota.accessibilityValue)
+            }
+            if let tertiaryQuota = column.tertiaryQuota {
+                accessibilityParts.append(tertiaryQuota.accessibilityValue)
+            }
+            if let quaternaryQuota = column.quaternaryQuota {
+                accessibilityParts.append(quaternaryQuota.accessibilityValue)
+            }
         }
-        if let secondaryQuota = column.secondaryQuota {
-            accessibilityParts.append(secondaryQuota.accessibilityValue)
-        }
-        if let tertiaryQuota = column.tertiaryQuota {
-            accessibilityParts.append(tertiaryQuota.accessibilityValue)
-        }
-        accessibilityParts.append(contentsOf: column.rows.map(\.accessibilityLabel))
+        accessibilityParts.append(contentsOf: allRows.map(\.accessibilityLabel))
         accessibilityParts.append(contentsOf: column.accountLines)
         if let refreshLine = column.refreshLine {
             accessibilityParts.append(refreshLine)
@@ -1278,6 +1791,43 @@ private final class UsageColumnView: NSView {
         while rowViews.count > rows.count {
             rowViews.removeLast().removeFromSuperview()
         }
+    }
+
+    private func syncGroupViews(_ count: Int) {
+        while groupViews.count < count {
+            let groupView = UsageQuotaGroupView()
+            addSubview(groupView)
+            groupViews.append(groupView)
+        }
+        while groupViews.count > count {
+            groupViews.removeLast().removeFromSuperview()
+        }
+    }
+
+    private func syncSectionHeaders(_ count: Int) {
+        while sectionHeaderViews.count < count {
+            let headerView = UsageSectionHeaderView()
+            addSubview(headerView)
+            sectionHeaderViews.append(headerView)
+        }
+        while sectionHeaderViews.count > count {
+            sectionHeaderViews.removeLast().removeFromSuperview()
+        }
+    }
+
+    private func hidePlainQuotaViews() {
+        ringView.isHidden = true
+        percentLabel.isHidden = true
+        quotaCaptionLabel.isHidden = true
+        secondaryRingView.isHidden = true
+        secondaryPercentLabel.isHidden = true
+        secondaryQuotaCaptionLabel.isHidden = true
+        tertiaryRingView.isHidden = true
+        tertiaryPercentLabel.isHidden = true
+        tertiaryQuotaCaptionLabel.isHidden = true
+        quaternaryRingView.isHidden = true
+        quaternaryPercentLabel.isHidden = true
+        quaternaryQuotaCaptionLabel.isHidden = true
     }
 }
 
@@ -1421,6 +1971,11 @@ final class SplitUsagePanelView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// Theme and content height captured at apply time so `draw(_:)` can
+    /// paint the BK enamel column cards behind the columns.
+    private var appliedTheme: UsagePanelTheme = .classic
+    private var appliedContentHeight: CGFloat = 0
+
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: 40))
         addSubview(codexColumnView)
@@ -1435,11 +1990,31 @@ final class SplitUsagePanelView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard appliedTheme == .bk, appliedContentHeight > 0 else { return }
+        for x in UsagePanelLayout.columnX {
+            BKStyleTokens.drawCard(
+                in: NSRect(
+                    x: x - 4,
+                    y: topPadding - 3,
+                    width: columnWidth + 8,
+                    height: appliedContentHeight + 6
+                ),
+                radius: 9
+            )
+        }
+    }
+
     func apply(_ model: UsagePanelModel) {
+        let theme = UsagePanelThemeStore.current
+        appliedTheme = theme
         let columnViews = [codexColumnView, claudeColumnView, geminiColumnView]
         let columns = [model.codex, model.claude, model.gemini]
 
-        let bodyHeights = zip(columnViews, columns).map { view, column in view.apply(column, width: columnWidth) }
+        let bodyHeights = zip(columnViews, columns).map { view, column in
+            view.apply(column, width: columnWidth, theme: theme)
+        }
         let bodyHeight = max(bodyHeights.max() ?? 1, 1)
 
         let footers = columnViews.map { $0.footerCapacities() }
@@ -1466,9 +2041,14 @@ final class SplitUsagePanelView: NSView {
         for (index, columnView) in columnViews.enumerated() {
             columnView.frame = NSRect(x: UsagePanelLayout.columnX[index], y: topPadding, width: columnWidth, height: contentHeight)
         }
+        // BK Style separates columns with enamel cards, so the hairline
+        // dividers only appear in the 기본 theme.
         for (index, divider) in dividers.enumerated() {
+            divider.isHidden = theme == .bk
             divider.frame = NSRect(x: UsagePanelLayout.dividerX(after: index), y: topPadding, width: 1, height: contentHeight)
         }
+        appliedContentHeight = contentHeight
+        needsDisplay = true
 
         var newFrame = frame
         newFrame.size.height = topPadding + contentHeight + bottomPadding
@@ -1741,6 +2321,157 @@ final class UsageHistoryChartView: NSView {
     }
 }
 
+/// Compact theme selector for the panel header. Pops its own explicit menu
+/// the same way `IntervalControlButton` does, because popup buttons hosted
+/// inside a tracking `NSMenu` are unreliable.
+@MainActor
+final class ThemeControlButton: RolloverButton {
+    var onSelect: ((UsagePanelTheme) -> Void)?
+
+    func updateDisplay() {
+        let theme = UsagePanelThemeStore.current
+        title = "테마 · \(theme.displayName)"
+        setAccessibilityLabel("패널 테마 선택")
+        setAccessibilityValue(theme.displayName)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        let frameInWindow = convert(bounds, to: nil)
+        let screenOrigin = window.convertToScreen(frameInWindow).origin
+        let hostMenu = enclosingMenuItem?.menu
+        hostMenu?.cancelTracking()
+        DispatchQueue.main.async { [weak self] in
+            self?.presentThemeMenu(at: screenOrigin)
+        }
+    }
+
+    private func presentThemeMenu(at screenOrigin: NSPoint) {
+        let menu = NSMenu()
+        let current = UsagePanelThemeStore.current
+        for theme in UsagePanelTheme.allCases {
+            let item = NSMenuItem(title: theme.displayName, action: #selector(selectTheme(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = theme.rawValue
+            item.state = theme == current ? .on : .off
+            menu.addItem(item)
+        }
+        _ = menu.popUp(positioning: nil, at: screenOrigin, in: nil)
+    }
+
+    @objc private func selectTheme(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let theme = UsagePanelTheme(rawValue: raw)
+        else { return }
+        onSelect?(theme)
+        updateDisplay()
+    }
+}
+
+/// Panel header shared by the status dropdown, the pinned panel, and the
+/// native fallback menu: CCMB identity with its icon well, the last global
+/// refresh, a compact refresh action, and unobtrusive theme access.
+@MainActor
+final class UsagePanelHeaderView: NSView {
+    static let viewHeight: CGFloat = 34
+
+    var onRefresh: (() -> Void)?
+    var onSelectTheme: ((UsagePanelTheme) -> Void)?
+
+    private let wellView = BKIconWellView()
+    private let titleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "CCMB")
+        field.font = .systemFont(ofSize: 13, weight: .semibold)
+        return field
+    }()
+    private let updatedLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10)
+        field.textColor = .secondaryLabelColor
+        field.alignment = .right
+        field.lineBreakMode = .byClipping
+        return field
+    }()
+    private let refreshButton: RolloverButton = {
+        let button = RolloverButton(title: "새로 고침", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 11)
+        button.setAccessibilityLabel("모든 제공자 사용량 새로 고침")
+        return button
+    }()
+    private let themeButton: ThemeControlButton = {
+        let button = ThemeControlButton(title: "테마", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 11)
+        return button
+    }()
+
+    override var isFlipped: Bool { true }
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
+        wellView.glyph = .gauge
+        addSubview(wellView)
+        addSubview(titleLabel)
+        addSubview(updatedLabel)
+        addSubview(refreshButton)
+        addSubview(themeButton)
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshTapped)
+        themeButton.onSelect = { [weak self] theme in
+            self?.onSelectTheme?(theme)
+            self?.applyThemeState()
+        }
+        applyThemeState()
+        layoutContent()
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setLastUpdatedText(_ text: String) {
+        updatedLabel.stringValue = text
+    }
+
+    /// Re-reads the stored theme into the well/labels/theme control, e.g.
+    /// after the theme was changed from a different panel instance.
+    func applyThemeState() {
+        let theme = UsagePanelThemeStore.current
+        wellView.theme = theme
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
+        themeButton.updateDisplay()
+    }
+
+    @objc private func refreshTapped() {
+        onRefresh?()
+    }
+
+    private func layoutContent() {
+        let sidePadding = UsagePanelLayout.sidePadding
+        let themeWidth: CGFloat = 110
+        let refreshWidth: CGFloat = 78
+        let buttonHeight: CGFloat = 22
+        let buttonY = (Self.viewHeight - buttonHeight) / 2
+        wellView.frame = NSRect(x: sidePadding, y: (Self.viewHeight - 18) / 2, width: 18, height: 18)
+        titleLabel.frame = NSRect(x: sidePadding + 25, y: (Self.viewHeight - 16) / 2, width: 60, height: 16)
+        let themeX = bounds.width - sidePadding - themeWidth
+        themeButton.frame = NSRect(x: themeX, y: buttonY, width: themeWidth, height: buttonHeight)
+        let refreshX = themeX - 6 - refreshWidth
+        refreshButton.frame = NSRect(x: refreshX, y: buttonY, width: refreshWidth, height: buttonHeight)
+        let updatedX = sidePadding + 25 + 60 + 6
+        updatedLabel.frame = NSRect(
+            x: updatedX,
+            y: (Self.viewHeight - 14) / 2,
+            width: max(0, refreshX - 8 - updatedX),
+            height: 14
+        )
+    }
+}
+
 /// A persistent companion for the transient status-menu content. Native
 /// `NSMenu` tracking always ends when the user clicks elsewhere, so keeping
 /// the same live usage summary visible requires a small floating panel rather
@@ -1761,6 +2492,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     private static let maximumContentScale: CGFloat = 1.00
     private static let contentScaleDefaultsKey = "pinnedUsagePanelContentScale"
 
+    private let headerView = UsagePanelHeaderView()
     private let usageView = SplitUsagePanelView()
     private let historyView = UsageHistoryChartView()
     private let usagePageButtonsView = UsagePageButtonsView()
@@ -1815,6 +2547,10 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     /// it via `onClose`. The transient dropdown instead uses
     /// `onToggleAlwaysView` to hand off to that persistent panel.
     var onOpacityChange: ((Double) -> Void)?
+    /// Global refresh from the panel header.
+    var onRefreshAll: (() -> Void)?
+    /// Theme switch from the panel header's unobtrusive selector.
+    var onThemeChange: ((UsagePanelTheme) -> Void)?
     var onCheckForUpdates: (() -> Void)?
     var onOpenDiagnosticLog: (() -> Void)?
     var onOpenGitHub: (() -> Void)?
@@ -1872,6 +2608,9 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: panel)
         panel.delegate = self
+        contentContainer.addSubview(headerView)
+        headerView.onRefresh = { [weak self] in self?.onRefreshAll?() }
+        headerView.onSelectTheme = { [weak self] theme in self?.onThemeChange?(theme) }
         contentContainer.addSubview(usageView)
         contentContainer.addSubview(refreshIntervalControlsView)
         contentContainer.addSubview(historyView)
@@ -1956,7 +2695,10 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         let controlsHeight = refreshIntervalControlsView.frame.height
         let versionHeight = updateVersionView.frame.height
         let lifecycleHeight = lifecycleActionsView.frame.height
+        headerView.applyThemeState()
+        let headerHeight = UsagePanelHeaderView.viewHeight
         let contentHeight = Self.topPadding + Self.bottomPadding
+            + headerHeight
             + usageView.frame.height
             + Self.sectionGap + controlsHeight
             + historyGap + historyHeight
@@ -1967,8 +2709,8 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         let contentWidth = UsagePanelLayout.viewWidth + Self.horizontalPadding * 2
 
         // Stacked bottom-up so the top-down reading order matches the status
-        // menu exactly: usage panel, refresh controls, history, usage-page
-        // buttons, primary settings, lifecycle/support actions.
+        // menu exactly: header, usage panel, refresh controls, history,
+        // usage-page buttons, primary settings, lifecycle/support actions.
         var y = Self.bottomPadding
         lifecycleActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
         y += lifecycleHeight + Self.sectionGap
@@ -1983,6 +2725,13 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         refreshIntervalControlsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
         y += controlsHeight + Self.sectionGap
         usageView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += usageView.frame.height
+        headerView.frame = NSRect(
+            x: Self.horizontalPadding,
+            y: y,
+            width: UsagePanelLayout.viewWidth,
+            height: headerHeight
+        )
 
         if let window {
             let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
@@ -2020,6 +2769,13 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
             loginRequired: grokLoginRequired,
             loginInProgress: grokLoginInProgress
         )
+    }
+
+    /// Header state that changes independently of the dashboard model:
+    /// the last-refresh caption and the stored theme selection.
+    func applyHeaderState(lastUpdatedText: String) {
+        headerView.setLastUpdatedText(lastUpdatedText)
+        headerView.applyThemeState()
     }
 
     func show() {

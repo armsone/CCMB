@@ -158,28 +158,16 @@ enum GeminiUsageClient {
                     return
                 }
 
-                runAgy(arguments: ["-p", "/credits", "--mode", "plan", "--sandbox", "--output-format", "json", "--print-timeout", "1m"]) { creditsResult in
-                    // The credit balance is optional context: a failed or
-                    // malformed `/credits` call must not discard a
-                    // successful `/usage` read.
-                    let creditBalance: Int?
-                    if case .success(let creditsData) = creditsResult {
-                        creditBalance = GeminiUsageCore.parseCredits(creditsData)
-                    } else {
-                        creditBalance = nil
-                    }
-
-                    let snapshot = GeminiUsageCore.snapshot(
-                        buckets: buckets,
-                        creditBalance: creditBalance,
-                        publishedAt: Date(),
-                        accountEmail: GeminiAccountStore.readActiveEmail(),
-                        planTitle: GeminiUsageCore.parsePlanTitle(usageData)
-                    )
-                    DispatchQueue.main.async { @MainActor in
-                        isFetchInFlight = false
-                        completion(.success(snapshot))
-                    }
+                let snapshot = GeminiUsageCore.snapshot(
+                    buckets: buckets,
+                    creditBalance: nil,
+                    publishedAt: Date(),
+                    accountEmail: GeminiAccountStore.readActiveEmail(),
+                    planTitle: GeminiUsageCore.parsePlanTitle(usageData)
+                )
+                DispatchQueue.main.async { @MainActor in
+                    isFetchInFlight = false
+                    completion(.success(snapshot))
                 }
             }
         }
