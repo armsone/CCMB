@@ -622,7 +622,7 @@ private final class UsageRingView: NSView {
 
         guard clampedFraction > 0 else { return }
         let progress = NSBezierPath()
-        let startAngle: CGFloat = 90
+        let startAngle: CGFloat = 270
         let endAngle = startAngle - CGFloat(clampedFraction) * 360
         progress.appendArc(withCenter: center, radius: radius, startAngle: startAngle, endAngle: endAngle, clockwise: true)
         progress.lineWidth = lineWidth
@@ -658,7 +658,7 @@ private final class UsageRingView: NSView {
 
         for index in 0..<Self.tickCount {
             let tickFraction = Double(index) / Double(Self.tickCount)
-            let angle = -.pi / 2 + CGFloat(tickFraction) * 2 * .pi
+            let angle = .pi / 2 + CGFloat(tickFraction) * 2 * .pi
             let path = NSBezierPath()
             path.lineWidth = index.isMultiple(of: 3) ? 1.05 : 0.75
             path.lineCapStyle = .round
@@ -681,7 +681,7 @@ private final class UsageRingView: NSView {
     }
 
     private func drawEndpoint(center: NSPoint, radius: CGFloat, fraction: Double) {
-        let angle = -.pi / 2 + CGFloat(fraction) * 2 * .pi
+        let angle = .pi / 2 + CGFloat(fraction) * 2 * .pi
         let point = NSPoint(
             x: center.x + cos(angle) * radius,
             y: center.y + sin(angle) * radius
