@@ -3300,11 +3300,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 return output.string(from: date)
             }
 
+            for format in ["yyyy MMM d 'at' h:mm a", "yyyy MMM d, 'at' h:mm a"] {
+                let englishInput = DateFormatter()
+                englishInput.locale = Locale(identifier: "en_US_POSIX")
+                englishInput.timeZone = timeZone
+                englishInput.dateFormat = format
+                if let date = englishInput.date(from: "\(currentYear) \(text)") {
+                    output.dateFormat = "M/d(EEEEE) HH:mm"
+                    return output.string(from: date)
+                }
+            }
+
             let timeInput = DateFormatter()
             timeInput.locale = locale
             timeInput.timeZone = timeZone
             timeInput.dateFormat = "a h:mm"
             if let date = timeInput.date(from: text) {
+                output.dateFormat = "HH:mm"
+                return output.string(from: date)
+            }
+            let englishTimeInput = DateFormatter()
+            englishTimeInput.locale = Locale(identifier: "en_US_POSIX")
+            englishTimeInput.timeZone = timeZone
+            englishTimeInput.dateFormat = "h:mm a"
+            if let date = englishTimeInput.date(from: text) {
                 output.dateFormat = "HH:mm"
                 return output.string(from: date)
             }
@@ -4374,8 +4393,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateStyle = .none
-        formatter.timeStyle = .medium
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
 

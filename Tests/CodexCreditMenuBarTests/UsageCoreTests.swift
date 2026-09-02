@@ -47,6 +47,17 @@ final class LowerControlsLayoutTests: XCTestCase {
         XCTAssertTrue(source.contains("formatter.dateFormat = \"HH:mm\""))
         XCTAssertFalse(source.contains("formatter.dateFormat = \"a h:mm:ss\""))
     }
+
+    func testAllDisplayedDatesIncludeWeekdayAndUseTwentyFourHourTime() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/CodexCreditMenuBar/main.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("formatter.dateFormat = \"M/d(EEEEE) HH:mm\""))
+        XCTAssertTrue(source.contains("formatter.dateFormat = \"HH:mm:ss\""))
+    }
 }
 
 final class UsageCoreTests: XCTestCase {
