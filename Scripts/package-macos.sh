@@ -4,9 +4,9 @@ set -euo pipefail
 APP_NAME="CCMB"
 EXECUTABLE_NAME="CodexCreditMenuBar"
 BUNDLE_ID="com.codex.creditmenubar"
-APP_VERSION="2.0.14"
-APP_BUILD="202609020909"
-APP_BUILD_STAMP="202609020909"
+APP_VERSION="2.0.15"
+APP_BUILD="202609021215"
+APP_BUILD_STAMP="202609021215"
 DEPLOYMENT_TARGET="10.15"
 ARM64_DEPLOYMENT_TARGET="11.0"
 ARM64_TRIPLE="arm64-apple-macosx$ARM64_DEPLOYMENT_TARGET"
@@ -22,6 +22,7 @@ SHARE_GUIDE="$ROOT_DIR/SHARE_README.md"
 SPARKLE_ARTIFACT_ROOT="$ROOT_DIR/.build/artifacts/sparkle/Sparkle"
 SPARKLE_FRAMEWORK_SOURCE="$SPARKLE_ARTIFACT_ROOT/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 SPARKLE_PUBLIC_KEY_FILE="$ROOT_DIR/Configuration/SparklePublicKey.txt"
+CLOUDKIT_ENTITLEMENTS="$ROOT_DIR/Configuration/CCMB.entitlements"
 SPARKLE_FEED_URL="https://raw.githubusercontent.com/armsone/CCMB/main/appcast.xml"
 DMG_GUIDE_NAME="설치 및 사용 안내.md"
 BUILD_ROOT="$ROOT_DIR/.build/distribution"
@@ -48,6 +49,7 @@ PACKAGE_LOCK_HELD=false
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 NOTARIZE=false
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+PROVISIONING_PROFILE="${PROVISIONING_PROFILE:-}"
 
 usage() {
   printf 'Usage: %s [--notarize]\n' "$(basename "$0")"
@@ -55,6 +57,7 @@ usage() {
   printf 'Environment:\n'
   printf '  CODESIGN_IDENTITY               Developer ID Application identity. Defaults to ad-hoc "-".\n'
   printf '  NOTARY_PROFILE                  xcrun notarytool keychain profile name.\n'
+  printf '  PROVISIONING_PROFILE            Developer ID provisioning profile with the CCMB iCloud container.\n'
 }
 
 while (($#)); do
@@ -90,6 +93,16 @@ fi
 if [[ "$NOTARIZE" == true && "$CODESIGN_IDENTITY" != "Developer ID Application:"* ]]; then
   printf 'error: --notarize requires a Developer ID Application identity, not %s\n' "$CODESIGN_IDENTITY" >&2
   exit 64
+fi
+
+if [[ "$NOTARIZE" == true && ! -f "$PROVISIONING_PROFILE" ]]; then
+  printf 'error: --notarize requires PROVISIONING_PROFILE for the CloudKit-enabled Mac app.\n' >&2
+  exit 66
+fi
+
+if [[ ! -f "$CLOUDKIT_ENTITLEMENTS" ]]; then
+  printf 'error: CloudKit entitlements are missing: %s\n' "$CLOUDKIT_ENTITLEMENTS" >&2
+  exit 66
 fi
 
 if [[ ! -f "$SHARE_GUIDE" ]]; then
@@ -440,6 +453,10 @@ BACKUP_APP_PATH="$PACKAGE_WORK_DIR/previous-$APP_NAME.app"
 BACKUP_DMG_PATH="$PACKAGE_WORK_DIR/previous-$APP_NAME.dmg"
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources" "$APP_PATH/Contents/Frameworks"
 
+if [[ "$NOTARIZE" == true ]]; then
+  ditto "$PROVISIONING_PROFILE" "$APP_PATH/Contents/embedded.provisionprofile"
+fi
+
 if [[ ! -f "$ICON_TOOL" ]]; then
   printf 'error: icon generator is missing: %s\n' "$ICON_TOOL" >&2
   exit 1
@@ -517,7 +534,13 @@ plutil -lint "$APP_PATH/Contents/Info.plist"
 printf 'Signing app with identity: %s\n' "$CODESIGN_IDENTITY"
 sign_sparkle_framework "$SPARKLE_FRAMEWORK_DEST"
 if [[ "$NOTARIZE" == true ]]; then
-  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_PATH"
+  codesign \
+    --force \
+    --options runtime \
+    --timestamp \
+    --entitlements "$CLOUDKIT_ENTITLEMENTS" \
+    --sign "$CODESIGN_IDENTITY" \
+    "$APP_PATH"
   verify_developer_id_app_signature "$APP_PATH"
 else
   codesign --force --sign "$CODESIGN_IDENTITY" "$APP_PATH"

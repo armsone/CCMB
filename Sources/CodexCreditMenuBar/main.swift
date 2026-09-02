@@ -30,6 +30,7 @@ private enum SharedUsageStore {
         geminiSnapshot: GeminiUsageSnapshot?,
         geminiOnlineSnapshot: GeminiOnlineUsageSnapshot?,
         grokSnapshot: GrokUsageSnapshot?,
+        consumptionHistory: UsageConsumptionHistoryStore,
         refreshInterval: TimeInterval
     ) throws {
         let remainingPercent = snapshot.usedPercent.map(UsageCore.remainingPercent)
@@ -76,7 +77,8 @@ private enum SharedUsageStore {
             "claude": claudePayload,
             "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: freshForSeconds),
             "gemini": geminiPayload,
-            "grok": GrokUsageCore.sharedPayload(from: grokSnapshot)
+            "grok": GrokUsageCore.sharedPayload(from: grokSnapshot),
+            "consumptionHistory": consumptionHistoryPayload(consumptionHistory)
         ]
 
         try FileManager.default.createDirectory(
@@ -89,6 +91,22 @@ private enum SharedUsageStore {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: snapshotURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: snapshotURL.path)
+    }
+
+    private static func consumptionHistoryPayload(_ history: UsageConsumptionHistoryStore) -> [String: Any] {
+        func samples(_ tracker: UsageConsumptionTracker) -> [[String: Any]] {
+            tracker.samples.map {
+                ["at": iso8601Formatter.string(from: $0.at), "amount": $0.amount]
+            }
+        }
+        return [
+            "slotCount": UsageConsumptionTracker.defaultCapacity,
+            "codex": samples(history.codex),
+            "codexSpark": samples(history.codexSpark),
+            "claude": samples(history.claude),
+            "claudeFable": samples(history.claudeFable),
+            "gemini": samples(history.gemini)
+        ]
     }
 
     static func installHelper() throws {
@@ -1299,6 +1317,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let launchAtLoginItem = NSMenuItem(title: "자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let shareItem = NSMenuItem(title: "사용량 공유", action: nil, keyEquivalent: "")
     private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중…", action: nil, keyEquivalent: "")
+    private lazy var cloudSyncUploader = CloudSyncUploader(snapshotFileURL: SharedUsageStore.snapshotURL)
+    private lazy var remoteFolderPublisher = RemoteFolderPublisher(snapshotFileURL: SharedUsageStore.snapshotURL)
+    private let remoteSyncItem = NSMenuItem(title: "iPhone 원격 동기화", action: nil, keyEquivalent: "")
+    private let remoteSyncStatusItem = NSMenuItem(title: "동기화 기록 없음", action: nil, keyEquivalent: "")
+    private let remoteSyncToggleItem = NSMenuItem(
+        title: "자동 업로드 사용",
+        action: #selector(toggleRemoteSync),
+        keyEquivalent: ""
+    )
+    private let remoteSyncNowItem = NSMenuItem(
+        title: "지금 모두 동기화",
+        action: #selector(syncRemoteNow),
+        keyEquivalent: ""
+    )
+    private let remoteFolderStatusItem = NSMenuItem(title: "클라우드 폴더 선택 안 됨", action: nil, keyEquivalent: "")
+    private let chooseRemoteFolderItem = NSMenuItem(
+        title: "Dropbox·Google Drive 폴더 선택…",
+        action: #selector(chooseRemoteFolder),
+        keyEquivalent: ""
+    )
+    private let clearRemoteFolderItem = NSMenuItem(
+        title: "클라우드 폴더 연결 해제",
+        action: #selector(clearRemoteFolder),
+        keyEquivalent: ""
+    )
     private let shareFolderItem = NSMenuItem(title: "저장 위치 열기", action: #selector(openSharedUsageFolder), keyEquivalent: "")
     private let copySharePromptCombinedItem = NSMenuItem(
         title: "전체(Codex+Claude+Gemini) 요청문 복사",
@@ -2068,6 +2111,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         configureShareMenu()
         menu.addItem(shareItem)
+        configureRemoteSyncMenu()
+        menu.addItem(remoteSyncItem)
         menu.addItem(.separator())
         updateVersionView.updateButton.target = updaterController
         updateVersionView.updateButton.action = #selector(SPUStandardUpdaterController.checkForUpdates(_:))
@@ -2339,6 +2384,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 geminiSnapshot: lastGeminiSnapshot,
                 geminiOnlineSnapshot: lastGeminiOnlineSnapshot,
                 grokSnapshot: lastGrokSnapshot,
+                consumptionHistory: UsageConsumptionHistoryStore(
+                    codex: codexConsumption,
+                    codexSpark: codexSparkConsumption,
+                    claude: claudeConsumption,
+                    claudeFable: claudeFableConsumption,
+                    gemini: geminiConsumption,
+                    grok: grokConsumption
+                ),
                 refreshInterval: refreshInterval
             )
             lastSharedUsageAt = snapshot.updatedAt
@@ -2349,6 +2402,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 "origin": .string(origin),
                 "codexFetchedAgeSeconds": .int(codexAgeSeconds)
             ])
+            // Remote upload rides behind the successful local publish and is
+            // fire-and-forget: a CloudKit failure never affects the file or
+            // any menu behavior beyond the 원격 동기화 status line.
+            cloudSyncUploader.uploadIfEnabled(trigger: origin)
+            remoteFolderPublisher.publishIfConfigured()
         } catch {
             lastShareError = error.localizedDescription
             updateShareStatus()
@@ -3517,6 +3575,115 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         return menu
     }
 
+    /// "iPhone 원격 동기화" submenu: status of the last CloudKit upload with
+    /// action-first advice, an on/off toggle for automatic uploads, and a
+    /// manual "지금 동기화". The uploaded data is the same usage-v1.json the
+    /// share menu already writes, stored only in the user's own iCloud
+    /// private database.
+    private func configureRemoteSyncMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        remoteSyncStatusItem.isEnabled = false
+        remoteSyncToggleItem.target = self
+        remoteSyncNowItem.target = self
+        let scopeItem = NSMenuItem(title: "내 iCloud 개인 영역에만 저장", action: nil, keyEquivalent: "")
+        scopeItem.isEnabled = false
+        scopeItem.toolTip = "같은 Apple ID로 로그인한 iPhone의 CCMB만 읽을 수 있습니다. 전송은 Apple이 보호합니다."
+        menu.addItem(remoteSyncStatusItem)
+        menu.addItem(.separator())
+        menu.addItem(remoteSyncToggleItem)
+        menu.addItem(remoteSyncNowItem)
+        menu.addItem(.separator())
+        remoteFolderStatusItem.isEnabled = false
+        chooseRemoteFolderItem.target = self
+        clearRemoteFolderItem.target = self
+        menu.addItem(remoteFolderStatusItem)
+        menu.addItem(chooseRemoteFolderItem)
+        menu.addItem(clearRemoteFolderItem)
+        menu.addItem(.separator())
+        menu.addItem(scopeItem)
+        remoteSyncItem.submenu = menu
+        cloudSyncUploader.onStatusChange = { [weak self] in
+            self?.updateRemoteSyncStatus()
+        }
+        remoteFolderPublisher.onStatusChange = { [weak self] in
+            self?.updateRemoteSyncStatus()
+        }
+        updateRemoteSyncStatus()
+        cloudSyncUploader.uploadIfEnabled(trigger: "launch")
+    }
+
+    private func updateRemoteSyncStatus() {
+        remoteSyncToggleItem.state = cloudSyncUploader.isEnabled ? .on : .off
+        clearRemoteFolderItem.isEnabled = remoteFolderPublisher.isConfigured
+        if let advice = remoteFolderPublisher.lastFailureAdvice {
+            setDetailTitle("클라우드 폴더 저장 실패", for: remoteFolderStatusItem)
+            remoteFolderStatusItem.toolTip = advice
+        } else if let folder = remoteFolderPublisher.selectedFolderName {
+            let suffix = remoteFolderPublisher.lastSuccessAt.map {
+                " · \(Self.timeFormatter.string(from: $0))"
+            } ?? ""
+            setDetailTitle("클라우드 폴더: \(folder)\(suffix)", for: remoteFolderStatusItem)
+            remoteFolderStatusItem.toolTip = "\(RemoteFolderPublisher.fileName)을 Files 앱에서 한 번 선택하면 iPhone이 계속 새로 읽습니다."
+        } else {
+            setDetailTitle("Dropbox·Google Drive 선택 안 됨", for: remoteFolderStatusItem)
+            remoteFolderStatusItem.toolTip = "파일 제공자 폴더를 선택하면 OAuth 없이 스냅샷 파일을 자동 갱신합니다."
+        }
+        if !cloudSyncUploader.hasCloudKitEntitlement {
+            setDetailTitle("iCloud 서명 없음 · 업로드 불가", for: remoteSyncStatusItem)
+            remoteSyncStatusItem.toolTip = "Apple Developer 계정에서 iCloud.com.armsone.ccmb 컨테이너를 등록하고 entitlement를 포함해 다시 서명해야 합니다."
+            return
+        }
+        if let failedAt = cloudSyncUploader.lastFailureAt {
+            setDetailTitle("동기화 실패 \(Self.timeFormatter.string(from: failedAt))", for: remoteSyncStatusItem)
+            remoteSyncStatusItem.toolTip = cloudSyncUploader.lastFailureAdvice
+            return
+        }
+        if let succeededAt = cloudSyncUploader.lastSuccessAt {
+            setDetailTitle("마지막 동기화 \(Self.timeFormatter.string(from: succeededAt))", for: remoteSyncStatusItem)
+            remoteSyncStatusItem.toolTip = "iPhone의 CCMB가 어디서든 이 값을 읽습니다."
+            return
+        }
+        setDetailTitle(
+            cloudSyncUploader.isEnabled ? "다음 사용량 갱신 때 업로드" : "자동 업로드 꺼짐",
+            for: remoteSyncStatusItem
+        )
+        remoteSyncStatusItem.toolTip = nil
+    }
+
+    @objc private func toggleRemoteSync() {
+        cloudSyncUploader.isEnabled.toggle()
+        if cloudSyncUploader.isEnabled {
+            cloudSyncUploader.uploadIfEnabled(trigger: "toggle-on")
+        }
+    }
+
+    @objc private func syncRemoteNow() {
+        cloudSyncUploader.uploadNow()
+        remoteFolderPublisher.publishIfConfigured()
+    }
+
+    @objc private func chooseRemoteFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "iPhone과 공유할 클라우드 폴더 선택"
+        panel.message = "Dropbox, Google Drive, iCloud Drive 또는 다른 동기화 폴더를 선택하세요. CCMB는 사용량 JSON만 저장합니다."
+        panel.prompt = "이 폴더 사용"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try remoteFolderPublisher.setFolder(url)
+        } catch {
+            remoteFolderStatusItem.toolTip = "폴더 권한을 저장하지 못했습니다. 다른 폴더를 선택해 주세요."
+        }
+        updateRemoteSyncStatus()
+    }
+
+    @objc private func clearRemoteFolder() {
+        remoteFolderPublisher.clearFolder()
+    }
+
     private func configureDiagnosticsMenu() {
         let menu = NSMenu()
         let pathItem = NSMenuItem(
@@ -3701,6 +3868,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     geminiSnapshot: lastGeminiSnapshot,
                     geminiOnlineSnapshot: lastGeminiOnlineSnapshot,
                     grokSnapshot: lastGrokSnapshot,
+                    consumptionHistory: UsageConsumptionHistoryStore(
+                        codex: codexConsumption,
+                        codexSpark: codexSparkConsumption,
+                        claude: claudeConsumption,
+                        claudeFable: claudeFableConsumption,
+                        gemini: geminiConsumption,
+                        grok: grokConsumption
+                    ),
                     refreshInterval: refreshInterval
                 )
                 lastShareError = nil

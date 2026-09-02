@@ -46,6 +46,29 @@ Use `~/.codex/bin/ccmb-usage --verify-live` when an independent `codex app-serve
 
 `ccmb-usage` never makes a Claude network request, including with `--verify-live`; it only reads the Claude snapshot already brokered by the running CCMB app or the passive Claude Code statusLine cache. The Claude object reports `source`, `fetchedAt`, `freshForSeconds`, `fresh`, and—while a 429 circuit is open—`circuitState`, `nextEligibleAt`, and `staleReason`, so Codex can distinguish a current reading from an explicitly stale last-known value without increasing Anthropic request frequency.
 
+## iPhone remote sync (CloudKit)
+
+After each successful local publish of `usage-v1.json`, CCMB can also upload the same snapshot to your own iCloud **private database** (container `iCloud.com.armsone.ccmb`, one fixed record overwritten in place — no history accumulates). The companion CCMB-iOS app, signed into the **same Apple ID**, reads that record from anywhere. The record carries only the snapshot JSON, its schema version, the publish time, and the Mac app version — never tokens, cookies, OAuth credentials, raw CLI responses, or local paths. Transport and storage are protected by Apple; only your Apple ID can read the data.
+
+Control it from the menu's **iPhone 원격 동기화** submenu: last sync success/failure time with advice, an automatic-upload toggle, and **지금 동기화** for a manual push. CloudKit failures never delay or fail local refreshes or the local file publish. Values on the iPhone only advance while the Mac is running and uploading fresh data.
+
+As an optional provider-neutral path, choose **Dropbox·Google Drive 폴더 선택…** in the same submenu. CCMB then refreshes `CCMB-usage-v1.json` in that folder after every local publish. The iPhone selects that file once through Files and keeps reading it on refresh. This also works with iCloud Drive, OneDrive, and other File Provider extensions without giving CCMB provider passwords or OAuth tokens.
+
+Remaining external setup (not done by this repository):
+
+1. Register the iCloud container `iCloud.com.armsone.ccmb` in the Apple Developer account and enable it for both app identifiers.
+2. Sign the Mac app with `Configuration/CCMB.entitlements` (iCloud container + CloudKit service) and an appropriate provisioning profile. Until then the menu shows "iCloud 서명 없음" and no upload is attempted.
+3. Deploy the CloudKit schema (record type `CCMBUsageSnapshot`) from the development environment to production in the CloudKit Console before distributing builds.
+
+The packaging script embeds and signs with that profile for a notarized build:
+
+```sh
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+PROVISIONING_PROFILE="/path/to/CCMB_Developer_ID.provisionprofile" \
+NOTARY_PROFILE="ccmb-notary" \
+./Scripts/package-macos.sh --notarize
+```
+
 ## Run from source
 
 ```sh
