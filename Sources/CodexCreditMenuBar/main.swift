@@ -3258,6 +3258,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let onlineSessionRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.sessionUsedPercent) }
         let onlineWeeklyRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.weeklyUsedPercent) }
 
+        func cliSessionResetValue() -> String {
+            if let resetsAt = snapshot?.fiveHourResetsAt {
+                return Self.resetDateTimeFormatter.string(from: resetsAt)
+            }
+            if let remaining = cliSessionRemaining, remaining >= 100 {
+                return "사용 시작 후 5시간"
+            }
+            return "정보 없음"
+        }
+
         let cliSessionQuota = makeQuota(caption: "C세션", remaining: cliSessionRemaining, color: colors[0], accessibilityLabel: "남은 Gemini CLI 세션 사용량")
         let cliWeeklyQuota = makeQuota(caption: "C주간", remaining: cliWeeklyRemaining, color: colors[1], accessibilityLabel: "남은 Gemini CLI 주간 사용량")
         let onlineSessionQuota = makeQuota(caption: "O세션", remaining: onlineSessionRemaining, color: colors[2], accessibilityLabel: "남은 Gemini 온라인 세션 사용량")
@@ -3268,7 +3278,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let planTitle = snapshot?.planTitle {
             rows.append(UsagePanelRow(label: "요금제", value: planTitle))
         }
-        rows.append(UsagePanelRow(label: "C세션 초기화", value: snapshot?.fiveHourResetsAt.map(Self.resetDateTimeFormatter.string(from:)) ?? "정보 없음"))
+        rows.append(UsagePanelRow(label: "C세션 초기화", value: cliSessionResetValue()))
         rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeFormatter.string(from:)) ?? "정보 없음"))
         rows.append(UsagePanelRow(label: "O세션 초기화", value: onlineResetValue(online?.sessionResetText)))
         rows.append(UsagePanelRow(label: "O주간 초기화", value: onlineResetValue(online?.weeklyResetText)))
