@@ -3,6 +3,22 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.15</title>
+            <pubDate>Wed, 02 Sep 2026 12:05:32 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.15</link>
+            <sparkle:version>202609021215</sparkle:version>
+            <sparkle:shortVersionString>2.0.15</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.15
+
+- iPhone 원격 동기화가 공개 빌드에서도 유지되도록 CloudKit 업로더를 포함했습니다.
+- Developer ID CloudKit 프로파일과 Production entitlement를 배포 앱에 포함했습니다.
+- Dropbox·Google Drive 등 File Provider 폴더로 스냅샷을 내보내는 보조 경로를 추가했습니다.
+- iPhone의 열정 그래프를 위한 최근 사용량 기록을 공유 스냅샷에 포함했습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.15/CCMB-2.0.15.dmg" length="3184676" type="application/octet-stream" sparkle:edSignature="IFeNWjFDsgdbaWiBtV9ajbP78kcwyUXo81fUJVCvZBcXmXdxftwcvShr/Tz5bTqM6c1AOq3jm6AqEObqHhVQDg=="/>
+        </item>
+        <item>
             <title>2.0.14</title>
             <pubDate>Wed, 02 Sep 2026 11:55:50 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.14</link>
@@ -31,21 +47,6 @@
 - Codex·Claude·Gemini 패널을 더 읽기 쉬운 BK Style 구조로 정리하고 잘린 문구를 없앴습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.13/CCMB-2.0.13.dmg" length="3125341" type="application/octet-stream" sparkle:edSignature="exx4mVMzdLnjxi7RhzomqZEQwyDS9MqGR7UkajkbdKS7+yRZtKBrPLkMiNfGf/6iw7SVU+F4iz2gV+YGdL51Ag=="/>
-        </item>
-        <item>
-            <title>2.0.12</title>
-            <pubDate>Sat, 29 Aug 2026 10:50:27 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.12</link>
-            <sparkle:version>346247</sparkle:version>
-            <sparkle:shortVersionString>2.0.12</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.12
-
-- 사용량 그래프 제목에서 중복되는 서비스 이름을 제거해 전체 정보를 한 줄로 표시합니다.
-- 그래프 제목에 말줄임표가 나타나지 않도록 했습니다.
-- 그래프 막대 호버 시각을 오전·오후와 초가 없는 24시간제 `HH:mm` 형식으로 바꿨습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.12/CCMB-2.0.12.dmg" length="2972958" type="application/octet-stream" sparkle:edSignature="NRiZxkNnt2CHcJ+JKqio6ylMw5G5CWOA/rdS+MibfIfD8XaIOCqfjfZlv66OX0kikpiyIbxmrXzYOCsGWrraCw=="/>
         </item>
     </channel>
 </rss>
