@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.16</title>
+            <pubDate>Wed, 02 Sep 2026 15:05:23 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.16</link>
+            <sparkle:version>202609021502</sparkle:version>
+            <sparkle:shortVersionString>2.0.16</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.16
+
+- 초기화 날짜를 `9/7(월) 19:00` 형식으로 통일했습니다.
+- 날짜에는 한글 요일을 붙이고 모든 화면 시각을 24시간제로 표시합니다.
+- Gemini 온라인의 한국어·영어 초기화 문구도 같은 형식으로 정규화합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.16/CCMB-2.0.16.dmg" length="3189387" type="application/octet-stream" sparkle:edSignature="2rPWGwvfjKocqBXtbIvPQSHHY6S+mPgT3g9v0Kqqj5bDCiu1Rn4aM5GW7Wa/KFd1Df5JyqLFOpNjOL+rQw3MCA=="/>
+        </item>
+        <item>
             <title>2.0.15</title>
             <pubDate>Wed, 02 Sep 2026 12:05:32 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.15</link>
@@ -30,23 +45,6 @@
 - Gemini CLI 세션을 아직 사용하지 않아 초기화 시각이 생성되지 않은 경우, `정보 없음` 대신 `사용 시작 후 5시간`으로 안내합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.14/CCMB-2.0.14.dmg" length="3125423" type="application/octet-stream" sparkle:edSignature="PX0DySWcFdYJ6Kux3/bQRGb+dvnkfyU2OqeQv7tPBKYY9U0JHsFzmzDf0I/B8W1rkj7sQHWlB9mA18sEw8FLBw=="/>
-        </item>
-        <item>
-            <title>2.0.13</title>
-            <pubDate>Tue, 01 Sep 2026 00:19:00 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.13</link>
-            <sparkle:version>202609010015</sparkle:version>
-            <sparkle:shortVersionString>2.0.13</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.13
-
-- Gemini CLI와 온라인의 세션·주간 남은 양을 네 개의 원형 그래프로 한눈에 보여줍니다.
-- Gemini 온라인 사용량과 초기화 시각을 로그인된 사용량 페이지에서 안전하게 갱신합니다.
-- Gemini 온라인 주간 잔량이 50%를 넘으면 메뉴바에 온라인 세션을, 이후에는 CLI 세션을 표시합니다.
-- Claude 세션이나 주간 사용량이 소진되면 초기화 시각까지 불필요한 갱신을 멈춥니다.
-- Codex·Claude·Gemini 패널을 더 읽기 쉬운 BK Style 구조로 정리하고 잘린 문구를 없앴습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.13/CCMB-2.0.13.dmg" length="3125341" type="application/octet-stream" sparkle:edSignature="exx4mVMzdLnjxi7RhzomqZEQwyDS9MqGR7UkajkbdKS7+yRZtKBrPLkMiNfGf/6iw7SVU+F4iz2gV+YGdL51Ag=="/>
         </item>
     </channel>
 </rss>
