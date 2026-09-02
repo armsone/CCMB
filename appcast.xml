@@ -3,6 +3,19 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.14</title>
+            <pubDate>Wed, 02 Sep 2026 11:55:50 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.14</link>
+            <sparkle:version>202609020909</sparkle:version>
+            <sparkle:shortVersionString>2.0.14</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.14
+
+- Gemini CLI 세션을 아직 사용하지 않아 초기화 시각이 생성되지 않은 경우, `정보 없음` 대신 `사용 시작 후 5시간`으로 안내합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.14/CCMB-2.0.14.dmg" length="3125423" type="application/octet-stream" sparkle:edSignature="PX0DySWcFdYJ6Kux3/bQRGb+dvnkfyU2OqeQv7tPBKYY9U0JHsFzmzDf0I/B8W1rkj7sQHWlB9mA18sEw8FLBw=="/>
+        </item>
+        <item>
             <title>2.0.13</title>
             <pubDate>Tue, 01 Sep 2026 00:19:00 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.13</link>
@@ -33,20 +46,6 @@
 - 그래프 막대 호버 시각을 오전·오후와 초가 없는 24시간제 `HH:mm` 형식으로 바꿨습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.12/CCMB-2.0.12.dmg" length="2972958" type="application/octet-stream" sparkle:edSignature="NRiZxkNnt2CHcJ+JKqio6ylMw5G5CWOA/rdS+MibfIfD8XaIOCqfjfZlv66OX0kikpiyIbxmrXzYOCsGWrraCw=="/>
-        </item>
-        <item>
-            <title>2.0.11</title>
-            <pubDate>Sat, 29 Aug 2026 10:43:53 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.11</link>
-            <sparkle:version>346239</sparkle:version>
-            <sparkle:shortVersionString>2.0.11</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.11
-
-- 사용량 그래프 제목을 두 줄로 표시해 Codex Spark와 Claude Fable의 갱신당 사용량이 잘리지 않도록 수정했습니다.
-- 그래프 제목의 말줄임을 제거하고 전체 정보가 항상 보이도록 했습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.11/CCMB-2.0.11.dmg" length="2973162" type="application/octet-stream" sparkle:edSignature="ViHNN7VrDiapg57OnXTMK5WiXubbDIVxFc8iSyT28dKPcqdx9GOLrsfKmQ2Ivm9ixZL8U0L5+4fgva0CoCD3CQ=="/>
         </item>
     </channel>
 </rss>
