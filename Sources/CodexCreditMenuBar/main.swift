@@ -2894,9 +2894,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func refreshStatusTitle() {
         guard let snapshot = lastSnapshot else { return }
-        setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot))
+        // Keep the compact menu-bar Claude figure tied to Claude Code's local
+        // statusLine cache. The detailed panel may use the live web OAuth
+        // snapshot, but that value must not replace the CLI figure here.
+        let claudeCLISnapshot = ClaudeUsageStore.read()
+        setStatusTitle(Self.statusTitleParts(from: snapshot, claudeCLI: claudeCLISnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot))
         statusItem.button?.setAccessibilityValue(
-            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot)
+            Self.accessibilityStatus(from: snapshot, claudeCLI: claudeCLISnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot)
         )
     }
 
@@ -4296,7 +4300,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static func statusTitleParts(
         from snapshot: RateLimitSnapshot,
-        claude: ClaudeUsageSnapshot?,
+        claudeCLI: ClaudeUsageSnapshot?,
         gemini: GeminiUsageSnapshot?,
         geminiOnline: GeminiOnlineUsageSnapshot?
     ) -> [(text: String, color: NSColor)] {
@@ -4309,7 +4313,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append((codexTitle, UsageBrandColors.codex))
         }
 
-        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claudeCLI?.fiveHourUsedPercent) {
             parts.append((percentTitle(from: claudeRemaining), UsageBrandColors.claude))
         }
 
@@ -4326,7 +4330,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static func accessibilityStatus(
         from snapshot: RateLimitSnapshot,
-        claude: ClaudeUsageSnapshot?,
+        claudeCLI: ClaudeUsageSnapshot?,
         gemini: GeminiUsageSnapshot?,
         geminiOnline: GeminiOnlineUsageSnapshot?
     ) -> String {
@@ -4334,7 +4338,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let usedPercent = snapshot.usedPercent {
             parts.append("남은 Codex 주간 사용량 \(percentTitle(from: remainingUsagePercent(from: usedPercent)))")
         }
-        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claudeCLI?.fiveHourUsedPercent) {
             parts.append("남은 Claude 세션 \(percentTitle(from: claudeRemaining))")
         }
         if let geminiRemaining = geminiRemainingValue(cli: gemini, online: geminiOnline) {
