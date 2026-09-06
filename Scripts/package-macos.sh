@@ -380,6 +380,19 @@ verify_developer_id_dmg_signature() {
   fi
 }
 
+verify_distribution_policy() {
+  local target="$1"
+
+  # macOS 26's current distribution check is syspolicy_check. Its legacy
+  # spctl compatibility result can report a false rejection even after an
+  # Apple-accepted ticket has been stapled.
+  if command -v syspolicy_check >/dev/null 2>&1; then
+    syspolicy_check distribution "$target"
+  else
+    spctl --assess --type execute --verbose=4 "$target"
+  fi
+}
+
 sign_sparkle_framework() {
   local framework="$1"
   local sign_args=(--force --options runtime --sign "$CODESIGN_IDENTITY")
@@ -554,7 +567,7 @@ if [[ "$NOTARIZE" == true ]]; then
   xcrun stapler staple "$APP_PATH"
   xcrun stapler validate "$APP_PATH"
   codesign --verify --deep --strict --verbose=4 "$APP_PATH"
-  spctl --assess --type execute --verbose=4 "$APP_PATH"
+  verify_distribution_policy "$APP_PATH"
 fi
 
 printf 'Creating DMG...\n'
@@ -593,8 +606,8 @@ if [[ "$NOTARIZE" == true ]]; then
   xcrun stapler validate "$APP_PATH"
   xcrun stapler validate "$DMG_PATH"
   hdiutil verify "$DMG_PATH"
-  spctl --assess --type execute --verbose=4 "$APP_PATH"
-  spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
+  verify_distribution_policy "$APP_PATH"
+  verify_distribution_policy "$DMG_PATH"
 fi
 
 publish_artifacts

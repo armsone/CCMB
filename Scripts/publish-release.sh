@@ -54,14 +54,24 @@ if gh release view "$TAG" --repo armsone/CCMB >/dev/null 2>&1; then
   exit 65
 fi
 
+verify_distribution_policy() {
+  local target="$1"
+
+  if command -v syspolicy_check >/dev/null 2>&1; then
+    syspolicy_check distribution "$target"
+  else
+    spctl --assess --type execute --verbose=4 "$target"
+  fi
+}
+
 CODESIGN_IDENTITY="$DEVELOPER_IDENTITY" \
 NOTARY_PROFILE="$NOTARY_KEYCHAIN_PROFILE" \
   "$PACKAGE_SCRIPT" --notarize
 
 xcrun stapler validate "$ROOT_DIR/Products/Release/CCMB.app"
 xcrun stapler validate "$DMG_PATH"
-spctl --assess --type execute --verbose=4 "$ROOT_DIR/Products/Release/CCMB.app"
-spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
+verify_distribution_policy "$ROOT_DIR/Products/Release/CCMB.app"
+verify_distribution_policy "$DMG_PATH"
 
 WORK_DIR="$(mktemp -d "$PRODUCTS_DIR/.release.XXXXXX")"
 cp "$DMG_PATH" "$WORK_DIR/CCMB-$APP_VERSION.dmg"
