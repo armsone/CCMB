@@ -4356,10 +4356,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func setStatusTitle(_ title: String) {
         guard let button = statusItem.button else { return }
-        let font = button.font ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let font = button.font ?? NSFont.menuBarFont(ofSize: 0)
         button.attributedTitle = NSAttributedString(
             string: title,
-            attributes: [.font: font, .foregroundColor: NSColor.labelColor]
+            attributes: statusTitleAttributes(font: font, color: statusAdaptiveTextColor())
         )
         let titleWidth = (title as NSString).size(withAttributes: [.font: font]).width
         statusItem.length = ceil(titleWidth + 8)
@@ -4371,22 +4371,68 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             return
         }
         guard let button = statusItem.button else { return }
-        let font = button.font ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let font = button.font ?? NSFont.menuBarFont(ofSize: 0)
         let title = NSMutableAttributedString()
         for (index, part) in parts.enumerated() {
             if index > 0 {
                 title.append(NSAttributedString(
                     string: "·",
-                    attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]
+                    attributes: statusTitleAttributes(
+                        font: font,
+                        color: statusAdaptiveTextColor().withAlphaComponent(0.7)
+                    )
                 ))
             }
-            title.append(NSAttributedString(
-                string: part.text,
-                attributes: [.font: font, .foregroundColor: part.color]
-            ))
+            appendStatusPart(part.text, providerColor: part.color, font: font, to: title)
         }
         button.attributedTitle = title
         statusItem.length = ceil(title.size().width + 8)
+    }
+
+    /// Numbers use the menu bar's neutral adaptive ink. Only the percent
+    /// sign carries the provider accent, keeping the compact readout both
+    /// readable and visually consistent with neighboring menu bar items.
+    private func appendStatusPart(
+        _ text: String,
+        providerColor: NSColor,
+        font: NSFont,
+        to title: NSMutableAttributedString
+    ) {
+        guard let percentIndex = text.lastIndex(of: "%") else {
+            title.append(NSAttributedString(
+                string: text,
+                attributes: statusTitleAttributes(font: font, color: statusAdaptiveTextColor())
+            ))
+            return
+        }
+
+        let number = String(text[..<percentIndex])
+        title.append(NSAttributedString(
+            string: number,
+            attributes: statusTitleAttributes(font: font, color: statusAdaptiveTextColor())
+        ))
+        title.append(NSAttributedString(
+            string: "%",
+            attributes: statusTitleAttributes(font: font, color: providerColor)
+        ))
+    }
+
+    private func statusAdaptiveTextColor() -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor.white
+                : NSColor.black
+        }
+    }
+
+    private func statusTitleAttributes(
+        font: NSFont,
+        color: NSColor
+    ) -> [NSAttributedString.Key: Any] {
+        return [
+            .font: font,
+            .foregroundColor: color
+        ]
     }
 
     private static let percentFormatter: NumberFormatter = {
