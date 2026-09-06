@@ -10,6 +10,7 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PAT
 
 EXE="CodexCreditMenuBar"
 PACKAGE_SCRIPT="$ROOT_DIR/Scripts/package-macos.sh"
+CLOUDKIT_ENTITLEMENTS="$ROOT_DIR/Configuration/CCMB.entitlements"
 APP_VERSION="$(sed -n 's/^APP_VERSION="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
 APP_BUILD="$(sed -n 's/^APP_BUILD="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
 APP_BUILD_STAMP="$(sed -n 's/^APP_BUILD_STAMP="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
@@ -92,6 +93,10 @@ fi
 printf '%s\n' '--- LC_RPATH 확인 ---'
 otool -l "$DEST_BIN" | grep -A2 LC_RPATH | grep 'path ' || fail "rpath가 없습니다." "rpath-verify"
 [ -d "$STAGE/Contents/Frameworks/Sparkle.framework" ] || fail "번들에 Sparkle.framework가 없습니다." "no-sparkle"
+[ -f "$STAGE/Contents/embedded.provisionprofile" ] \
+  || fail "CloudKit 권한을 승인할 Developer ID provisioning profile이 없습니다." "cloudkit-profile-missing"
+[ -f "$CLOUDKIT_ENTITLEMENTS" ] \
+  || fail "CloudKit entitlement 파일이 없습니다: $CLOUDKIT_ENTITLEMENTS" "cloudkit-entitlements-missing"
 
 step "4/6 서명"
 # 서명 신원이 바뀌면 키체인은 이걸 '다른 앱'으로 보고 접근 권한을 다시 묻는다.
@@ -105,13 +110,25 @@ if [ -z "$SIGN_ID" ]; then
 fi
 if [ -n "$SIGN_ID" ]; then
   echo "서명 신원: $SIGN_ID (고정 신원 - 키체인 권한 유지됨)"
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --timestamp \
+    --entitlements "$CLOUDKIT_ENTITLEMENTS" \
+    --sign "$SIGN_ID" \
+    "$STAGE" || fail "CloudKit 권한을 포함한 코드 서명에 실패했습니다." "codesign"
 else
   SIGN_ID="-"
   echo "경고: Developer ID 인증서가 없어 임시(ad-hoc) 서명합니다."
   echo "      빌드할 때마다 키체인 비밀번호를 다시 물어볼 수 있습니다."
+  codesign --force --deep --sign "$SIGN_ID" "$STAGE" || fail "코드 서명 실패" "codesign"
 fi
-codesign --force --deep --sign "$SIGN_ID" "$STAGE" || fail "코드 서명 실패" "codesign"
 codesign --verify --deep --strict "$STAGE" || fail "코드 서명 검증 실패" "codesign-verify"
+SIGNED_ENTITLEMENTS="$(codesign -d --entitlements :- "$STAGE" 2>&1)"
+if [ "$SIGN_ID" != "-" ] && ! printf '%s' "$SIGNED_ENTITLEMENTS" | grep -F 'iCloud.com.armsone.ccmb' >/dev/null; then
+  fail "설치본 서명에서 CloudKit container entitlement가 사라졌습니다." "cloudkit-entitlement-stripped"
+fi
 
 step "5/6 설치"
 # osascript(애플 이벤트)는 절대 쓰지 않는다. 백그라운드에서 실행하면 macOS가

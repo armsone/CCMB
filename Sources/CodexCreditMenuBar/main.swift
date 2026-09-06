@@ -1497,6 +1497,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastErrorMessage: String?
     private var wakeRecoveryToken = 0
     private let wakeRestartDelay: TimeInterval = 14
+    /// Closed between system/display sleep and the next interactive wake.
+    /// While closed, no provider fetch is started and no snapshot is
+    /// published or uploaded, so a dark wake in a bag can never mint a fresh
+    /// `fetchedAt`/`publishedAt` for the iPhone.
+    private var isSleepGateClosed = false
+    private var lastWakeRecoveryStartedAt: Date?
     private var isOffline = false
     private let diagnosticLog = DiagnosticLog.shared
     private var appVersion: String {
@@ -1525,6 +1531,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             self,
             selector: #selector(handleWakeFromSleep),
             name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleScreensDidSleep),
+            name: NSWorkspace.screensDidSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleScreensDidWake),
+            name: NSWorkspace.screensDidWakeNotification,
             object: nil
         )
         loadConsumptionTrackers()
@@ -1598,9 +1622,53 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         return true
     }
 
+    @objc private func handleWillSleep() {
+        closeSleepGate(reason: "system_sleep")
+    }
+
+    @objc private func handleScreensDidSleep() {
+        closeSleepGate(reason: "display_sleep")
+    }
+
+    private func closeSleepGate(reason: String) {
+        guard !isSleepGateClosed else { return }
+        isSleepGateClosed = true
+        // Invalidating the token also silences wake watchdogs scheduled
+        // before this sleep, so they cannot restart the app-server mid-sleep.
+        wakeRecoveryToken += 1
+        appLog("sleep gate closed: \(reason)")
+        diagnosticLog.log("sleep_gate_closed", ["reason": .string(reason)])
+        stopAutoRefreshLoop()
+    }
+
     @objc private func handleWakeFromSleep() {
         appLog("did wake from sleep")
-        diagnosticLog.log("sleep_wake_recovery")
+        // A dark wake (Power Nap, lid closed in a bag) can deliver this
+        // notification while the display stays off; recovering here would
+        // publish a "fresh" snapshot the user never saw being taken.
+        guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else {
+            diagnosticLog.log("sleep_gate_dark_wake_ignored")
+            return
+        }
+        openSleepGateAndRecover(reason: "did_wake")
+    }
+
+    @objc private func handleScreensDidWake() {
+        openSleepGateAndRecover(reason: "screens_wake")
+    }
+
+    private func openSleepGateAndRecover(reason: String) {
+        let gateWasClosed = isSleepGateClosed
+        isSleepGateClosed = false
+        // didWake and screensDidWake both fire on a normal wake; only the
+        // first transition triggers the single recovery refresh.
+        if !gateWasClosed,
+           let last = lastWakeRecoveryStartedAt,
+           Date().timeIntervalSince(last) < 10 {
+            return
+        }
+        lastWakeRecoveryStartedAt = Date()
+        diagnosticLog.log("sleep_wake_recovery", ["reason": .string(reason)])
         recoverAfterWake()
     }
 
@@ -1739,6 +1807,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func performAutoRefresh() {
+        guard !isSleepGateClosed else {
+            diagnosticLog.log("auto_refresh_skip_asleep")
+            return
+        }
         let now = Date()
         let refreshCodex = refreshInterval > 0 && now >= nextCodexRefreshAt
         let refreshClaude = claudeRefreshInterval > 0 && now >= nextClaudeRefreshAt
@@ -1996,6 +2068,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func configureStatusItem() {
+        statusItem.autosaveName = "CCMB.MainStatusItem"
+        statusItem.isVisible = true
         statusItem.button?.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         statusItem.button?.toolTip = "Codex, Claude, Gemini 남은 사용량과 크레딧"
         statusItem.button?.image = nil
@@ -2266,6 +2340,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 self.appLog(message)
                 self.setStatusTitle("!")
                 self.setDetailTitle(message, for: self.updatedItem)
+                // Restarting the app-server mid-sleep would refetch during a
+                // dark wake; the wake recovery restart covers it instead.
+                guard !self.isSleepGateClosed else { return }
                 self.client.recoverFromSleep()
             }
         }
@@ -2285,6 +2362,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 } else if wasOffline {
                     self.appLog("network online")
                     self.diagnosticLog.log("network_online")
+                    // A dark wake briefly bringing the network up must not
+                    // start a fetch; wake recovery refreshes once instead.
+                    guard !self.isSleepGateClosed else { return }
                     self.setDetailTitle("연결 복구, 다시 가져오는 중...", for: self.updatedItem)
                     self.statusItem.button?.setAccessibilityValue("연결 복구 중")
                     self.client.recoverFromSleep()
@@ -2337,7 +2417,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         if let resetsAt = snapshot.resetsAt {
-            setDetailTitle("\(Self.resetDateTimeFormatter.string(from: resetsAt)) 초기화", for: resetItem)
+            setDetailTitle("\(Self.resetDateTimeTitle(resetsAt)) 초기화", for: resetItem)
             resetItem.toolTip = nil
         } else if let minutes = snapshot.windowDurationMinutes {
             setDetailTitle("사용량 창 \(minutes)분", for: resetItem)
@@ -2375,6 +2455,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// diagnostic log, or a stalled Codex fetch could hide behind a stream
     /// of "successful" publishes that never carried new Codex data.
     private func publishSharedUsage(_ snapshot: RateLimitSnapshot, origin: String) {
+        // In-flight fetches that complete after sleep began land here; the
+        // in-memory snapshot is kept, but nothing is written or uploaded
+        // until the next interactive wake republishes it via recovery.
+        guard !isSleepGateClosed else {
+            diagnosticLog.log("shared_payload_publish_skip_asleep", ["origin": .string(origin)])
+            return
+        }
         do {
             try SharedUsageStore.publish(
                 snapshot,
@@ -3016,7 +3103,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let resetsAt = snapshot.resetsAt {
             resetRows.append(UsagePanelRow(
                 label: "주간 초기화",
-                value: resetDateTimeFormatter.string(from: resetsAt),
+                value: Self.resetDateTimeTitle(resetsAt),
                 isEmphasized: true
             ))
         } else if let minutes = snapshot.windowDurationMinutes {
@@ -3026,7 +3113,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let sparkResetsAt = snapshot.sparkResetsAt {
             resetRows.append(UsagePanelRow(
                 label: "Spark 초기화",
-                value: resetDateTimeFormatter.string(from: sparkResetsAt),
+                value: Self.resetDateTimeTitle(sparkResetsAt),
                 isEmphasized: true
             ))
         } else if let minutes = snapshot.sparkWindowDurationMinutes {
@@ -3138,14 +3225,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let resetsAt = snapshot.fiveHourResetsAt {
             resetRows.append(UsagePanelRow(
                 label: "세션 초기화",
-                value: resetDateTimeFormatter.string(from: resetsAt),
+                value: Self.resetDateTimeTitle(resetsAt),
                 isEmphasized: true
             ))
         }
         if let resetsAt = fableLimit?.resetsAt {
             resetRows.append(UsagePanelRow(
                 label: "Fable 초기화",
-                value: resetDateTimeFormatter.string(from: resetsAt)
+                value: Self.resetDateTimeTitle(resetsAt)
             ))
         }
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
@@ -3160,7 +3247,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let resetsAt = snapshot.weeklyResetsAt {
             resetRows.append(UsagePanelRow(
                 label: "주간 초기화",
-                value: resetDateTimeFormatter.string(from: resetsAt)
+                value: Self.resetDateTimeTitle(resetsAt)
             ))
         }
         // The Fable weekly limit is promoted to its own top ring (session,
@@ -3178,7 +3265,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         for limit in snapshot.modelWeeklyLimits {
             guard limit != fableLimit else { continue }
             guard let remaining = ClaudeUsageCore.remainingPercent(from: limit.usedPercent) else { continue }
-            let detail = limit.resetsAt.map { resetDateTimeFormatter.string(from: $0) }
+            let detail = limit.resetsAt.map(Self.resetDateTimeTitle(_:))
             modelLimitRows.append(UsagePanelRow(
                 label: "\(limit.modelName) 주간",
                 value: "\(percentTitle(from: remaining)) 남음",
@@ -3214,7 +3301,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         var statusLines: [String] = []
         if let unavailable = claudeUnavailableState(from: snapshot, now: Date()) {
-            statusLines.append("\(unavailable.reason) · \(resetDateTimeFormatter.string(from: unavailable.until))에 다시 확인")
+            statusLines.append("\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until))에 다시 확인")
         } else if let rateLimitLabel {
             statusLines.append(isCurrent ? rateLimitLabel : "오래된 정보 · \(rateLimitLabel)")
         } else if let failureLabel {
@@ -3290,14 +3377,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             output.locale = locale
             output.timeZone = timeZone
 
+            func resetDateTitle(_ date: Date) -> String {
+                let calendar = Calendar.autoupdatingCurrent
+                if calendar.isDateInToday(date) {
+                    output.dateFormat = "'오늘' HH:mm"
+                } else if calendar.isDateInTomorrow(date) {
+                    output.dateFormat = "'내일' HH:mm"
+                } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: now),
+                          calendar.isDate(date, inSameDayAs: dayAfterTomorrow) {
+                    output.dateFormat = "'모레' HH:mm"
+                } else {
+                    output.dateFormat = "M/d(EEEEE) HH:mm"
+                }
+                return output.string(from: date)
+            }
+
             let datedInput = DateFormatter()
             datedInput.locale = locale
             datedInput.timeZone = timeZone
             datedInput.dateFormat = "yyyy년 M월 d일 a h:mm"
             let currentYear = Calendar.current.component(.year, from: now)
             if let date = datedInput.date(from: "\(currentYear)년 \(text)") {
-                output.dateFormat = "M/d(EEEEE) HH:mm"
-                return output.string(from: date)
+                return resetDateTitle(date)
             }
 
             for format in ["yyyy MMM d 'at' h:mm a", "yyyy MMM d, 'at' h:mm a"] {
@@ -3306,26 +3407,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 englishInput.timeZone = timeZone
                 englishInput.dateFormat = format
                 if let date = englishInput.date(from: "\(currentYear) \(text)") {
-                    output.dateFormat = "M/d(EEEEE) HH:mm"
-                    return output.string(from: date)
+                    return resetDateTitle(date)
                 }
             }
 
-            let timeInput = DateFormatter()
-            timeInput.locale = locale
-            timeInput.timeZone = timeZone
-            timeInput.dateFormat = "a h:mm"
-            if let date = timeInput.date(from: text) {
-                output.dateFormat = "HH:mm"
-                return output.string(from: date)
-            }
-            let englishTimeInput = DateFormatter()
-            englishTimeInput.locale = Locale(identifier: "en_US_POSIX")
-            englishTimeInput.timeZone = timeZone
-            englishTimeInput.dateFormat = "h:mm a"
-            if let date = englishTimeInput.date(from: text) {
-                output.dateFormat = "HH:mm"
-                return output.string(from: date)
+            let timeFormats = [
+                (locale, "a h:mm"),
+                (Locale(identifier: "en_US_POSIX"), "h:mm a")
+            ]
+            for (timeLocale, timeFormat) in timeFormats {
+                let timeInput = DateFormatter()
+                timeInput.locale = timeLocale
+                timeInput.timeZone = timeZone
+                timeInput.dateFormat = timeFormat
+                if let parsedTime = timeInput.date(from: text) {
+                    let parsedComponents = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: parsedTime)
+                    guard let hour = parsedComponents.hour, let minute = parsedComponents.minute else { continue }
+                    var dateComponents = Calendar.autoupdatingCurrent.dateComponents([.year, .month, .day], from: now)
+                    dateComponents.hour = hour
+                    dateComponents.minute = minute
+                    guard var date = Calendar.autoupdatingCurrent.date(from: dateComponents) else { continue }
+                    if date < now {
+                        date = Calendar.autoupdatingCurrent.date(byAdding: .day, value: 1, to: date) ?? date
+                    }
+                    return resetDateTitle(date)
+                }
             }
             return text
         }
@@ -3337,7 +3443,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         func cliSessionResetValue() -> String {
             if let resetsAt = snapshot?.fiveHourResetsAt {
-                return Self.resetDateTimeFormatter.string(from: resetsAt)
+                return Self.resetDateTimeTitle(resetsAt)
             }
             if let remaining = cliSessionRemaining, remaining >= 100 {
                 return "사용 시작 후 5시간"
@@ -3356,7 +3462,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             rows.append(UsagePanelRow(label: "요금제", value: planTitle))
         }
         rows.append(UsagePanelRow(label: "C세션 초기화", value: cliSessionResetValue()))
-        rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeFormatter.string(from:)) ?? "정보 없음"))
+        rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
         rows.append(UsagePanelRow(label: "O세션 초기화", value: onlineResetValue(online?.sessionResetText)))
         rows.append(UsagePanelRow(label: "O주간 초기화", value: onlineResetValue(online?.weeklyResetText)))
         rowGroups.append(UsagePanelRowGroup(rows: rows))
@@ -3474,7 +3580,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             if let recoveryAt = estimate.recoveryAt {
                 estimateRows.append(UsagePanelRow(
                     label: "회복 예상",
-                    value: resetDateTimeFormatter.string(from: recoveryAt),
+                    value: Self.resetDateTimeTitle(recoveryAt),
                     isEmphasized: true
                 ))
             }
@@ -3485,7 +3591,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         ))
         resetCreditRows.append(UsagePanelRow(
             label: "주간",
-            value: snapshot.weeklyResetsAt.map(resetDateTimeFormatter.string(from:)) ?? "정보 없음",
+            value: snapshot.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음",
             isEmphasized: true
         ))
         resetCreditRows.append(UsagePanelRow(
@@ -4390,6 +4496,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         formatter.dateFormat = "M/d(EEEEE) HH:mm"
         return formatter
     }()
+
+    private static func resetDateTimeTitle(_ date: Date) -> String {
+        let calendar = Calendar.autoupdatingCurrent
+        if calendar.isDateInToday(date) {
+            resetDateTimeFormatter.dateFormat = "'오늘' HH:mm"
+        } else if calendar.isDateInTomorrow(date) {
+            resetDateTimeFormatter.dateFormat = "'내일' HH:mm"
+        } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: Date()),
+                  calendar.isDate(date, inSameDayAs: dayAfterTomorrow) {
+            resetDateTimeFormatter.dateFormat = "'모레' HH:mm"
+        } else {
+            resetDateTimeFormatter.dateFormat = "M/d(EEEEE) HH:mm"
+        }
+        return resetDateTimeFormatter.string(from: date)
+    }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
