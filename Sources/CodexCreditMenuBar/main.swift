@@ -2894,13 +2894,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func refreshStatusTitle() {
         guard let snapshot = lastSnapshot else { return }
-        // Keep the compact menu-bar Claude figure tied to Claude Code's local
-        // statusLine cache. The detailed panel may use the live web OAuth
-        // snapshot, but that value must not replace the CLI figure here.
-        let claudeCLISnapshot = ClaudeUsageStore.read()
-        setStatusTitle(Self.statusTitleParts(from: snapshot, claudeCLI: claudeCLISnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot))
+        setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot))
         statusItem.button?.setAccessibilityValue(
-            Self.accessibilityStatus(from: snapshot, claudeCLI: claudeCLISnapshot, gemini: lastGeminiSnapshot, geminiOnline: lastGeminiOnlineSnapshot)
+            Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot)
         )
     }
 
@@ -4300,9 +4296,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static func statusTitleParts(
         from snapshot: RateLimitSnapshot,
-        claudeCLI: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?,
-        geminiOnline: GeminiOnlineUsageSnapshot?
+        claude: ClaudeUsageSnapshot?,
+        gemini: GeminiUsageSnapshot?
     ) -> [(text: String, color: NSColor)] {
         var parts: [(text: String, color: NSColor)] = []
 
@@ -4313,11 +4308,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append((codexTitle, UsageBrandColors.codex))
         }
 
-        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claudeCLI?.fiveHourUsedPercent) {
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
             parts.append((percentTitle(from: claudeRemaining), UsageBrandColors.claude))
         }
 
-        if let geminiRemaining = geminiRemainingValue(cli: gemini, online: geminiOnline) {
+        if let geminiRemaining = geminiRemainingValue(cli: gemini) {
             parts.append((percentTitle(from: geminiRemaining), UsageBrandColors.geminiText))
         }
 
@@ -4330,41 +4325,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static func accessibilityStatus(
         from snapshot: RateLimitSnapshot,
-        claudeCLI: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?,
-        geminiOnline: GeminiOnlineUsageSnapshot?
+        claude: ClaudeUsageSnapshot?,
+        gemini: GeminiUsageSnapshot?
     ) -> String {
         var parts: [String] = []
         if let usedPercent = snapshot.usedPercent {
             parts.append("남은 Codex 주간 사용량 \(percentTitle(from: remainingUsagePercent(from: usedPercent)))")
         }
-        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claudeCLI?.fiveHourUsedPercent) {
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
             parts.append("남은 Claude 세션 \(percentTitle(from: claudeRemaining))")
         }
-        if let geminiRemaining = geminiRemainingValue(cli: gemini, online: geminiOnline) {
+        if let geminiRemaining = geminiRemainingValue(cli: gemini) {
             parts.append("남은 Gemini 세션 사용량 \(percentTitle(from: geminiRemaining))")
         }
         return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
     }
 
     private static func geminiRemainingValue(
-        cli: GeminiUsageSnapshot?,
-        online: GeminiOnlineUsageSnapshot?
+        cli: GeminiUsageSnapshot?
     ) -> Double? {
-        let cliSession = GeminiUsageCore.remainingPercent(from: cli?.fiveHourRemainingFraction)
-        let onlineSession = GeminiOnlineUsageCore.remainingPercent(from: online?.sessionUsedPercent)
-
-        guard cliSession != nil || onlineSession != nil else { return nil }
-
-        guard let onlineWeekly = GeminiOnlineUsageCore.remainingPercent(from: online?.weeklyUsedPercent) else {
-            return cliSession ?? onlineSession
-        }
-
-        if onlineWeekly <= 50 {
-            return cliSession ?? onlineSession
-        }
-
-        return onlineSession ?? cliSession
+        GeminiUsageCore.remainingPercent(from: cli?.fiveHourRemainingFraction)
     }
 
     private static func percentTitle(from percent: Double) -> String {
