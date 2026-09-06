@@ -3380,7 +3380,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             func resetDateTitle(_ date: Date) -> String {
                 let calendar = Calendar.autoupdatingCurrent
                 if calendar.isDateInToday(date) {
-                    output.dateFormat = "'오늘' HH:mm"
+                    output.dateFormat = "HH:mm"
                 } else if calendar.isDateInTomorrow(date) {
                     output.dateFormat = "'내일' HH:mm"
                 } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: now),
@@ -4546,7 +4546,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func resetDateTimeTitle(_ date: Date) -> String {
         let calendar = Calendar.autoupdatingCurrent
         if calendar.isDateInToday(date) {
-            resetDateTimeFormatter.dateFormat = "'오늘' HH:mm"
+            resetDateTimeFormatter.dateFormat = "HH:mm"
         } else if calendar.isDateInTomorrow(date) {
             resetDateTimeFormatter.dateFormat = "'내일' HH:mm"
         } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: Date()),
