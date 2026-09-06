@@ -3,6 +3,24 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.20</title>
+            <pubDate>Sun, 06 Sep 2026 21:11:54 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.20</link>
+            <sparkle:version>202609062108</sparkle:version>
+            <sparkle:shortVersionString>2.0.20</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.20
+
+메뉴바 사용량 표시를 macOS 시스템 메뉴바와 맞췄습니다.
+
+- 날짜·시간과 같은 시스템 메뉴바 서체와 크기 사용
+- 밝은 배경에서는 숫자를 검정, 어두운 배경에서는 흰색으로 표시
+- `%` 기호만 Codex·Claude·Gemini 대표색 유지
+- 그림자·외곽선·볼드 효과 제거
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.20/CCMB-2.0.20.dmg" length="3200604" type="application/octet-stream" sparkle:edSignature="QcXmaw8CqQBBlt/20CBv46oFba7OV6CcMkzZ7tjpIxWa8raIkLQSPMDKIz276NPo3pLEpdU5c/SehL9O4bJYAg=="/>
+        </item>
+        <item>
             <title>2.0.19</title>
             <pubDate>Sun, 06 Sep 2026 18:00:37 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.19</link>
@@ -29,22 +47,6 @@
 - Gemini 온라인의 한국어·영어 초기화 문구도 같은 형식으로 정규화합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.16/CCMB-2.0.16.dmg" length="3189387" type="application/octet-stream" sparkle:edSignature="2rPWGwvfjKocqBXtbIvPQSHHY6S+mPgT3g9v0Kqqj5bDCiu1Rn4aM5GW7Wa/KFd1Df5JyqLFOpNjOL+rQw3MCA=="/>
-        </item>
-        <item>
-            <title>2.0.15</title>
-            <pubDate>Wed, 02 Sep 2026 12:05:32 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.15</link>
-            <sparkle:version>202609021215</sparkle:version>
-            <sparkle:shortVersionString>2.0.15</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.15
-
-- iPhone 원격 동기화가 공개 빌드에서도 유지되도록 CloudKit 업로더를 포함했습니다.
-- Developer ID CloudKit 프로파일과 Production entitlement를 배포 앱에 포함했습니다.
-- Dropbox·Google Drive 등 File Provider 폴더로 스냅샷을 내보내는 보조 경로를 추가했습니다.
-- iPhone의 열정 그래프를 위한 최근 사용량 기록을 공유 스냅샷에 포함했습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.15/CCMB-2.0.15.dmg" length="3184676" type="application/octet-stream" sparkle:edSignature="IFeNWjFDsgdbaWiBtV9ajbP78kcwyUXo81fUJVCvZBcXmXdxftwcvShr/Tz5bTqM6c1AOq3jm6AqEObqHhVQDg=="/>
         </item>
     </channel>
 </rss>
