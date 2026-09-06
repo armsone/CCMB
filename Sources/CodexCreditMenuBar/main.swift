@@ -3222,14 +3222,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             summaryRows.append(UsagePanelRow(label: "세션 남음", value: "정보 없음", isEmphasized: true))
         }
 
-        if let resetsAt = snapshot.fiveHourResetsAt {
+        if let resetsAt = snapshot.fiveHourResetsAt, resetsAt > Date() {
             resetRows.append(UsagePanelRow(
                 label: "세션 초기화",
                 value: Self.resetDateTimeTitle(resetsAt),
                 isEmphasized: true
             ))
         }
-        if let resetsAt = fableLimit?.resetsAt {
+        if let resetsAt = fableLimit?.resetsAt, resetsAt > Date() {
             resetRows.append(UsagePanelRow(
                 label: "Fable 초기화",
                 value: Self.resetDateTimeTitle(resetsAt)
@@ -3244,7 +3244,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 accessibilityValue: "남은 Claude 주간 사용량 \(percentTitle(from: remaining))"
             )
         }
-        if let resetsAt = snapshot.weeklyResetsAt {
+        if let resetsAt = snapshot.weeklyResetsAt, resetsAt > Date() {
             resetRows.append(UsagePanelRow(
                 label: "주간 초기화",
                 value: Self.resetDateTimeTitle(resetsAt)
@@ -3265,7 +3265,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         for limit in snapshot.modelWeeklyLimits {
             guard limit != fableLimit else { continue }
             guard let remaining = ClaudeUsageCore.remainingPercent(from: limit.usedPercent) else { continue }
-            let detail = limit.resetsAt.map(Self.resetDateTimeTitle(_:))
+            let detail = limit.resetsAt.flatMap { $0 > Date() ? Self.resetDateTimeTitle($0) : nil }
             modelLimitRows.append(UsagePanelRow(
                 label: "\(limit.modelName) 주간",
                 value: "\(percentTitle(from: remaining)) 남음",
