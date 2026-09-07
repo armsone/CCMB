@@ -3,6 +3,19 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.22</title>
+            <pubDate>Mon, 07 Sep 2026 10:40:49 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.22</link>
+            <sparkle:version>202609071200</sparkle:version>
+            <sparkle:shortVersionString>2.0.22</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.22
+
+자동 업데이트와 안정성 개선을 포함합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.22/CCMB-2.0.22.zip" length="2908692" type="application/octet-stream" sparkle:edSignature="ZkUHy6YA274y+2q7VBHU+hLawew/OF6nOoWKtPDYzo9olNByyJCq0WjWmHnocW3lXpAyC4m0EEnn2SVG5QmXCA=="/>
+        </item>
+        <item>
             <title>2.0.21</title>
             <pubDate>Mon, 07 Sep 2026 10:25:37 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.21</link>
@@ -37,19 +50,6 @@
 - 그림자·외곽선·볼드 효과 제거
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.20/CCMB-2.0.20.dmg" length="3200604" type="application/octet-stream" sparkle:edSignature="QcXmaw8CqQBBlt/20CBv46oFba7OV6CcMkzZ7tjpIxWa8raIkLQSPMDKIz276NPo3pLEpdU5c/SehL9O4bJYAg=="/>
-        </item>
-        <item>
-            <title>2.0.19</title>
-            <pubDate>Sun, 06 Sep 2026 18:00:37 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.19</link>
-            <sparkle:version>202609061745</sparkle:version>
-            <sparkle:shortVersionString>2.0.19</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.19
-
-자동 업데이트와 안정성 개선을 포함합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.19/CCMB-2.0.19.dmg" length="3200159" type="application/octet-stream" sparkle:edSignature="pS5dodRX2DQ514GVKlyzFRUqSKrQu5w5O72Do2eH0skgBLsuDa0cJzNCW7dTo5EZhxvUjvMSN/3td8a1tb5QAA=="/>
         </item>
     </channel>
 </rss>
