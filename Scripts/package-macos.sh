@@ -4,9 +4,9 @@ set -euo pipefail
 APP_NAME="CCMB"
 EXECUTABLE_NAME="CodexCreditMenuBar"
 BUNDLE_ID="com.codex.creditmenubar"
-APP_VERSION="2.0.20"
-APP_BUILD="202609062108"
-APP_BUILD_STAMP="202609062108"
+APP_VERSION="2.0.21"
+APP_BUILD="202609071030"
+APP_BUILD_STAMP="202609071030"
 DEPLOYMENT_TARGET="10.15"
 ARM64_DEPLOYMENT_TARGET="11.0"
 ARM64_TRIPLE="arm64-apple-macosx$ARM64_DEPLOYMENT_TARGET"
@@ -118,17 +118,27 @@ if [[ "$NOTARIZE" == true ]]; then
     exit 69
   fi
 
-  if ! GATEKEEPER_STATUS="$(spctl --status 2>&1)"; then
-    if [[ "$GATEKEEPER_STATUS" != *"assessments disabled"* ]]; then
-      printf 'error: unable to read Gatekeeper assessment status.\n' >&2
-      printf 'Current output: %s\n' "$GATEKEEPER_STATUS" >&2
+  # macOS 26 reports the legacy spctl status as disabled even when the
+  # supported distribution policy checker can perform a valid fail-closed
+  # assessment. Use that checker when available; retain the older check only
+  # for systems that do not provide it.
+  if command -v syspolicy_check >/dev/null 2>&1; then
+    if [[ -d "$RELEASE_DIR/$APP_NAME.app" ]]; then
+      syspolicy_check distribution "$RELEASE_DIR/$APP_NAME.app" >/dev/null
+    fi
+  else
+    if ! GATEKEEPER_STATUS="$(spctl --status 2>&1)"; then
+      if [[ "$GATEKEEPER_STATUS" != *"assessments disabled"* ]]; then
+        printf 'error: unable to read Gatekeeper assessment status.\n' >&2
+        printf 'Current output: %s\n' "$GATEKEEPER_STATUS" >&2
+        exit 69
+      fi
+    fi
+    if [[ "$GATEKEEPER_STATUS" != *"assessments enabled"* ]]; then
+      printf 'error: Gatekeeper assessments must be enabled for a fail-closed distribution check.\n' >&2
+      printf 'Current status: %s\n' "$GATEKEEPER_STATUS" >&2
       exit 69
     fi
-  fi
-  if [[ "$GATEKEEPER_STATUS" != *"assessments enabled"* ]]; then
-    printf 'error: Gatekeeper assessments must be enabled for a fail-closed distribution check.\n' >&2
-    printf 'Current status: %s\n' "$GATEKEEPER_STATUS" >&2
-    exit 69
   fi
 
   if [[ -z "$NOTARY_PROFILE" ]]; then

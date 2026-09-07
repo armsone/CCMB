@@ -492,9 +492,11 @@ private final class CodexAppServerClient: @unchecked Sendable {
             self.log("refresh begin")
             self.diagnosticLog?.log("codex_refresh_begin", ["reason": .string("refresh")])
             self.scheduleRefreshWatchdog(generation: generation, reason: "refresh")
-            self.readAccount {
-                self.readRateLimits()
-            }
+            // Account metadata is optional. A stalled or unsupported
+            // account/read must never prevent the quota response from being
+            // requested and displayed.
+            self.readAccount()
+            self.readRateLimits()
         }
     }
 
@@ -740,9 +742,10 @@ private final class CodexAppServerClient: @unchecked Sendable {
                 self.log("initial refresh begin")
                 self.diagnosticLog?.log("codex_refresh_begin", ["reason": .string("initial")])
                 self.scheduleRefreshWatchdog(generation: generation, reason: "initial refresh")
-                self.readAccount {
-                    self.readRateLimits()
-                }
+                // Account metadata is optional; fetch usage independently so a
+                // CLI compatibility problem in account/read cannot blank CCMB.
+                self.readAccount()
+                self.readRateLimits()
             case .failure(let error):
                 self.emitError(error.localizedDescription)
                 self.stopCurrentProcess()
@@ -1005,8 +1008,12 @@ private final class CodexAppServerClient: @unchecked Sendable {
         }
 
         return LaunchCommand(
-            executable: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["codex", "app-server"],
+            // Finder-launched apps do not read the user's shell startup files.
+            // Give login-shell installs one last chance before reporting that
+            // Codex is missing. A shell is only used as a fallback; normal
+            // installs still launch the resolved executable directly.
+            executable: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-lc", "exec codex app-server"],
             selectedCodexURL: nil,
             searchBinURLs: searchBinURLs
         )
@@ -1026,6 +1033,12 @@ private final class CodexAppServerClient: @unchecked Sendable {
 
         binURLs.append(contentsOf: [
             homeURL.appendingPathComponent(".local/bin"),
+            homeURL.appendingPathComponent(".npm-global/bin"),
+            homeURL.appendingPathComponent(".yarn/bin"),
+            homeURL.appendingPathComponent(".config/yarn/global/node_modules/.bin"),
+            homeURL.appendingPathComponent(".pnpm"),
+            homeURL.appendingPathComponent(".bun/bin"),
+            homeURL.appendingPathComponent("Library/pnpm"),
             homeURL.appendingPathComponent(".volta/bin"),
             homeURL.appendingPathComponent(".asdf/shims"),
             homeURL.appendingPathComponent(".mise/shims"),
