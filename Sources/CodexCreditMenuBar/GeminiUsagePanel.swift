@@ -9,8 +9,79 @@ enum GeminiAccountStore {
         .appendingPathComponent(".gemini/google_accounts.json")
 
     static func readActiveEmail() -> String? {
-        guard let data = try? Data(contentsOf: accountURL) else { return nil }
-        return GeminiAccountCore.activeEmail(from: data)
+        readActiveEmailWithSource().email
+    }
+
+    static func readActiveEmailWithSource() -> (email: String?, source: String, selectorFile: String, oauthFile: String) {
+        let selectorFile = FileManager.default.fileExists(atPath: accountURL.path) ? "present" : "absent"
+        if let data = try? Data(contentsOf: accountURL),
+           let email = GeminiAccountCore.activeEmail(from: data) {
+            return (email, "google_accounts", selectorFile, "not_checked")
+        }
+
+        // Some Antigravity/Gemini CLI versions keep the active account only
+        // in the OAuth ID token and omit or delay google_accounts.json.
+        // Decode the non-secret email claim locally; never persist or log the
+        // token or any other credential field.
+        let credentialsURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/oauth_creds.json")
+        let oauthFile = FileManager.default.fileExists(atPath: credentialsURL.path) ? "present" : "absent"
+        if let data = try? Data(contentsOf: credentialsURL),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let idToken = root["id_token"] as? String,
+           let email = GeminiAccountCore.emailFromIDToken(idToken) {
+            return (email, "oauth_id_token", selectorFile, oauthFile)
+        }
+
+        // Antigravity builds can keep non-secret user metadata outside the
+        // classic Gemini CLI selector files. Inspect only fixed application
+        // directories and JSON files whose names indicate account metadata.
+        for url in candidateMetadataURLs() {
+            if let data = try? Data(contentsOf: url),
+               let email = GeminiAccountCore.metadataEmail(from: data) {
+                return (email, "app_metadata", selectorFile, oauthFile)
+            }
+        }
+        for url in recentCLILogURLs() {
+            if let email = GeminiAccountCore.emailFromCLIAuthLog(at: url) {
+                return (email, "agy_cli_log", selectorFile, oauthFile)
+            }
+        }
+        return (nil, "none", selectorFile, oauthFile)
+    }
+
+    private static func candidateMetadataURLs() -> [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let roots = [
+            home.appendingPathComponent(".gemini/antigravity-cli/cache"),
+            home.appendingPathComponent("Library/Application Support/com.google.GeminiMacOS")
+        ]
+        let manager = FileManager.default
+        return roots.flatMap { (root) -> [URL] in
+            guard let urls = try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { return [] }
+            return urls.filter { url in
+                url.pathExtension.lowercased() == "json" &&
+                ["account", "user", "profile", "identity"].contains { url.deletingPathExtension().lastPathComponent.lowercased().contains($0) }
+            }
+        }
+    }
+
+    private static func recentCLILogURLs() -> [URL] {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/antigravity-cli/log")
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return urls.filter { $0.pathExtension == "log" }
+            .sorted {
+                let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return left > right
+            }
+            .prefix(3)
+            .map { $0 }
     }
 }
 
@@ -158,11 +229,18 @@ enum GeminiUsageClient {
                     return
                 }
 
+                let accountMetadata = GeminiAccountStore.readActiveEmailWithSource()
+                DiagnosticLog.shared.log("gemini_account_metadata", [
+                    "source": .string(accountMetadata.source),
+                    "selectorFile": .string(accountMetadata.selectorFile),
+                    "oauthFile": .string(accountMetadata.oauthFile),
+                    "result": .string(accountMetadata.email == nil ? "missing" : "found")
+                ])
                 let snapshot = GeminiUsageCore.snapshot(
                     buckets: buckets,
                     creditBalance: nil,
                     publishedAt: Date(),
-                    accountEmail: GeminiAccountStore.readActiveEmail(),
+                    accountEmail: accountMetadata.email,
                     planTitle: GeminiUsageCore.parsePlanTitle(usageData)
                 )
                 DispatchQueue.main.async { @MainActor in

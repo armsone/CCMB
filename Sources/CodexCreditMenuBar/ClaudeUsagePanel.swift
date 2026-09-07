@@ -68,6 +68,7 @@ struct UsagePanelRow {
     let valueColor: NSColor?
     let isEmphasized: Bool
     let accessibilityLabel: String
+    let action: UsagePanelRowAction?
 
     init(
         label: String,
@@ -75,19 +76,27 @@ struct UsagePanelRow {
         detail: String? = nil,
         valueColor: NSColor? = nil,
         isEmphasized: Bool = false,
-        accessibilityLabel: String? = nil
+        accessibilityLabel: String? = nil,
+        action: UsagePanelRowAction? = nil
     ) {
         self.label = label
         self.value = value
         self.detail = detail
         self.valueColor = valueColor
         self.isEmphasized = isEmphasized
+        self.action = action
         if let accessibilityLabel {
             self.accessibilityLabel = accessibilityLabel
         } else {
             self.accessibilityLabel = detail.map { "\(label) \(value), \($0)" } ?? "\(label) \(value)"
         }
     }
+}
+
+struct UsagePanelRowAction {
+    let title: String
+    let accessibilityLabel: String
+    let handler: () -> Void
 }
 
 /// The column's single most important number, shown as a compact ring with
@@ -839,6 +848,14 @@ private final class UsageMetricRowView: NSView {
         return field
     }()
     private let detailField = UsageMetricRowView.makeLabel(color: .secondaryLabelColor, size: 10, weight: .regular)
+    private let actionButton: NSButton = {
+        let button = NSButton(title: "", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 11, weight: .medium)
+        return button
+    }()
+    private var actionHandler: (() -> Void)?
 
     override var isFlipped: Bool { true }
 
@@ -848,6 +865,13 @@ private final class UsageMetricRowView: NSView {
         addSubview(labelField)
         addSubview(valueField)
         addSubview(detailField)
+        addSubview(actionButton)
+        actionButton.target = self
+        actionButton.action = #selector(performAction)
+    }
+
+    @objc private func performAction() {
+        actionHandler?()
     }
 
     required init?(coder: NSCoder) {
@@ -871,6 +895,15 @@ private final class UsageMetricRowView: NSView {
         let hasDetail = row.detail != nil
         detailField.stringValue = row.detail ?? ""
         detailField.isHidden = !hasDetail
+        if let action = row.action {
+            actionButton.isHidden = false
+            actionButton.title = action.title
+            actionButton.setAccessibilityLabel(action.accessibilityLabel)
+            actionHandler = action.handler
+        } else {
+            actionButton.isHidden = true
+            actionHandler = nil
+        }
         setAccessibilityElement(true)
         setAccessibilityLabel(row.accessibilityLabel)
 
@@ -880,7 +913,8 @@ private final class UsageMetricRowView: NSView {
         let firstLineY = hasDetail ? 5 : (height - Self.firstLineHeight) / 2
         let labelWidth: CGFloat
         if row.value.isEmpty {
-            labelWidth = max(0, width - inset * 2)
+            let buttonWidth = row.action == nil ? 0 : actionButton.intrinsicContentSize.width + 16
+            labelWidth = max(0, width - inset * 2 - buttonWidth)
         } else {
             let desiredLabelWidth = ceil(labelField.intrinsicContentSize.width) + 4
             let maximumLabelWidth = width * Self.maximumLabelWidthFraction - inset
@@ -892,8 +926,21 @@ private final class UsageMetricRowView: NSView {
             valueField.frame = .zero
         } else {
             let valueX = inset + labelWidth
-            let valueWidth = max(0, width - valueX - inset)
+            let buttonWidth = row.action == nil ? 0 : actionButton.intrinsicContentSize.width + 8
+            let valueWidth = max(0, width - valueX - inset - buttonWidth)
             valueField.frame = NSRect(x: valueX, y: firstLineY, width: valueWidth, height: Self.firstLineHeight)
+        }
+
+        if row.action == nil {
+            actionButton.frame = .zero
+        } else {
+            let buttonWidth = min(120, max(52, actionButton.intrinsicContentSize.width + 12))
+            actionButton.frame = NSRect(
+                x: width - inset - buttonWidth,
+                y: firstLineY - 1,
+                width: buttonWidth,
+                height: 20
+            )
         }
 
         if hasDetail {

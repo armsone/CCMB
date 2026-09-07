@@ -642,19 +642,92 @@ struct GeminiUsageSnapshot: Sendable, Equatable {
 
 /// Pure decoder for Gemini CLI's local account selector. The file contains no
 /// OAuth token — only the active email and a list of old accounts — and CCMB
-/// accepts only a plausible email-shaped active value.
+/// accepts only a plausible email-shaped active value. CLI releases have used
+/// more than one representation for the active account, so all known local
+/// metadata forms are handled without reading credential fields.
 enum GeminiAccountCore {
-    private struct AccountsFile: Decodable {
-        let active: String?
+    static func activeEmail(from data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        for candidate in [root["active"], root["activeEmail"], root["active_account"], root["activeAccount"]] {
+            if let email = email(from: candidate) { return email }
+        }
+        if let accounts = root["accounts"] as? [[String: Any]] {
+            for account in accounts where (account["active"] as? Bool) == true {
+                if let email = email(from: account) { return email }
+            }
+        }
+        return nil
     }
 
-    static func activeEmail(from data: Data) -> String? {
-        guard let decoded = try? JSONDecoder().decode(AccountsFile.self, from: data),
-              let active = decoded.active?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !active.isEmpty,
-              active.contains("@")
+    private static func email(from value: Any?) -> String? {
+        if let string = value as? String {
+            let email = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return email.isEmpty || !email.contains("@") ? nil : email
+        }
+        if let object = value as? [String: Any] {
+            for key in ["email", "emailAddress", "account", "identifier"] {
+                if let email = email(from: object[key]) { return email }
+            }
+        }
+        return nil
+    }
+
+    static func metadataEmail(from data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return metadataEmail(from: root)
+    }
+
+    private static func metadataEmail(from value: Any) -> String? {
+        if let object = value as? [String: Any] {
+            for key in ["email", "emailAddress", "accountEmail", "userEmail", "identity"] {
+                if let email = email(from: object[key]) { return email }
+                if let nested = object[key], let email = metadataEmail(from: nested) { return email }
+            }
+            for nested in object.values {
+                if let email = metadataEmail(from: nested) { return email }
+            }
+        } else if let array = value as? [Any] {
+            for nested in array {
+                if let email = metadataEmail(from: nested) { return email }
+            }
+        }
+        return nil
+    }
+
+    /// Antigravity writes the resolved, non-secret account address after a
+    /// successful keychain sign-in. This is the CLI's own authenticated
+    /// result, not a guess from the web session. Read only a bounded tail so
+    /// an unexpectedly large diagnostic file cannot affect refresh latency.
+    static func emailFromCLIAuthLog(at url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { handle.closeFile() }
+        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.uint64Value ?? 0
+        let tailSize = min(size, 128 * 1_024)
+        handle.seek(toFileOffset: size - tailSize)
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let pattern = #"applyAuthResult:\s+email=([^,\s]+)"#
+        guard let range = text.range(of: pattern, options: .regularExpression) else { return nil }
+        let match = String(text[range])
+        guard let emailStart = match.range(of: "email=")?.upperBound else { return nil }
+        return email(from: String(match[emailStart...]))
+    }
+
+    static func emailFromIDToken(_ token: String) -> String? {
+        let parts = token.split(separator: ".")
+        guard parts.count == 3 else { return nil }
+        var encoded = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = encoded.count % 4
+        if remainder != 0 { encoded += String(repeating: "=", count: 4 - remainder) }
+        guard let payload = Data(base64Encoded: encoded),
+              let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any]
         else { return nil }
-        return active
+        for key in ["email", "upn", "preferred_username"] {
+            if let email = email(from: object[key]) { return email }
+        }
+        return nil
     }
 }
 
@@ -937,6 +1010,7 @@ struct GeminiOnlineUsageSnapshot: Sendable, Equatable, Codable {
     /// "주간 한도" section.
     let weeklyUsedPercent: Double?
     let weeklyResetText: String?
+    let accountEmail: String?
     let fetchedAt: Date
 }
 
@@ -993,8 +1067,15 @@ enum GeminiOnlineUsageCore {
             sessionResetText: resetText(in: sessionSection),
             weeklyUsedPercent: weeklyUsed,
             weeklyResetText: resetText(in: weeklySection),
+            accountEmail: email(in: visibleText),
             fetchedAt: now
         )
+    }
+
+    private static func email(in text: String) -> String? {
+        let pattern = #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#
+        guard let range = text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else { return nil }
+        return String(text[range])
     }
 
     /// Distinguishes "signed out" from "page structure changed" after a

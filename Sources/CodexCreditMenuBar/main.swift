@@ -55,8 +55,8 @@ private enum SharedUsageStore {
         let payload: [String: Any] = [
             "schemaVersion": 1,
             "status": "ok",
-            "source": "codex app-server",
-            "method": "account/rateLimits/read",
+            "source": "chatgpt-wham-usage",
+            "method": "authenticated HTTPS",
             "weeklyRemainingPercent": remainingPercent ?? NSNull(),
             "sparkRemainingPercent": snapshot.sparkUsedPercent.map(UsageCore.remainingPercent) ?? NSNull(),
             "creditBalance": snapshot.creditBalance ?? NSNull(),
@@ -296,7 +296,7 @@ private enum UsageCommand {
         let lock = NSLock()
         var capturedSnapshot: RateLimitSnapshot?
         var capturedError: String?
-        let client = CodexAppServerClient(callbackQueue: nil)
+        let client = CodexDirectAPIClient(callbackQueue: nil)
 
         client.onRateLimitsUpdated = { snapshot in
             lock.lock()
@@ -315,7 +315,7 @@ private enum UsageCommand {
         client.stop()
 
         guard waitResult == .success else {
-            throw UsageCommandError.message("codex app-server가 15초 안에 응답하지 않았습니다.")
+            throw UsageCommandError.message("Codex 직접 API가 15초 안에 응답하지 않았습니다.")
         }
         lock.lock()
         defer { lock.unlock() }
@@ -337,7 +337,7 @@ private enum UsageCommand {
             "sparkWindowDurationMins": snapshot.sparkWindowDurationMinutes ?? NSNull(),
             "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
             "sparkResetsAt": snapshot.sparkResetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
-            "origin": "direct-app-server",
+            "origin": "direct-api",
             "fetchedAt": fetchedAt,
             "ageSeconds": 0,
             "freshForSeconds": 15,
@@ -348,8 +348,8 @@ private enum UsageCommand {
             "grok": GrokUsageCore.sharedPayload(from: nil),
             "evidence": [
                 "status": "ok",
-                "source": "codex app-server",
-                "method": "account/rateLimits/read",
+                "source": "chatgpt-wham-usage",
+                "method": "authenticated HTTPS",
                 "verifiedAt": fetchedAt
             ]
         ]
@@ -359,7 +359,7 @@ private enum UsageCommand {
         let weeklyMatches = numbersMatch(cached?["weeklyRemainingPercent"], direct["weeklyRemainingPercent"])
         let creditMatches = numbersMatch(cached?["creditBalance"], direct["creditBalance"])
         return [
-            "mode": "independent-app-server-read",
+            "mode": "independent-direct-api-read",
             "matches": cached != nil && weeklyMatches && creditMatches,
             "weeklyRemainingMatches": cached != nil && weeklyMatches,
             "creditBalanceMatches": cached != nil && creditMatches,
@@ -1250,7 +1250,10 @@ private extension FileHandle {
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var statusMenu: NSMenu?
-    private let client = CodexAppServerClient(diagnosticLog: .shared)
+    /// Codex usage is fetched over the authenticated HTTPS API. Keeping the
+    /// process-based client below for now avoids a broad source deletion while
+    /// the direct path becomes the only live runtime path.
+    private let client = CodexDirectAPIClient(diagnosticLog: .shared)
     private let networkMonitor = NWPathMonitor()
     private let networkQueue = DispatchQueue(label: "CodexCreditMenuBar.NetworkMonitor")
     private let updaterController = SPUStandardUpdaterController(
@@ -1299,6 +1302,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let creditBalanceItem = NSMenuItem(title: "크레딧 확인 중…", action: nil, keyEquivalent: "")
     private let updatedItem = NSMenuItem(title: "가져온 시간 없음", action: nil, keyEquivalent: "")
     private let refreshItem = NSMenuItem(title: "새로 고침 · 30초 후", action: #selector(refresh), keyEquivalent: "")
+    private let codexLoginItem = NSMenuItem(title: "Codex 로그인", action: #selector(beginCodexOAuthLogin), keyEquivalent: "")
     private let intervalItem = NSMenuItem(title: "자동 새로 고침 · 30초", action: nil, keyEquivalent: "")
     /// Each provider owns its cadence and choices. The timer scheduler wakes
     /// at the shortest enabled interval, while per-provider due dates ensure
@@ -1901,7 +1905,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func connectGeminiOnline() {
         diagnosticLog.log("gemini_online_connect")
         geminiOnlineParseFailed = false
-        geminiOnlineNeedsConnection = false
         geminiOnlineController.connect()
     }
 
@@ -2215,6 +2218,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         // listed while the provider is hidden from the visible UI.
         intervalItem.submenu = intervalMenu
         menu.addItem(accountItem)
+        menu.addItem(codexLoginItem)
         menu.addItem(accountSeparatorItem)
 
         configureShareMenu()
@@ -2264,6 +2268,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         checkForUpdatesItem.target = updaterController
         refreshItem.target = self
+        codexLoginItem.target = self
         // The loop above only walks top-level items, so submenu items need
         // their target set explicitly.
         for item in refreshIntervalItems {
@@ -3474,6 +3479,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let cliWeeklyRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.weeklyRemainingFraction) }
         let onlineSessionRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.sessionUsedPercent) }
         let onlineWeeklyRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.weeklyUsedPercent) }
+        let onlineNeedsLogin = online == nil || geminiOnlineNeedsConnection
 
         func cliSessionResetValue() -> String {
             if let resetsAt = snapshot?.fiveHourResetsAt {
@@ -3497,7 +3503,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         rows.append(UsagePanelRow(label: "C세션 초기화", value: cliSessionResetValue()))
         rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
-        rows.append(UsagePanelRow(label: "O세션 초기화", value: onlineResetValue(online?.sessionResetText)))
+        rows.append(UsagePanelRow(
+            label: "O세션 초기화",
+            value: onlineNeedsLogin ? "" : onlineResetValue(online?.sessionResetText),
+            action: onlineNeedsLogin ? UsagePanelRowAction(
+                title: "로그인",
+                accessibilityLabel: "Gemini 온라인 로그인",
+                handler: { [weak self] in self?.connectGeminiOnline() }
+            ) : nil
+        ))
         rows.append(UsagePanelRow(label: "O주간 초기화", value: onlineResetValue(online?.weeklyResetText)))
         rowGroups.append(UsagePanelRowGroup(rows: rows))
 
@@ -3507,10 +3521,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             statusLines.append("CLI 갱신 실패: \(fetchFailureLabel)")
             statusColor = .systemRed
         }
-        if geminiOnlineNeedsConnection {
-            statusLines.append("온라인 연결 필요")
-            statusColor = .systemOrange
-        } else if geminiOnlineParseFailed {
+        if geminiOnlineParseFailed {
             statusLines.append("온라인 확인 불가")
             statusColor = .systemOrange
         } else if let online, !GeminiOnlineUsageCore.isFresh(fetchedAt: online.fetchedAt, now: now) {
@@ -3526,7 +3537,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             tertiaryQuota: onlineSessionQuota,
             quaternaryQuota: onlineWeeklyQuota,
             rowGroups: rowGroups,
-            accountLines: [snapshot?.accountEmail.map { "계정 \($0)" } ?? "계정 정보 없음"],
+            accountLines: [
+                online?.accountEmail.map { "계정 \($0)" }
+                    ?? snapshot?.accountEmail.map { "계정 \($0)" }
+                    ?? "계정 정보 없음"
+            ],
             refreshLine: {
                 var parts: [String] = []
                 if let publishedAt = snapshot?.publishedAt {
@@ -4006,6 +4021,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         refreshGeminiUsage(force: true)
         refreshGeminiOnlineQuietly(force: true)
         refreshGrokUsage()
+    }
+
+    @objc private func beginCodexOAuthLogin() {
+        codexLoginItem.title = "Codex 로그인 브라우저 대기 중…"
+        CodexOAuthAccountClient.startLogin { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.codexLoginItem.title = "Codex 로그인 완료"
+                self.lastErrorMessage = nil
+                self.client.refreshRateLimits()
+            case .failure:
+                self.codexLoginItem.title = "Codex 로그인 다시 시도"
+                self.lastErrorMessage = "Codex 로그인에 실패했습니다."
+            }
+        }
     }
 
     @objc private func setCodexRefreshInterval(_ sender: NSMenuItem) {
