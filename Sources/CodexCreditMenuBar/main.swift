@@ -587,12 +587,24 @@ private final class CodexAppServerClient: @unchecked Sendable {
 
         do {
             try process.run()
-            diagnosticLog?.log("appserver_launch")
+            diagnosticLog?.log("appserver_launch", [
+                "command": .string(command.description),
+                "resolvedCodexPath": .string(command.selectedCodexURL?.path ?? "<not-found>"),
+                "searchedPaths": .string(command.searchBinURLs.map { $0.appendingPathComponent("codex").path }.joined(separator: ":")),
+                "parentPATH": .string(ProcessInfo.processInfo.environment["PATH"] ?? "<missing>"),
+                "effectivePATH": .string(process.environment?["PATH"] ?? "<missing>")
+            ])
             initialize()
         } catch {
             let message = "Codex app-server 시작 실패 (실행 \(command.description)): \(error.localizedDescription)"
             log("launch failed \(message)")
-            diagnosticLog?.log("appserver_launch_failed")
+            diagnosticLog?.log("appserver_launch_failed", [
+                "command": .string(command.description),
+                "resolvedCodexPath": .string(command.selectedCodexURL?.path ?? "<not-found>"),
+                "searchedPaths": .string(command.searchBinURLs.map { $0.appendingPathComponent("codex").path }.joined(separator: ":")),
+                "parentPATH": .string(ProcessInfo.processInfo.environment["PATH"] ?? "<missing>"),
+                "error": .string(error.localizedDescription)
+            ])
             process.terminationHandler = nil
             self.process = nil
             currentCommandDescription = nil
@@ -676,7 +688,13 @@ private final class CodexAppServerClient: @unchecked Sendable {
             message += ": \(stderr)"
         }
         log("app-server terminated status \(status) reason \(reason)")
-        diagnosticLog?.log("appserver_terminate", ["status": .int(Int(status)), "reason": .string(reason)])
+        diagnosticLog?.log("appserver_terminate", [
+            "status": .int(Int(status)),
+            "reason": .string(reason),
+            "command": .string(command.description),
+            "resolvedCodexPath": .string(command.selectedCodexURL?.path ?? "<not-found>"),
+            "stderr": .string(stderr.isEmpty ? "<empty>" : stderr)
+        ])
 
         let shouldReport = !processFailureReported
         processFailureReported = true
@@ -923,7 +941,9 @@ private final class CodexAppServerClient: @unchecked Sendable {
         let message = String(decoding: data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !message.isEmpty {
-            log("stderr \(message.replacingOccurrences(of: "\n", with: " | "))")
+            let flattened = message.replacingOccurrences(of: "\n", with: " | ")
+            log("stderr \(flattened)")
+            diagnosticLog?.log("appserver_stderr", ["message": .string(flattened)])
         }
     }
 
@@ -1033,6 +1053,7 @@ private final class CodexAppServerClient: @unchecked Sendable {
 
         binURLs.append(contentsOf: [
             homeURL.appendingPathComponent(".local/bin"),
+            homeURL.appendingPathComponent(".local/npm-global/bin"),
             homeURL.appendingPathComponent(".npm-global/bin"),
             homeURL.appendingPathComponent(".yarn/bin"),
             homeURL.appendingPathComponent(".config/yarn/global/node_modules/.bin"),
