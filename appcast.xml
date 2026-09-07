@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.24</title>
+            <pubDate>Mon, 07 Sep 2026 17:00:33 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.24</link>
+            <sparkle:version>202609071657</sparkle:version>
+            <sparkle:shortVersionString>2.0.24</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.24
+
+- Codex CLI 로그인 세션을 이용해 사용량을 직접 가져오도록 개선했습니다.
+- Codex 주간·Spark 사용량, 초기화 시각, 초기화 쿠폰과 크레딧 표시를 바로잡았습니다.
+- Gemini 온라인 계정 정보를 연결 상태에서 표시하도록 보완했습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.24/CCMB-2.0.24.zip" length="2911364" type="application/octet-stream" sparkle:edSignature="z6kJ7Gcr8w00YW+coddKBC0fYcU/OtaSmtjMjSgzezqbQg9T10T+VEWOBE3J6gZ7sKq5EngohgkYo8kWvDbGDA=="/>
+        </item>
+        <item>
             <title>2.0.23</title>
             <pubDate>Mon, 07 Sep 2026 14:50:53 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.23</link>
@@ -27,24 +42,6 @@
 자동 업데이트와 안정성 개선을 포함합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.22/CCMB-2.0.22.zip" length="2908692" type="application/octet-stream" sparkle:edSignature="ZkUHy6YA274y+2q7VBHU+hLawew/OF6nOoWKtPDYzo9olNByyJCq0WjWmHnocW3lXpAyC4m0EEnn2SVG5QmXCA=="/>
-        </item>
-        <item>
-            <title>2.0.21</title>
-            <pubDate>Mon, 07 Sep 2026 10:25:37 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.21</link>
-            <sparkle:version>202609071030</sparkle:version>
-            <sparkle:shortVersionString>2.0.21</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.21
-
-사용량을 가져오지 못하고 계정 확인에서 멈추는 문제를 수정했습니다.
-
-- 계정 정보 조회가 지연되거나 지원되지 않아도 Codex 사용량을 계속 조회
-- Finder에서 실행한 앱의 Codex CLI 경로 탐색 개선
-- npm·pnpm·bun·yarn 등 일반적인 CLI 설치 경로 지원
-- macOS 26의 공식 배포 정책 점검 경로 지원
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.21/CCMB-2.0.21.dmg" length="3200069" type="application/octet-stream" sparkle:edSignature="/ay11jXy+BMxp4Lo6i+neNjMH3N2WUpTXb6SvbiJwgP2iI9sKWYSFTXzNAJeXbBMdcnbJ4Ciea+swerKL5eCAA=="/>
         </item>
     </channel>
 </rss>
