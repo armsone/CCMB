@@ -3,6 +3,19 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.23</title>
+            <pubDate>Mon, 07 Sep 2026 14:50:53 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.23</link>
+            <sparkle:version>202609071446</sparkle:version>
+            <sparkle:shortVersionString>2.0.23</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.23
+
+자동 업데이트와 안정성 개선을 포함합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.23/CCMB-2.0.23.zip" length="2912950" type="application/octet-stream" sparkle:edSignature="ZSaUN49KqnpPk2DxyAwPcNRP9Hy2+NF4Hi1WB4NNi31rfCoOGhRRGctF2MhYxTZdiYsjzv1lsRE3z41qyR5VCA=="/>
+        </item>
+        <item>
             <title>2.0.22</title>
             <pubDate>Mon, 07 Sep 2026 10:40:49 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.22</link>
@@ -32,24 +45,6 @@
 - macOS 26의 공식 배포 정책 점검 경로 지원
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.21/CCMB-2.0.21.dmg" length="3200069" type="application/octet-stream" sparkle:edSignature="/ay11jXy+BMxp4Lo6i+neNjMH3N2WUpTXb6SvbiJwgP2iI9sKWYSFTXzNAJeXbBMdcnbJ4Ciea+swerKL5eCAA=="/>
-        </item>
-        <item>
-            <title>2.0.20</title>
-            <pubDate>Sun, 06 Sep 2026 21:11:54 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.20</link>
-            <sparkle:version>202609062108</sparkle:version>
-            <sparkle:shortVersionString>2.0.20</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.20
-
-메뉴바 사용량 표시를 macOS 시스템 메뉴바와 맞췄습니다.
-
-- 날짜·시간과 같은 시스템 메뉴바 서체와 크기 사용
-- 밝은 배경에서는 숫자를 검정, 어두운 배경에서는 흰색으로 표시
-- `%` 기호만 Codex·Claude·Gemini 대표색 유지
-- 그림자·외곽선·볼드 효과 제거
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.20/CCMB-2.0.20.dmg" length="3200604" type="application/octet-stream" sparkle:edSignature="QcXmaw8CqQBBlt/20CBv46oFba7OV6CcMkzZ7tjpIxWa8raIkLQSPMDKIz276NPo3pLEpdU5c/SehL9O4bJYAg=="/>
         </item>
     </channel>
 </rss>
