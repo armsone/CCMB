@@ -17,6 +17,7 @@ APP_BUILD="$(sed -n 's/^APP_BUILD="\([^"]*\)"/\1/p' "$PACKAGE_SCRIPT")"
 TAG="v$APP_VERSION"
 DMG_PATH="$PRODUCTS_DIR/CCMB.dmg"
 VERSIONED_DMG_PATH="$PRODUCTS_DIR/CCMB-$APP_VERSION.dmg"
+VERSIONED_ZIP_PATH="$PRODUCTS_DIR/CCMB-$APP_VERSION.zip"
 WORK_DIR=""
 
 cleanup() {
@@ -75,6 +76,10 @@ verify_distribution_policy "$DMG_PATH"
 
 WORK_DIR="$(mktemp -d "$PRODUCTS_DIR/.release.XXXXXX")"
 cp "$DMG_PATH" "$WORK_DIR/CCMB-$APP_VERSION.dmg"
+ditto -c -k --sequesterRsrc --keepParent "$ROOT_DIR/Products/Release/CCMB.app" "$WORK_DIR/CCMB-$APP_VERSION.zip"
+UPDATE_WORK_DIR="$WORK_DIR/sparkle-update"
+mkdir -p "$UPDATE_WORK_DIR"
+cp "$WORK_DIR/CCMB-$APP_VERSION.zip" "$UPDATE_WORK_DIR/"
 if [[ -f "$APPCAST_PATH" ]]; then
   cp "$APPCAST_PATH" "$WORK_DIR/appcast.xml"
 fi
@@ -84,6 +89,7 @@ else
   printf '# CCMB %s\n\n자동 업데이트와 안정성 개선을 포함합니다.\n' "$APP_VERSION" \
     > "$WORK_DIR/CCMB-$APP_VERSION.md"
 fi
+cp "$WORK_DIR/CCMB-$APP_VERSION.md" "$UPDATE_WORK_DIR/"
 
 "$GENERATE_APPCAST" \
   --account "$SPARKLE_KEY_ACCOUNT" \
@@ -93,12 +99,13 @@ fi
   --maximum-versions 3 \
   --embed-release-notes \
   -o "$WORK_DIR/appcast.xml" \
-  "$WORK_DIR"
+  "$UPDATE_WORK_DIR"
 
 cp "$WORK_DIR/CCMB-$APP_VERSION.dmg" "$VERSIONED_DMG_PATH"
+cp "$WORK_DIR/CCMB-$APP_VERSION.zip" "$VERSIONED_ZIP_PATH"
 cp "$WORK_DIR/appcast.xml" "$APPCAST_PATH"
 
-gh release create "$TAG" "$VERSIONED_DMG_PATH" \
+gh release create "$TAG" "$VERSIONED_DMG_PATH" "$VERSIONED_ZIP_PATH" \
   --repo armsone/CCMB \
   --title "CCMB $APP_VERSION" \
   --notes-file "$WORK_DIR/CCMB-$APP_VERSION.md"
