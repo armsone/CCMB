@@ -3,6 +3,24 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.21</title>
+            <pubDate>Mon, 07 Sep 2026 10:25:37 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.21</link>
+            <sparkle:version>202609071030</sparkle:version>
+            <sparkle:shortVersionString>2.0.21</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.21
+
+사용량을 가져오지 못하고 계정 확인에서 멈추는 문제를 수정했습니다.
+
+- 계정 정보 조회가 지연되거나 지원되지 않아도 Codex 사용량을 계속 조회
+- Finder에서 실행한 앱의 Codex CLI 경로 탐색 개선
+- npm·pnpm·bun·yarn 등 일반적인 CLI 설치 경로 지원
+- macOS 26의 공식 배포 정책 점검 경로 지원
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.21/CCMB-2.0.21.dmg" length="3200069" type="application/octet-stream" sparkle:edSignature="/ay11jXy+BMxp4Lo6i+neNjMH3N2WUpTXb6SvbiJwgP2iI9sKWYSFTXzNAJeXbBMdcnbJ4Ciea+swerKL5eCAA=="/>
+        </item>
+        <item>
             <title>2.0.20</title>
             <pubDate>Sun, 06 Sep 2026 21:11:54 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.20</link>
@@ -32,21 +50,6 @@
 자동 업데이트와 안정성 개선을 포함합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.19/CCMB-2.0.19.dmg" length="3200159" type="application/octet-stream" sparkle:edSignature="pS5dodRX2DQ514GVKlyzFRUqSKrQu5w5O72Do2eH0skgBLsuDa0cJzNCW7dTo5EZhxvUjvMSN/3td8a1tb5QAA=="/>
-        </item>
-        <item>
-            <title>2.0.16</title>
-            <pubDate>Wed, 02 Sep 2026 15:05:23 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.16</link>
-            <sparkle:version>202609021502</sparkle:version>
-            <sparkle:shortVersionString>2.0.16</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.16
-
-- 초기화 날짜를 `9/7(월) 19:00` 형식으로 통일했습니다.
-- 날짜에는 한글 요일을 붙이고 모든 화면 시각을 24시간제로 표시합니다.
-- Gemini 온라인의 한국어·영어 초기화 문구도 같은 형식으로 정규화합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.16/CCMB-2.0.16.dmg" length="3189387" type="application/octet-stream" sparkle:edSignature="2rPWGwvfjKocqBXtbIvPQSHHY6S+mPgT3g9v0Kqqj5bDCiu1Rn4aM5GW7Wa/KFd1Df5JyqLFOpNjOL+rQw3MCA=="/>
         </item>
     </channel>
 </rss>
