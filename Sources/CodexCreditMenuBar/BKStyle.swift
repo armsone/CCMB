@@ -72,6 +72,23 @@ enum BKStyleTokens {
         dark: NSColor(srgbRed: 0.86, green: 0.87, blue: 0.88, alpha: 1)
     )
 
+    /// Text colors for enamel surfaces. Do not derive these by applying an
+    /// alpha to AppKit's semantic labels: that can resolve the label against
+    /// the menu's old appearance before the light enamel card is attached,
+    /// leaving white text on a light card.
+    static let bodyInk = dynamic(
+        light: NSColor(srgbRed: 0.20, green: 0.21, blue: 0.23, alpha: 1),
+        dark: NSColor(srgbRed: 0.90, green: 0.91, blue: 0.92, alpha: 1)
+    )
+    static let secondaryInk = dynamic(
+        light: NSColor(srgbRed: 0.33, green: 0.34, blue: 0.36, alpha: 1),
+        dark: NSColor(srgbRed: 0.74, green: 0.75, blue: 0.77, alpha: 1)
+    )
+    static let mutedInk = dynamic(
+        light: NSColor(srgbRed: 0.45, green: 0.46, blue: 0.48, alpha: 1),
+        dark: NSColor(srgbRed: 0.62, green: 0.63, blue: 0.65, alpha: 1)
+    )
+
     /// Chrome is limited to precise thin rims and dividers.
     static let chromeLine = dynamic(
         light: NSColor(white: 0, alpha: 0.16),

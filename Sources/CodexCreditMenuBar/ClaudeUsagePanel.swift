@@ -886,15 +886,17 @@ private final class UsageMetricRowView: NSView {
         return field
     }
 
-    func apply(_ row: UsagePanelRow, width: CGFloat, height: CGFloat) {
+    func apply(_ row: UsagePanelRow, width: CGFloat, height: CGFloat, theme: UsagePanelTheme) {
         labelField.stringValue = row.label
+        labelField.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
         valueField.stringValue = row.value
         valueField.isHidden = row.value.isEmpty
-        valueField.textColor = row.valueColor ?? NSColor.labelColor.withAlphaComponent(0.60)
+        valueField.textColor = row.valueColor ?? (theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60))
         valueField.font = .systemFont(ofSize: 12, weight: row.isEmphasized ? .bold : .regular)
         let hasDetail = row.detail != nil
         detailField.stringValue = row.detail ?? ""
         detailField.isHidden = !hasDetail
+        detailField.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
         if let action = row.action {
             actionButton.isHidden = false
             actionButton.title = action.title
@@ -1142,7 +1144,7 @@ private final class UsageSectionHeaderView: NSView {
         wellView.glyph = glyph
         wellView.theme = theme
         titleLabel.stringValue = title
-        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk.withAlphaComponent(0.75) : .secondaryLabelColor
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
         wellView.frame = NSRect(x: 4, y: 3, width: 15, height: 15)
         titleLabel.frame = NSRect(x: 25, y: 4, width: max(0, width - 29), height: 13)
         setAccessibilityElement(true)
@@ -1255,6 +1257,8 @@ private final class UsageQuotaGroupView: NSView {
         titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
         contextLabel.stringValue = group.contextLabel ?? ""
         contextLabel.isHidden = group.contextLabel == nil
+        contextLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .tertiaryLabelColor
+        detailLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
 
         var y: CGFloat = 0
         wellView.frame = NSRect(x: 0, y: y + 1, width: 15, height: 15)
@@ -1319,7 +1323,9 @@ private final class UsageQuotaGroupView: NSView {
                     ofSize: quota.percentText.count >= 4 ? 11 : 13,
                     weight: .regular
                 )
+                percentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
                 captionLabel.stringValue = quota.caption
+                captionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
                 ring.setAccessibilityElement(true)
                 ring.setAccessibilityLabel("\(group.title) \(quota.caption)")
                 ring.setAccessibilityValue(quota.accessibilityValue)
@@ -1541,6 +1547,12 @@ private final class UsageColumnView: NSView {
     func apply(_ column: UsagePanelColumn, width: CGFloat, theme: UsagePanelTheme) -> CGFloat {
         titleLabel.stringValue = column.title
         titleLabel.textColor = column.accentColor
+        quotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        secondaryQuotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        tertiaryQuotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        quaternaryQuotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        accountLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        refreshLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
         titleMarkView.style = ProviderTitleMarkView.Style(providerTitle: column.title)
         titleMarkView.frame = NSRect(x: 0, y: 1, width: 14, height: 14)
         titleLabel.frame = NSRect(x: 20, y: 0, width: max(0, width - 20), height: Self.titleHeight)
@@ -1616,7 +1628,7 @@ private final class UsageColumnView: NSView {
                 percentLabel.textColor = quota.color
                 percentLabel.frame = NSRect(x: 0, y: y + (diameter - 30) / 2, width: groupWidth, height: 30)
             } else {
-                percentLabel.textColor = NSColor.labelColor.withAlphaComponent(0.60)
+                percentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
                 percentLabel.frame = NSRect(x: primaryRingX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
             }
             quotaCaptionLabel.frame = NSRect(
@@ -1639,6 +1651,7 @@ private final class UsageColumnView: NSView {
                 secondaryRingView.lineWidth = lineWidth
                 secondaryPercentLabel.stringValue = secondaryQuota.percentText
                 secondaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+                secondaryPercentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
                 secondaryQuotaCaptionLabel.stringValue = secondaryQuota.caption
                 secondaryRingView.setAccessibilityElement(true)
                 secondaryRingView.setAccessibilityLabel(secondaryQuota.caption)
@@ -1672,6 +1685,7 @@ private final class UsageColumnView: NSView {
                 tertiaryRingView.lineWidth = lineWidth
                 tertiaryPercentLabel.stringValue = tertiaryQuota.percentText
                 tertiaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+                tertiaryPercentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
                 tertiaryQuotaCaptionLabel.stringValue = tertiaryQuota.caption
                 tertiaryRingView.setAccessibilityElement(true)
                 tertiaryRingView.setAccessibilityLabel(tertiaryQuota.caption)
@@ -1705,6 +1719,7 @@ private final class UsageColumnView: NSView {
                 quaternaryRingView.lineWidth = lineWidth
                 quaternaryPercentLabel.stringValue = quaternaryQuota.percentText
                 quaternaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+                quaternaryPercentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
                 quaternaryQuotaCaptionLabel.stringValue = quaternaryQuota.caption
                 quaternaryRingView.setAccessibilityElement(true)
                 quaternaryRingView.setAccessibilityLabel(quaternaryQuota.caption)
@@ -1751,7 +1766,7 @@ private final class UsageColumnView: NSView {
                     let rowView = rowViews[rowIndex]
                     rowIndex += 1
                     let height = row.detail == nil ? Self.singleLineRowHeight : Self.detailRowHeight
-                    rowView.apply(row, width: width, height: height)
+                    rowView.apply(row, width: width, height: height, theme: theme)
                     rowView.frame = NSRect(x: 0, y: y, width: width, height: height)
                     y += height + Self.rowGap
                 }
