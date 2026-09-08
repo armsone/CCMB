@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.25</title>
+            <pubDate>Tue, 08 Sep 2026 11:06:45 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.25</link>
+            <sparkle:version>202609081055</sparkle:version>
+            <sparkle:shortVersionString>2.0.25</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.25
+
+밝은 BK Style 카드에서 사용량 수치, 요금제, 초기화 시간 등 본문 텍스트가 배경과 섞여 보이던 문제를 수정했습니다.
+
+- 밝은 enamel 카드에는 어두운 본문·보조 텍스트를 적용합니다.
+- 다크 모드에서는 그에 맞는 밝은 텍스트를 유지합니다.
+- 사용량 데이터와 갱신 동작은 변경하지 않았습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.25/CCMB-2.0.25.zip" length="2915909" type="application/octet-stream" sparkle:edSignature="skocxAiWvjvM2OLDt0OdGC6IL+4IL/OL0Ikrods2PZod2zzWJZWH2bJF88yZtQoLUXFoolt9KHdPm6ujW+5VAw=="/>
+        </item>
+        <item>
             <title>2.0.24</title>
             <pubDate>Mon, 07 Sep 2026 17:00:33 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.24</link>
@@ -29,19 +46,6 @@
 자동 업데이트와 안정성 개선을 포함합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.23/CCMB-2.0.23.zip" length="2912950" type="application/octet-stream" sparkle:edSignature="ZSaUN49KqnpPk2DxyAwPcNRP9Hy2+NF4Hi1WB4NNi31rfCoOGhRRGctF2MhYxTZdiYsjzv1lsRE3z41qyR5VCA=="/>
-        </item>
-        <item>
-            <title>2.0.22</title>
-            <pubDate>Mon, 07 Sep 2026 10:40:49 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.22</link>
-            <sparkle:version>202609071200</sparkle:version>
-            <sparkle:shortVersionString>2.0.22</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.22
-
-자동 업데이트와 안정성 개선을 포함합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.22/CCMB-2.0.22.zip" length="2908692" type="application/octet-stream" sparkle:edSignature="ZkUHy6YA274y+2q7VBHU+hLawew/OF6nOoWKtPDYzo9olNByyJCq0WjWmHnocW3lXpAyC4m0EEnn2SVG5QmXCA=="/>
         </item>
     </channel>
 </rss>
