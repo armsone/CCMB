@@ -436,13 +436,13 @@ if [[ ! "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
 fi
 
 printf 'Building arm64 release binary (%s)...\n' "$ARM64_TRIPLE"
-"$SWIFTPM" build \
+"$SWIFTPM" build --build-system native \
   --package-path "$ROOT_DIR" \
   --scratch-path "$ARM64_SCRATCH" \
   --triple "$ARM64_TRIPLE" \
   -c release \
   --product "$EXECUTABLE_NAME"
-ARM64_BIN_DIR="$("$SWIFTPM" build \
+ARM64_BIN_DIR="$("$SWIFTPM" build --build-system native \
   --package-path "$ROOT_DIR" \
   --scratch-path "$ARM64_SCRATCH" \
   --triple "$ARM64_TRIPLE" \
@@ -450,13 +450,13 @@ ARM64_BIN_DIR="$("$SWIFTPM" build \
   --show-bin-path)"
 
 printf 'Building x86_64 release binary (%s)...\n' "$X86_64_TRIPLE"
-"$SWIFTPM" build \
+"$SWIFTPM" build --build-system native \
   --package-path "$ROOT_DIR" \
   --scratch-path "$X86_64_SCRATCH" \
   --triple "$X86_64_TRIPLE" \
   -c release \
   --product "$EXECUTABLE_NAME"
-X86_64_BIN_DIR="$("$SWIFTPM" build \
+X86_64_BIN_DIR="$("$SWIFTPM" build --build-system native \
   --package-path "$ROOT_DIR" \
   --scratch-path "$X86_64_SCRATCH" \
   --triple "$X86_64_TRIPLE" \
