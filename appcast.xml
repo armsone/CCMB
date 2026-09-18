@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.26</title>
+            <pubDate>Fri, 18 Sep 2026 12:57:49 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.26</link>
+            <sparkle:version>202609181254</sparkle:version>
+            <sparkle:shortVersionString>2.0.26</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.26
+
+- 서비스가 종료된 Codex Spark의 사용량·초기화 표시와 소비 그래프 항목을 정리했습니다.
+- 과거 사용 기록은 보존하며, Codex 주간 사용량과 크레딧은 계속 확인할 수 있습니다.
+- iPhone 동기화에 오래된 Spark 잔량이 다시 표시되지 않도록 수정했습니다.
+
+Build-Number: 202609181254
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.26/CCMB-2.0.26.zip" length="2877307" type="application/octet-stream" sparkle:edSignature="Mx5zw9nyP98yeqS231yuSAuf3wgU/tFM0TM7hUvL8WZIshbtGcVEAmoC/Eai3REJbY7tZN3zY8mF4RudlLlBCg=="/>
+        </item>
+        <item>
             <title>2.0.25</title>
             <pubDate>Tue, 08 Sep 2026 11:06:45 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.25</link>
@@ -33,19 +50,6 @@
 - Gemini 온라인 계정 정보를 연결 상태에서 표시하도록 보완했습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.24/CCMB-2.0.24.zip" length="2911364" type="application/octet-stream" sparkle:edSignature="z6kJ7Gcr8w00YW+coddKBC0fYcU/OtaSmtjMjSgzezqbQg9T10T+VEWOBE3J6gZ7sKq5EngohgkYo8kWvDbGDA=="/>
-        </item>
-        <item>
-            <title>2.0.23</title>
-            <pubDate>Mon, 07 Sep 2026 14:50:53 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.23</link>
-            <sparkle:version>202609071446</sparkle:version>
-            <sparkle:shortVersionString>2.0.23</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.23
-
-자동 업데이트와 안정성 개선을 포함합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.23/CCMB-2.0.23.zip" length="2912950" type="application/octet-stream" sparkle:edSignature="ZSaUN49KqnpPk2DxyAwPcNRP9Hy2+NF4Hi1WB4NNi31rfCoOGhRRGctF2MhYxTZdiYsjzv1lsRE3z41qyR5VCA=="/>
         </item>
     </channel>
 </rss>
