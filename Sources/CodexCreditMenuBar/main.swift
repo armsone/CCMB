@@ -58,14 +58,14 @@ private enum SharedUsageStore {
             "source": "chatgpt-wham-usage",
             "method": "authenticated HTTPS",
             "weeklyRemainingPercent": remainingPercent ?? NSNull(),
-            "sparkRemainingPercent": snapshot.sparkUsedPercent.map(UsageCore.remainingPercent) ?? NSNull(),
+            "sparkRemainingPercent": NSNull(),
             "creditBalance": snapshot.creditBalance ?? NSNull(),
             "usedPercent": snapshot.usedPercent ?? NSNull(),
             "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
             "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
-            "sparkResetsAt": snapshot.sparkResetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
-            "sparkUsedPercent": snapshot.sparkUsedPercent ?? NSNull(),
-            "sparkWindowDurationMins": snapshot.sparkWindowDurationMinutes ?? NSNull(),
+            "sparkResetsAt": NSNull(),
+            "sparkUsedPercent": NSNull(),
+            "sparkWindowDurationMins": NSNull(),
             "fetchedAt": iso8601Formatter.string(from: snapshot.updatedAt),
             "publishedAt": iso8601Formatter.string(from: Date()),
             "sequence": sequence,
@@ -248,14 +248,14 @@ private enum UsageCommand {
             ?? GrokUsageCore.sharedPayload(from: nil)
         var output: [String: Any] = [
             "weeklyRemainingPercent": payload["weeklyRemainingPercent"] ?? NSNull(),
-            "sparkRemainingPercent": payload["sparkRemainingPercent"] ?? NSNull(),
+            "sparkRemainingPercent": NSNull(),
             "creditBalance": payload["creditBalance"] ?? NSNull(),
             "usedPercent": payload["usedPercent"] ?? NSNull(),
-            "sparkUsedPercent": payload["sparkUsedPercent"] ?? NSNull(),
+            "sparkUsedPercent": NSNull(),
             "windowDurationMins": payload["windowDurationMins"] ?? NSNull(),
             "resetsAt": payload["resetsAt"] ?? NSNull(),
-            "sparkResetsAt": payload["sparkResetsAt"] ?? NSNull(),
-            "sparkWindowDurationMins": payload["sparkWindowDurationMins"] ?? NSNull(),
+            "sparkResetsAt": NSNull(),
+            "sparkWindowDurationMins": NSNull(),
             "origin": "ccmb-cache",
             "fetchedAt": payload["fetchedAt"] ?? NSNull(),
             "claude": ClaudeUsageCore.refreshedSharedPayload(storedClaude),
@@ -329,14 +329,14 @@ private enum UsageCommand {
         let fetchedAt = iso8601Formatter.string(from: snapshot.updatedAt)
         return [
             "weeklyRemainingPercent": min(max(100 - usedPercent, 0), 100),
-            "sparkRemainingPercent": snapshot.sparkUsedPercent.map { min(max(100 - $0, 0), 100) } ?? NSNull(),
+            "sparkRemainingPercent": NSNull(),
             "creditBalance": snapshot.creditBalance ?? NSNull(),
             "usedPercent": usedPercent,
-            "sparkUsedPercent": snapshot.sparkUsedPercent ?? NSNull(),
+            "sparkUsedPercent": NSNull(),
             "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
-            "sparkWindowDurationMins": snapshot.sparkWindowDurationMinutes ?? NSNull(),
+            "sparkWindowDurationMins": NSNull(),
             "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
-            "sparkResetsAt": snapshot.sparkResetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "sparkResetsAt": NSNull(),
             "origin": "direct-api",
             "fetchedAt": fetchedAt,
             "ageSeconds": 0,
@@ -1146,9 +1146,6 @@ private final class CodexAppServerClient: @unchecked Sendable {
     ) -> RateLimitSnapshot {
         let rateLimits = object["rateLimits"] as? [String: Any]
         let primary = rateLimits?["primary"] as? [String: Any]
-        let sparkWeekly = UsageCore.sparkWeeklyWindow(
-            from: object["rateLimitsByLimitId"] as? [String: Any]
-        )
 
         let resetCredits = object.value(at: ["rateLimitResetCredits", "availableCount"]).flatMap(numberAsInt)
         let resetsAt = primary?["resetsAt"].flatMap(numberAsDouble).map {
@@ -1163,9 +1160,9 @@ private final class CodexAppServerClient: @unchecked Sendable {
             resetsAt: resetsAt,
             resetCredits: resetCredits,
             creditBalance: object.value(at: ["rateLimits", "credits", "balance"]).flatMap(numberAsDouble),
-            sparkUsedPercent: sparkWeekly?.usedPercent,
-            sparkWindowDurationMinutes: sparkWeekly?.windowDurationMinutes,
-            sparkResetsAt: sparkWeekly?.resetsAt,
+            sparkUsedPercent: nil,
+            sparkWindowDurationMinutes: nil,
+            sparkResetsAt: nil,
             detailedCreditsReturned: object.containsKeyRecursively("credits"),
             updatedAt: Date()
         )
@@ -2426,14 +2423,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if refreshIntervalPreference == UsageCore.smartRefreshPreference,
            codexSmartRefreshPolicy.update(values: [
                snapshot.usedPercent,
-               snapshot.sparkUsedPercent,
                snapshot.creditBalance
            ]) {
             smartCadenceDidChange(for: .codex)
         }
         scheduleResetVerification(
             for: .codex,
-            candidates: [snapshot.resetsAt, snapshot.sparkResetsAt]
+            candidates: [snapshot.resetsAt]
         )
         lastSnapshot = snapshot
         recordCodexConsumption(from: snapshot)
@@ -2824,16 +2820,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             isDecreasing: usesCredits,
             metricKey: usesCredits ? "codex.credit" : "codex.weekly"
         )
-        // Spark has its own weekly window, tracked independently of the
-        // ordinary meter. A snapshot without a Spark figure records nothing
-        // here, so the bucket stays missing for that refresh rather than
-        // showing up as zero work.
-        codexSparkConsumption.record(
-            reading: snapshot.sparkUsedPercent,
-            at: snapshot.updatedAt,
-            isDecreasing: false,
-            metricKey: "codex.spark.weekly"
-        )
         persistConsumptionTrackers()
     }
 
@@ -2883,20 +2869,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         // not-yet-measured slots shown as faint placeholders.
         let usesCredits = Self.codexChartsCredits(snapshot)
         let unit = usesCredits ? " 크레딧" : "%"
-        var series = [UsageHistorySeries(
+        let series = [UsageHistorySeries(
             label: usesCredits ? "크레딧" : "주간",
             samples: codexConsumption.samples,
             color: UsageBrandColors.codex
         )]
-        // Spark is a weekly percentage; it can only stack with the ordinary
-        // weekly percentage, never with a credit balance.
-        if !usesCredits {
-            series.append(UsageHistorySeries(
-                label: "Spark",
-                samples: codexSparkConsumption.samples,
-                color: UsageBrandColors.codexSpark
-            ))
-        }
         let texts = Self.stackedStripTexts(series: series, unit: unit)
         return UsageHistoryStrip(
             caption: texts.caption,
@@ -3091,7 +3068,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func codexColumn(from snapshot: RateLimitSnapshot) -> UsagePanelColumn {
         let accent = UsageBrandColors.codex
         var quota: UsagePanelQuota?
-        var sparkQuota: UsagePanelQuota?
         var summaryRows: [UsagePanelRow] = []
         var resetRows: [UsagePanelRow] = []
         var creditRows: [UsagePanelRow] = []
@@ -3128,17 +3104,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             summaryRows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
         }
 
-        if let sparkUsedPercent = snapshot.sparkUsedPercent {
-            let sparkRemaining = UsageCore.remainingPercent(from: sparkUsedPercent)
-            sparkQuota = UsagePanelQuota(
-                caption: "Spark 남음",
-                percentText: percentTitle(from: sparkRemaining),
-                fraction: sparkRemaining / 100,
-                color: accent,
-                accessibilityValue: "남은 Spark 주간 사용량 \(percentTitle(from: sparkRemaining))"
-            )
-        }
-
         if let resetsAt = snapshot.resetsAt {
             resetRows.append(UsagePanelRow(
                 label: "주간 초기화",
@@ -3147,16 +3112,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             ))
         } else if let minutes = snapshot.windowDurationMinutes {
             resetRows.append(UsagePanelRow(label: "주간 초기화", value: "\(minutes)분 창", isEmphasized: true))
-        }
-
-        if let sparkResetsAt = snapshot.sparkResetsAt {
-            resetRows.append(UsagePanelRow(
-                label: "Spark 초기화",
-                value: Self.resetDateTimeTitle(sparkResetsAt),
-                isEmphasized: true
-            ))
-        } else if let minutes = snapshot.sparkWindowDurationMinutes {
-            resetRows.append(UsagePanelRow(label: "Spark 초기화", value: "\(minutes)분 창", isEmphasized: true))
         }
 
         if let resetCredits = snapshot.resetCredits {
@@ -3183,7 +3138,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             title: "Codex",
             accentColor: accent,
             quota: quota,
-            secondaryQuota: sparkQuota,
+            secondaryQuota: nil,
             rowGroups: rowGroups,
             accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
             refreshLine: "업데이트 \(relativeFormatter.localizedString(for: snapshot.updatedAt, relativeTo: Date()))",

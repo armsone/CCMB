@@ -192,22 +192,18 @@ final class CodexDirectAPIClient: @unchecked Sendable {
             }
         }
 
-        // `wham/usage` puts the ordinary Codex weekly bucket at the root;
-        // the optional 5-hour/Spark pair is listed under additional limits.
+        // `wham/usage` puts the ordinary Codex weekly bucket at the root.
+        // Spark is retired and no longer collected.
         // Do not treat the first root window as a session simply because an
         // older app-server response happened to label it that way.
         let baseWindows = windows(in: rateLimit)
         let weekly = nearestWindow(baseWindows, to: 604_800)
-        let sparkLimit = (object["additional_rate_limits"] as? [[String: Any]])?.first {
-            (($0["limit_name"] as? String) ?? "").localizedCaseInsensitiveContains("spark")
-        }?["rate_limit"] as? [String: Any]
-        let sparkWeekly = nearestWindow(windows(in: sparkLimit), to: 604_800)
         let credits = object["credits"] as? [String: Any]
         let balance = number(credits?["balance"])
         let resetCredits = number(
             (object["rate_limit_reset_credits"] as? [String: Any])?["available_count"]
         ).map(Int.init)
-        guard weekly != nil || sparkWeekly != nil || balance != nil else { return nil }
+        guard weekly != nil || balance != nil else { return nil }
         return RateLimitSnapshot(
             accountID: object["email"] as? String ?? accountID ?? object["account_id"] as? String,
             planType: object["plan_type"] as? String,
@@ -216,9 +212,9 @@ final class CodexDirectAPIClient: @unchecked Sendable {
             resetsAt: weekly.flatMap(date),
             resetCredits: resetCredits,
             creditBalance: balance,
-            sparkUsedPercent: number(sparkWeekly?["used_percent"]),
-            sparkWindowDurationMinutes: number(sparkWeekly?["limit_window_seconds"]).map { Int($0 / 60) },
-            sparkResetsAt: sparkWeekly.flatMap(date),
+            sparkUsedPercent: nil,
+            sparkWindowDurationMinutes: nil,
+            sparkResetsAt: nil,
             detailedCreditsReturned: credits != nil,
             updatedAt: Date()
         )

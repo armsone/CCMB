@@ -523,8 +523,8 @@ enum UsageCore {
 
     /// Nested `codex` object mirroring `ClaudeUsageCore.sharedPayload`'s
     /// shape, so shared-file consumers can read Codex and Claude with the
-    /// same status/weekly/account/freshness concepts and optional Spark weekly
-    /// quota details when present.
+    /// same status/weekly/account/freshness concepts. Retired Spark keys stay
+    /// null for compatibility with older consumers.
     static func codexPayload(from snapshot: RateLimitSnapshot?, freshForSeconds: Int, now: Date = Date()) -> [String: Any] {
         guard let snapshot else {
             return [
@@ -553,10 +553,10 @@ enum UsageCore {
             "weeklyRemainingPercent": snapshot.usedPercent.map(remainingPercent) ?? NSNull(),
             "weeklyUsedPercent": snapshot.usedPercent ?? NSNull(),
             "weeklyResetsAt": snapshot.resetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
-            "sparkRemainingPercent": snapshot.sparkUsedPercent.map(remainingPercent) ?? NSNull(),
-            "sparkUsedPercent": snapshot.sparkUsedPercent ?? NSNull(),
-            "sparkResetsAt": snapshot.sparkResetsAt.map(sharedISO8601Formatter.string(from:)) ?? NSNull(),
-            "sparkWindowDurationMins": snapshot.sparkWindowDurationMinutes ?? NSNull(),
+            "sparkRemainingPercent": NSNull(),
+            "sparkUsedPercent": NSNull(),
+            "sparkResetsAt": NSNull(),
+            "sparkWindowDurationMins": NSNull(),
             "account": snapshot.accountID ?? NSNull(),
             "creditBalance": snapshot.creditBalance ?? NSNull(),
             "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
@@ -573,6 +573,10 @@ enum UsageCore {
     /// plays for the Claude side of a cache read.
     static func refreshedCodexPayload(_ payload: [String: Any], now: Date = Date()) -> [String: Any] {
         var output = payload
+        output["sparkRemainingPercent"] = NSNull()
+        output["sparkUsedPercent"] = NSNull()
+        output["sparkResetsAt"] = NSNull()
+        output["sparkWindowDurationMins"] = NSNull()
         let fetchedAt = (payload["fetchedAt"] as? String).flatMap(sharedISO8601Formatter.date(from:))
         let freshForSeconds = (payload["freshForSeconds"] as? NSNumber)?.intValue ?? 45
         let ageSeconds = fetchedAt.map { max(0, Int(now.timeIntervalSince($0))) }
