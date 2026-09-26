@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.27</title>
+            <pubDate>Sat, 26 Sep 2026 23:37:10 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.27</link>
+            <sparkle:version>202609262331</sparkle:version>
+            <sparkle:shortVersionString>2.0.27</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.27
+
+- 현재 사용 중인 모델과 다르게 보일 수 있던 Claude 요약의 모델 표시를 제거했습니다.
+- Claude의 세션·주간 사용량과 모델별 한도 표시는 그대로 유지됩니다.
+
+macOS-Version: 2.0.27
+Build-Number: 202609262331
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.27/CCMB-2.0.27.zip" length="2877202" type="application/octet-stream" sparkle:edSignature="OZRo4LAFSU0DwnR1xD8nv2bH19kCdB0X4ZLjhG5WQI9FFw8IiDv4Tc3xuSGNGrmHIPhVIrvt9rP4xtxiTljkDg=="/>
+        </item>
+        <item>
             <title>2.0.26</title>
             <pubDate>Fri, 18 Sep 2026 12:57:49 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.26</link>
@@ -35,21 +52,6 @@ Build-Number: 202609181254
 - 사용량 데이터와 갱신 동작은 변경하지 않았습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.25/CCMB-2.0.25.zip" length="2915909" type="application/octet-stream" sparkle:edSignature="skocxAiWvjvM2OLDt0OdGC6IL+4IL/OL0Ikrods2PZod2zzWJZWH2bJF88yZtQoLUXFoolt9KHdPm6ujW+5VAw=="/>
-        </item>
-        <item>
-            <title>2.0.24</title>
-            <pubDate>Mon, 07 Sep 2026 17:00:33 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.24</link>
-            <sparkle:version>202609071657</sparkle:version>
-            <sparkle:shortVersionString>2.0.24</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.24
-
-- Codex CLI 로그인 세션을 이용해 사용량을 직접 가져오도록 개선했습니다.
-- Codex 주간·Spark 사용량, 초기화 시각, 초기화 쿠폰과 크레딧 표시를 바로잡았습니다.
-- Gemini 온라인 계정 정보를 연결 상태에서 표시하도록 보완했습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.24/CCMB-2.0.24.zip" length="2911364" type="application/octet-stream" sparkle:edSignature="z6kJ7Gcr8w00YW+coddKBC0fYcU/OtaSmtjMjSgzezqbQg9T10T+VEWOBE3J6gZ7sKq5EngohgkYo8kWvDbGDA=="/>
         </item>
     </channel>
 </rss>
