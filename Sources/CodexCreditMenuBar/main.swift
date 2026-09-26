@@ -3200,9 +3200,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let planTitle = ClaudePlanStore.readTitle() {
             summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
         }
-        if let model = snapshot.model {
-            summaryRows.append(UsagePanelRow(label: "모델", value: model))
-        }
 
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent) {
             quota = UsagePanelQuota(
