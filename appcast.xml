@@ -3,6 +3,24 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.28</title>
+            <pubDate>Sun, 27 Sep 2026 20:29:27 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.28</link>
+            <sparkle:version>202609272024</sparkle:version>
+            <sparkle:shortVersionString>2.0.28</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.28
+
+- Claude 연결 상태에 맞춰 계정 연결 버튼과 진행 상태를 표시하도록 개선했습니다.
+- 인증 거절, 일시적인 통신 오류, 저장된 인증 정보 접근 오류를 구분해 안내합니다.
+- Claude 인증 갱신과 사용량 조회가 중복으로 실행되는 상황을 줄였습니다.
+
+macOS-Version: 2.0.28
+Build-Number: 202609272024
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.28/CCMB-2.0.28.zip" length="2883400" type="application/octet-stream" sparkle:edSignature="CTOnFEErqfU3IQoct99mLy5hgObjhkqcMegT7y+Tg+iG7r/BK0AxmX65mbWEPF5s7RV70+i5p+0ueyDrIj2NCA=="/>
+        </item>
+        <item>
             <title>2.0.27</title>
             <pubDate>Sat, 26 Sep 2026 23:37:10 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.27</link>
@@ -35,23 +53,6 @@ Build-Number: 202609262331
 Build-Number: 202609181254
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.26/CCMB-2.0.26.zip" length="2877307" type="application/octet-stream" sparkle:edSignature="Mx5zw9nyP98yeqS231yuSAuf3wgU/tFM0TM7hUvL8WZIshbtGcVEAmoC/Eai3REJbY7tZN3zY8mF4RudlLlBCg=="/>
-        </item>
-        <item>
-            <title>2.0.25</title>
-            <pubDate>Tue, 08 Sep 2026 11:06:45 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.25</link>
-            <sparkle:version>202609081055</sparkle:version>
-            <sparkle:shortVersionString>2.0.25</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.25
-
-밝은 BK Style 카드에서 사용량 수치, 요금제, 초기화 시간 등 본문 텍스트가 배경과 섞여 보이던 문제를 수정했습니다.
-
-- 밝은 enamel 카드에는 어두운 본문·보조 텍스트를 적용합니다.
-- 다크 모드에서는 그에 맞는 밝은 텍스트를 유지합니다.
-- 사용량 데이터와 갱신 동작은 변경하지 않았습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.25/CCMB-2.0.25.zip" length="2915909" type="application/octet-stream" sparkle:edSignature="skocxAiWvjvM2OLDt0OdGC6IL+4IL/OL0Ikrods2PZod2zzWJZWH2bJF88yZtQoLUXFoolt9KHdPm6ujW+5VAw=="/>
         </item>
     </channel>
 </rss>
