@@ -299,10 +299,8 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertEqual(payload["freshForSeconds"] as? Int, 45)
     }
 
-    func testCodexPayloadIncludesSparkWeeklyUsage() {
+    func testCodexPayloadKeepsRetiredSparkFieldsNull() {
         let now = Date(timeIntervalSince1970: 1_000)
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let sparkResetsAt = Date(timeIntervalSince1970: 1_250)
         let snapshot = makeRateLimitSnapshot(
             accountID: "user@example.com",
@@ -317,10 +315,10 @@ final class UsageCoreTests: XCTestCase {
 
         let payload = UsageCore.codexPayload(from: snapshot, freshForSeconds: 45, now: now)
 
-        XCTAssertEqual(payload["sparkRemainingPercent"] as? Double, 80)
-        XCTAssertEqual(payload["sparkUsedPercent"] as? Double, 20)
-        XCTAssertEqual(payload["sparkWindowDurationMins"] as? Int, 1_440)
-        XCTAssertEqual(payload["sparkResetsAt"] as? String, formatter.string(from: sparkResetsAt))
+        XCTAssertTrue(payload["sparkRemainingPercent"] is NSNull)
+        XCTAssertTrue(payload["sparkUsedPercent"] is NSNull)
+        XCTAssertTrue(payload["sparkWindowDurationMins"] is NSNull)
+        XCTAssertTrue(payload["sparkResetsAt"] is NSNull)
     }
 
     func testCodexPayloadIncludesWeeklyCreditAccountAndFreshness() {
@@ -368,25 +366,26 @@ final class UsageCoreTests: XCTestCase {
         XCTAssertEqual(refreshed["fresh"] as? Bool, false)
     }
 
-    func testRefreshedCodexPayloadPreservesSparkFields() {
-        let stored = UsageCore.codexPayload(
+    func testRefreshedCodexPayloadClearsRetiredSparkFieldsFromOlderCache() {
+        var stored = UsageCore.codexPayload(
             from: makeRateLimitSnapshot(
                 usedPercent: 10,
-                sparkUsedPercent: 20,
-                sparkWindowDurationMinutes: 1_440,
-                sparkResetsAt: Date(timeIntervalSince1970: 1_200),
                 updatedAt: Date(timeIntervalSince1970: 1_000)
             ),
             freshForSeconds: 45,
             now: Date(timeIntervalSince1970: 1_000)
         )
+        stored["sparkRemainingPercent"] = 80.0
+        stored["sparkUsedPercent"] = 20.0
+        stored["sparkWindowDurationMins"] = 1_440
+        stored["sparkResetsAt"] = "1970-01-01T00:20:00.000Z"
 
         let refreshed = UsageCore.refreshedCodexPayload(stored, now: Date(timeIntervalSince1970: 1_100))
 
-        XCTAssertEqual(refreshed["sparkRemainingPercent"] as? Double, 80)
-        XCTAssertEqual(refreshed["sparkUsedPercent"] as? Double, 20)
-        XCTAssertEqual(refreshed["sparkWindowDurationMins"] as? Int, 1_440)
-        XCTAssertTrue((refreshed["sparkResetsAt"] as? String)?.contains("1970-01-01T00:20:00") == true)
+        XCTAssertTrue(refreshed["sparkRemainingPercent"] is NSNull)
+        XCTAssertTrue(refreshed["sparkUsedPercent"] is NSNull)
+        XCTAssertTrue(refreshed["sparkWindowDurationMins"] is NSNull)
+        XCTAssertTrue(refreshed["sparkResetsAt"] is NSNull)
     }
 }
 
