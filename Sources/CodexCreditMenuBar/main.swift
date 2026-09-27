@@ -1480,6 +1480,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastClaudeSnapshot: ClaudeUsageSnapshot?
     private var lastClaudeFetchFailureLabel: String?
     private var claudeNeedsReconnect = false
+    private var claudeLoginInProgress = false
     /// Set only while a 429 backoff is active; drives a live "N초 후 재시도"
     /// countdown in the panel instead of a static label frozen at fetch time.
     private var lastClaudeRateLimitRetryAt: Date?
@@ -2602,8 +2603,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 if let diagnostic = outcome.diagnosticDescription {
                     self.appLog("claude usage fetch failed: \(diagnostic)")
                 }
-            case .httpFailure, .transportFailure, .decodeFailure:
+            case .credentialUnavailable, .httpFailure, .transportFailure, .decodeFailure:
                 self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
+                self.claudeNeedsReconnect = false
                 self.lastClaudeRateLimitRetryAt = nil
                 if let diagnostic = outcome.diagnosticDescription {
                     self.appLog("claude usage fetch failed: \(diagnostic)")
@@ -3009,6 +3011,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         usagePageLinksView.applyGrokAuthState(
             loginRequired: grokLoginRequired,
             loginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
+        usagePageLinksView.applyClaudeAuthState(
+            loginRequired: claudeNeedsReconnect,
+            loginInProgress: claudeLoginInProgress
         )
         guard let lastSnapshot else {
             splitPanelItem.isHidden = true
@@ -4180,6 +4186,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: isLaunchAtLoginEnabled,
             alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeNeedsReconnect,
+            claudeLoginInProgress: claudeLoginInProgress,
             grokLoginRequired: grokLoginRequired,
             grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
@@ -4210,6 +4218,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: isLaunchAtLoginEnabled,
             alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeNeedsReconnect,
+            claudeLoginInProgress: claudeLoginInProgress,
             grokLoginRequired: grokLoginRequired,
             grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
@@ -4224,6 +4234,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: isLaunchAtLoginEnabled,
             alwaysViewEnabled: enabled,
+            claudeLoginRequired: claudeNeedsReconnect,
+            claudeLoginInProgress: claudeLoginInProgress,
             grokLoginRequired: grokLoginRequired,
             grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
@@ -4260,7 +4272,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     @objc private func performClaudeUsageAction() {
-        guard !ClaudeOAuthAccountClient.hasCredential || claudeNeedsReconnect else {
+        guard !claudeLoginInProgress else { return }
+        guard claudeNeedsReconnect else {
             NSWorkspace.shared.open(UsageDashboardURLs.claude)
             return
         }
@@ -4268,10 +4281,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func beginClaudeOAuthLogin() {
+        guard !claudeLoginInProgress else { return }
+        claudeLoginInProgress = true
         lastClaudeFetchFailureLabel = "브라우저에서 Claude 계정 연결 중"
         updateSplitPanel()
         ClaudeOAuthAccountClient.startLogin { [weak self] result in
             guard let self else { return }
+            self.claudeLoginInProgress = false
             switch result {
             case .success:
                 ClaudeOAuthUsageClient.resetAfterAccountConnection()
@@ -4323,6 +4339,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: enabled,
             alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeNeedsReconnect,
+            claudeLoginInProgress: claudeLoginInProgress,
             grokLoginRequired: grokLoginRequired,
             grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )
@@ -4330,6 +4348,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             versionText: "현재 버전 \(appVersion)",
             launchAtLoginEnabled: enabled,
             alwaysViewEnabled: UserDefaults.standard.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeNeedsReconnect,
+            claudeLoginInProgress: claudeLoginInProgress,
             grokLoginRequired: grokLoginRequired,
             grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
         )

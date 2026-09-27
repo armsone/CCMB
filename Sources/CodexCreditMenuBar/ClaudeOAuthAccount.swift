@@ -9,14 +9,12 @@ enum ClaudeOAuthAccountError: Error {
     case keychain(OSStatus)
     case invalidResponse
     case http(Int)
+    case credentialRejected
+    case transport(Int)
     case callbackUnavailable
     case stateMismatch
     case cancelled
 
-    var isNoCredential: Bool {
-        if case .noCredential = self { return true }
-        return false
-    }
 }
 
 struct ClaudeOAuthAccountTokens {
@@ -33,9 +31,7 @@ enum ClaudeOAuthCredentialStore {
     private static let service = "com.codex.creditmenubar.claude-oauth"
     private static let account = "refresh-token"
 
-    static var hasCredential: Bool { readRefreshToken() != nil }
-
-    static func readRefreshToken() -> String? {
+    static func readRefreshToken() throws -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -45,11 +41,13 @@ enum ClaudeOAuthCredentialStore {
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status != errSecItemNotFound else { throw ClaudeOAuthAccountError.noCredential }
+        guard status == errSecSuccess else { throw ClaudeOAuthAccountError.keychain(status) }
+        guard let data = item as? Data,
               let token = String(data: data, encoding: .utf8),
               !token.isEmpty
-        else { return nil }
+        else { throw ClaudeOAuthAccountError.invalidResponse }
         return token
     }
 
@@ -83,14 +81,12 @@ enum ClaudeOAuthCredentialStore {
 enum ClaudeOAuthAccountClient {
     private static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private static let authorizeURL = URL(string: "https://claude.ai/oauth/authorize")!
-    private static let tokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
+    private static let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     private static let scope = "user:profile"
     private static var cachedTokens: ClaudeOAuthAccountTokens?
     private static var tokenRequestInFlight = false
     private static var tokenWaiters: [(Result<String, Error>) -> Void] = []
     private static var loginCoordinator: ClaudeOAuthLoginCoordinator?
-
-    static var hasCredential: Bool { ClaudeOAuthCredentialStore.hasCredential }
 
     static func clearCachedAccessToken() {
         cachedTokens = nil
@@ -101,8 +97,14 @@ enum ClaudeOAuthAccountClient {
             completion(.success(cachedTokens.accessToken))
             return
         }
-        guard let refreshToken = ClaudeOAuthCredentialStore.readRefreshToken() else {
-            completion(.failure(ClaudeOAuthAccountError.noCredential))
+        let refreshToken: String
+        do {
+            refreshToken = try ClaudeOAuthCredentialStore.readRefreshToken()
+        } catch {
+            if case ClaudeOAuthAccountError.keychain(let status) = error {
+                DiagnosticLog.shared.log("claude_credential_read_failed", ["status": .int(Int(status))])
+            }
+            completion(.failure(error))
             return
         }
         tokenWaiters.append(completion)
@@ -200,13 +202,31 @@ enum ClaudeOAuthAccountClient {
         var request = URLRequest(url: tokenURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        request.setValue("CCMB/\(appVersion)", forHTTPHeaderField: "User-Agent")
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        URLSession.shared.dataTask(with: request) { data, response, _ in
+        let startedAt = Date()
+        let grantType = payload["grant_type"] == "refresh_token" ? "refresh" : "login"
+        URLSession.shared.dataTask(with: request) { data, response, error in
             let result: Result<ClaudeOAuthAccountTokens, Error>
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                result = .failure(ClaudeOAuthAccountError.http(http.statusCode))
-            } else if let data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            DiagnosticLog.shared.log("claude_oauth_response", [
+                "grant": .string(grantType),
+                "status": .int((response as? HTTPURLResponse)?.statusCode ?? 0),
+                "elapsedSeconds": .double(Date().timeIntervalSince(startedAt)),
+                "networkCode": .int((error as NSError?)?.code ?? 0)
+            ])
+            if let error {
+                result = .failure(ClaudeOAuthAccountError.transport((error as NSError).code))
+            } else if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                // Only an explicit OAuth rejection establishes that reconnecting
+                // is necessary. Network/server failures must keep their own cause.
+                if json?["error"] as? String == "invalid_grant" {
+                    result = .failure(ClaudeOAuthAccountError.credentialRejected)
+                } else {
+                    result = .failure(ClaudeOAuthAccountError.http(http.statusCode))
+                }
+            } else if let json,
                       let accessToken = json["access_token"] as? String,
                       !accessToken.isEmpty {
                 let refreshToken = json["refresh_token"] as? String ?? ""

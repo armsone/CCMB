@@ -2824,6 +2824,8 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         versionText: String,
         launchAtLoginEnabled: Bool,
         alwaysViewEnabled: Bool,
+        claudeLoginRequired: Bool = false,
+        claudeLoginInProgress: Bool = false,
         grokLoginRequired: Bool = false,
         grokLoginInProgress: Bool = false
     ) {
@@ -2832,6 +2834,10 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
             ? "✓ 항상 보기"
             : "항상 보기"
         lifecycleActionsView.launchButton.title = launchAtLoginEnabled ? "✓ 자동 실행" : "자동 실행"
+        usagePageButtonsView.applyClaudeAuthState(
+            loginRequired: claudeLoginRequired,
+            loginInProgress: claudeLoginInProgress
+        )
         usagePageButtonsView.applyGrokAuthState(
             loginRequired: grokLoginRequired,
             loginInProgress: grokLoginInProgress
@@ -3147,6 +3153,22 @@ final class UsagePageButtonsView: NSView {
             grokButton.title = "Grok 사용량 페이지"
             grokButton.setAccessibilityLabel("Grok 사용량 페이지 열기")
             grokButton.isEnabled = true
+        }
+    }
+
+    func applyClaudeAuthState(loginRequired: Bool, loginInProgress: Bool) {
+        if loginInProgress {
+            claudeButton.title = "Claude 연결 중…"
+            claudeButton.setAccessibilityLabel("Claude 계정 연결 진행 중")
+            claudeButton.isEnabled = false
+        } else if loginRequired {
+            claudeButton.title = "Claude 계정 연결"
+            claudeButton.setAccessibilityLabel("브라우저에서 Claude 계정 연결")
+            claudeButton.isEnabled = true
+        } else {
+            claudeButton.title = "Claude 사용량 페이지"
+            claudeButton.setAccessibilityLabel("Claude 사용량 페이지 열기")
+            claudeButton.isEnabled = true
         }
     }
 
@@ -3712,11 +3734,11 @@ enum ClaudeUsageFetchOutcome {
     /// outcome stored, so the UI's countdown stays accurate.
     case skippedRateLimitBackoff(retryAt: Date)
     case noCredential
+    case credentialUnavailable
     /// An actual 429 response, with the backoff deadline computed from its
     /// `Retry-After` header (or the conservative fallback).
     case rateLimited(retryAt: Date)
-    /// The access token was rejected (HTTP 401/403) or authentication cooldown is active.
-    /// The user must run Claude Code or sign in again to rotate the credential.
+    /// The provider explicitly rejected CCMB's credential after recovery.
     case authenticationRecoveryFailed
     case httpFailure(status: Int)
     case transportFailure
@@ -3731,6 +3753,8 @@ enum ClaudeUsageFetchOutcome {
             return nil
         case .noCredential:
             return "no Claude credential found"
+        case .credentialUnavailable:
+            return "Claude credential temporarily unavailable"
         case .rateLimited(let retryAt):
             return "http 429, backoff until epoch \(Int(retryAt.timeIntervalSince1970))"
         case .authenticationRecoveryFailed:
@@ -3751,12 +3775,12 @@ enum ClaudeUsageFetchOutcome {
             return nil
         case .noCredential:
             return "인증 정보 없음"
+        case .credentialUnavailable:
+            return "저장된 인증 정보 접근 실패 · 다시 시도"
         case .rateLimited:
             return "요청 제한(429)"
         case .authenticationRecoveryFailed:
             return "아래 버튼으로 Claude 다시 연결"
-        case .httpFailure(let status) where status == 401 || status == 403:
-            return "인증 만료"
         case .httpFailure(let status):
             return "서버 오류(\(status))"
         case .transportFailure:
@@ -3836,15 +3860,27 @@ enum ClaudeOAuthUsageClient {
             return
         }
 
+        isFetchInFlight = true
         ClaudeOAuthAccountClient.accessToken { result in
             switch result {
             case .success(let token):
                 performFetch(token: token, completion: completion)
-            case .failure(let error as ClaudeOAuthAccountError) where error.isNoCredential:
-                completion(.noCredential)
-            case .failure:
-                completion(.authenticationRecoveryFailed)
+            case .failure(let error):
+                isFetchInFlight = false
+                completion(tokenFailureOutcome(error))
             }
+        }
+    }
+
+    private static func tokenFailureOutcome(_ error: Error) -> ClaudeUsageFetchOutcome {
+        guard let error = error as? ClaudeOAuthAccountError else { return .transportFailure }
+        switch error {
+        case .noCredential: return .noCredential
+        case .keychain: return .credentialUnavailable
+        case .credentialRejected: return .authenticationRecoveryFailed
+        case .http(let status): return .httpFailure(status: status)
+        case .transport: return .transportFailure
+        case .invalidResponse, .callbackUnavailable, .stateMismatch, .cancelled: return .decodeFailure
         }
     }
 
@@ -3881,6 +3917,10 @@ enum ClaudeOAuthUsageClient {
         URLSession.shared.dataTask(with: request) { data, response, _ in
             let now = Date()
             let outcome: ClaudeUsageFetchOutcome
+            DiagnosticLog.shared.log("claude_usage_response", [
+                "status": .int((response as? HTTPURLResponse)?.statusCode ?? 0),
+                "elapsedSeconds": .double(now.timeIntervalSince(fetchDate))
+            ])
             if let http = response as? HTTPURLResponse {
                 if http.statusCode == 200 {
                     if let data, let snapshot = parse(data) {
@@ -3895,7 +3935,7 @@ enum ClaudeOAuthUsageClient {
                         now: now
                     )
                     outcome = .rateLimited(retryAt: now.addingTimeInterval(backoffSeconds))
-                } else if http.statusCode == 401 || http.statusCode == 403 {
+                } else if http.statusCode == 401 {
                     outcome = .authenticationRecoveryFailed
                 } else {
                     outcome = .httpFailure(status: http.statusCode)
@@ -3929,8 +3969,8 @@ enum ClaudeOAuthUsageClient {
                                 allowAuthenticationRecovery: false,
                                 completion: completion
                             )
-                        case .failure:
-                            completion(.authenticationRecoveryFailed)
+                        case .failure(let error):
+                            completion(tokenFailureOutcome(error))
                         }
                     }
                 case .rateLimited(let retryAt):
