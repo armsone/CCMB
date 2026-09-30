@@ -58,7 +58,8 @@ final class CodexDirectAPIClient: @unchecked Sendable {
                 guard let self else { return }
                 self.queue.async {
                     switch result {
-                    case .success(let tokens): self.fetchUsage(accessToken: tokens.accessToken, accountID: tokens.email, credentialSource: "ccmb_keychain_oauth")
+                    case .success(let tokens):
+                        self.fetchUsage(accessToken: tokens.accessToken, requestAccountID: tokens.accountID, displayAccountID: tokens.email, credentialSource: "ccmb_keychain_oauth")
                     case .failure: self.fetchFromCLIAuth()
                     }
                 }
@@ -73,11 +74,15 @@ final class CodexDirectAPIClient: @unchecked Sendable {
             fail("Codex 로그인 정보가 없습니다. Codex CLI에서 로그인하거나 CCMB에서 Codex 계정을 연결해 주세요.", kind: "credentials-missing")
             return
         }
-        fetchUsage(accessToken: credentials.accessToken, accountID: credentials.accountID, credentialSource: "codex_cli_auth")
+        fetchUsage(accessToken: credentials.accessToken, requestAccountID: credentials.accountID, displayAccountID: credentials.accountID, credentialSource: "codex_cli_auth")
     }
 
-    private func fetchUsage(accessToken token: String, accountID: String?, credentialSource: String) {
+    private func fetchUsage(accessToken token: String, requestAccountID: String?, displayAccountID: String?, credentialSource: String) {
         accessToken = token
+        guard let requestAccountID, !requestAccountID.isEmpty else {
+            fail("Codex 계정 정보를 확인하지 못했습니다. Codex CLI에서 다시 로그인하거나 CCMB 계정을 다시 연결해 주세요.", kind: "account-context-missing")
+            return
+        }
         guard let url = URL(string: "https://chatgpt.com/backend-api/wham/usage") else {
             fail("Codex 사용량 URL이 올바르지 않습니다.", kind: "invalid-url")
             return
@@ -85,6 +90,9 @@ final class CodexDirectAPIClient: @unchecked Sendable {
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        // Without this header the endpoint falls back to an unrelated account's
+        // quota, silently returning the wrong weekly usage percentage.
+        request.setValue(requestAccountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.setValue("https://chatgpt.com", forHTTPHeaderField: "Origin")
         request.setValue("https://chatgpt.com/", forHTTPHeaderField: "Referer")
@@ -124,7 +132,7 @@ final class CodexDirectAPIClient: @unchecked Sendable {
                     return
                 }
                 guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                      let snapshot = Self.parse(object, accountID: accountID) else {
+                      let snapshot = Self.parse(object, accountID: displayAccountID) else {
                     self.fail("Codex 직접 API 응답 형식을 해석하지 못했습니다.", kind: "decode", elapsed: Date().timeIntervalSince(startedAt))
                     return
                 }

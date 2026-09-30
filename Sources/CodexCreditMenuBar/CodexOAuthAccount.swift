@@ -62,6 +62,7 @@ enum CodexOAuthAccountClient {
         let accessToken: String
         let refreshToken: String
         let email: String?
+        let accountID: String?
         let expiresAt: Date
     }
 
@@ -86,7 +87,7 @@ enum CodexOAuthAccountClient {
                 let normalized = result.map { response -> Tokens in
                     let nextRefresh = response.refreshToken.isEmpty ? refreshToken : response.refreshToken
                     if nextRefresh != refreshToken { try? CodexOAuthCredentialStore.saveRefreshToken(nextRefresh) }
-                    return Tokens(accessToken: response.accessToken, refreshToken: nextRefresh, email: response.email, expiresAt: response.expiresAt)
+                    return Tokens(accessToken: response.accessToken, refreshToken: nextRefresh, email: response.email, accountID: response.accountID, expiresAt: response.expiresAt)
                 }
                 if case .success(let tokens) = normalized { cached = tokens }
                 let callbacks = waiters
@@ -122,7 +123,7 @@ enum CodexOAuthAccountClient {
                         guard !response.refreshToken.isEmpty else { completion(.failure(OAuthError.invalidResponse)); return }
                         do {
                             try CodexOAuthCredentialStore.saveRefreshToken(response.refreshToken)
-                            cached = Tokens(accessToken: response.accessToken, refreshToken: response.refreshToken, email: response.email, expiresAt: response.expiresAt)
+                            cached = Tokens(accessToken: response.accessToken, refreshToken: response.refreshToken, email: response.email, accountID: response.accountID, expiresAt: response.expiresAt)
                             completion(.success(()))
                         } catch { completion(.failure(error)) }
                     }
@@ -139,6 +140,7 @@ enum CodexOAuthAccountClient {
         let accessToken: String
         let refreshToken: String
         let email: String?
+        let accountID: String?
         let expiresAt: Date
     }
 
@@ -163,6 +165,7 @@ enum CodexOAuthAccountClient {
                     accessToken: access,
                     refreshToken: json["refresh_token"] as? String ?? "",
                     email: jwtClaim("email", token: idToken) ?? jwtClaim("email", token: access),
+                    accountID: chatgptAccountID(token: idToken) ?? chatgptAccountID(token: access),
                     expiresAt: jwtExpiry(access) ?? Date().addingTimeInterval(1_800)
                 ))
             } else { result = .failure(OAuthError.invalidResponse) }
@@ -176,6 +179,12 @@ enum CodexOAuthAccountClient {
     }
 
     private static func jwtClaim(_ key: String, token: String?) -> String? { jwtObject(token)?[key] as? String }
+
+    /// The official Codex CLI derives its local `tokens.account_id` from this
+    /// same nested claim on the id/access token, not from the account email.
+    private static func chatgptAccountID(token: String?) -> String? {
+        (jwtObject(token)?["https://api.openai.com/auth"] as? [String: Any])?["chatgpt_account_id"] as? String
+    }
 
     private static func jwtObject(_ token: String?) -> [String: Any]? {
         guard let token else { return nil }
