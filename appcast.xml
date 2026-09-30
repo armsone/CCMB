@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.29</title>
+            <pubDate>Wed, 30 Sep 2026 10:37:25 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.29</link>
+            <sparkle:version>202609300958</sparkle:version>
+            <sparkle:shortVersionString>2.0.29</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.29
+
+로그인 계정 식별 누락으로 Codex 주간 잔여량이 공식 앱/CLI/웹과 다르게 보이던 문제를 수정했습니다. 계정을 확인할 수 없을 때는 잘못된 숫자를 표시하지 않습니다.
+
+Build-Number: 202609300958
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.29/CCMB-2.0.29.zip" length="2884749" type="application/octet-stream" sparkle:edSignature="rVZjmw+mDqA+/thOX/Q/Z26c3FKnLv6i58/it4KlmWlNVQjCW6f8HcZROsLTp1KMWvwpud1yhtt+3AoeEmATAw=="/>
+        </item>
+        <item>
             <title>2.0.28</title>
             <pubDate>Sun, 27 Sep 2026 20:29:27 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.28</link>
@@ -36,23 +51,6 @@ macOS-Version: 2.0.27
 Build-Number: 202609262331
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.27/CCMB-2.0.27.zip" length="2877202" type="application/octet-stream" sparkle:edSignature="OZRo4LAFSU0DwnR1xD8nv2bH19kCdB0X4ZLjhG5WQI9FFw8IiDv4Tc3xuSGNGrmHIPhVIrvt9rP4xtxiTljkDg=="/>
-        </item>
-        <item>
-            <title>2.0.26</title>
-            <pubDate>Fri, 18 Sep 2026 12:57:49 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.26</link>
-            <sparkle:version>202609181254</sparkle:version>
-            <sparkle:shortVersionString>2.0.26</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.26
-
-- 서비스가 종료된 Codex Spark의 사용량·초기화 표시와 소비 그래프 항목을 정리했습니다.
-- 과거 사용 기록은 보존하며, Codex 주간 사용량과 크레딧은 계속 확인할 수 있습니다.
-- iPhone 동기화에 오래된 Spark 잔량이 다시 표시되지 않도록 수정했습니다.
-
-Build-Number: 202609181254
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.26/CCMB-2.0.26.zip" length="2877307" type="application/octet-stream" sparkle:edSignature="Mx5zw9nyP98yeqS231yuSAuf3wgU/tFM0TM7hUvL8WZIshbtGcVEAmoC/Eai3REJbY7tZN3zY8mF4RudlLlBCg=="/>
         </item>
     </channel>
 </rss>
