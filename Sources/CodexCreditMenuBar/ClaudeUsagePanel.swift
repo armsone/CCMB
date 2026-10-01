@@ -3085,7 +3085,7 @@ final class SingleActionRowView: NSView {
 }
 
 enum UsageDashboardURLs {
-    static let codex = URL(string: "https://chatgpt.com/codex/settings/usage")!
+    static let codex = URL(string: "https://chatgpt.com/settings/usage?tab=overview")!
     static let claude = URL(string: "https://claude.ai/settings/usage")!
     static let gemini = URL(string: "https://gemini.google.com/usage")!
     static let grok = URL(string: "https://grok.com/?_s=billing")!
