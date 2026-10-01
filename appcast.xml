@@ -3,6 +3,22 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.30</title>
+            <pubDate>Thu, 01 Oct 2026 17:06:49 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.30</link>
+            <sparkle:version>202610011700</sparkle:version>
+            <sparkle:shortVersionString>2.0.30</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.30
+
+- 아래쪽 Codex 사용량 버튼이 새로운 ChatGPT 사용량 설정 페이지를 열도록 수정했습니다.
+
+macOS-Version: 2.0.30
+Build-Number: 202610011700
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.30/CCMB-2.0.30.zip" length="2884776" type="application/octet-stream" sparkle:edSignature="t/lymtC/iDLoh1CpOWvOlAT9A+o2j/hIMPc8tKXDZsC28+bT47olMBLZUDaYCC0PVhJjyN09GlHumW8BgoGBAA=="/>
+        </item>
+        <item>
             <title>2.0.29</title>
             <pubDate>Wed, 30 Sep 2026 10:37:25 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.29</link>
@@ -34,23 +50,6 @@ macOS-Version: 2.0.28
 Build-Number: 202609272024
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.28/CCMB-2.0.28.zip" length="2883400" type="application/octet-stream" sparkle:edSignature="CTOnFEErqfU3IQoct99mLy5hgObjhkqcMegT7y+Tg+iG7r/BK0AxmX65mbWEPF5s7RV70+i5p+0ueyDrIj2NCA=="/>
-        </item>
-        <item>
-            <title>2.0.27</title>
-            <pubDate>Sat, 26 Sep 2026 23:37:10 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.27</link>
-            <sparkle:version>202609262331</sparkle:version>
-            <sparkle:shortVersionString>2.0.27</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.27
-
-- 현재 사용 중인 모델과 다르게 보일 수 있던 Claude 요약의 모델 표시를 제거했습니다.
-- Claude의 세션·주간 사용량과 모델별 한도 표시는 그대로 유지됩니다.
-
-macOS-Version: 2.0.27
-Build-Number: 202609262331
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.27/CCMB-2.0.27.zip" length="2877202" type="application/octet-stream" sparkle:edSignature="OZRo4LAFSU0DwnR1xD8nv2bH19kCdB0X4ZLjhG5WQI9FFw8IiDv4Tc3xuSGNGrmHIPhVIrvt9rP4xtxiTljkDg=="/>
         </item>
     </channel>
 </rss>
