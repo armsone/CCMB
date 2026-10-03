@@ -4475,7 +4475,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static let percentFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .percent
-        formatter.maximumFractionDigits = 0
+        formatter.minimumFractionDigits = 1
+        formatter.maximumFractionDigits = 1
         return formatter
     }()
 
@@ -4537,7 +4538,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private static func percentTitle(from percent: Double) -> String {
-        percentFormatter.string(from: NSNumber(value: percent / 100)) ?? "\(Int(percent.rounded()))%"
+        percentFormatter.string(from: NSNumber(value: percent / 100)) ?? String(format: "%.1f%%", percent)
     }
 
     private static func durationTitle(seconds: Int) -> String {
