@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.31</title>
+            <pubDate>Sun, 04 Oct 2026 08:53:38 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.31</link>
+            <sparkle:version>202610040848</sparkle:version>
+            <sparkle:shortVersionString>2.0.31</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.31
+
+- 열정 그래프의 사용량을 0.1% 단위로 표시합니다.
+
+Build-Number: 202610040848
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.31/CCMB-2.0.31.zip" length="2885408" type="application/octet-stream" sparkle:edSignature="yPH2vC3wuerUwktON83NX4xaD3mdfc6RxVEloUiZyAVAlDYhZMEfM6EQegieM9RHylsuVpU2cPtanNpRS/nZDQ=="/>
+        </item>
+        <item>
             <title>2.0.30</title>
             <pubDate>Thu, 01 Oct 2026 17:06:49 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.30</link>
@@ -32,24 +47,6 @@ Build-Number: 202610011700
 Build-Number: 202609300958
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.29/CCMB-2.0.29.zip" length="2884749" type="application/octet-stream" sparkle:edSignature="rVZjmw+mDqA+/thOX/Q/Z26c3FKnLv6i58/it4KlmWlNVQjCW6f8HcZROsLTp1KMWvwpud1yhtt+3AoeEmATAw=="/>
-        </item>
-        <item>
-            <title>2.0.28</title>
-            <pubDate>Sun, 27 Sep 2026 20:29:27 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.28</link>
-            <sparkle:version>202609272024</sparkle:version>
-            <sparkle:shortVersionString>2.0.28</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.28
-
-- Claude 연결 상태에 맞춰 계정 연결 버튼과 진행 상태를 표시하도록 개선했습니다.
-- 인증 거절, 일시적인 통신 오류, 저장된 인증 정보 접근 오류를 구분해 안내합니다.
-- Claude 인증 갱신과 사용량 조회가 중복으로 실행되는 상황을 줄였습니다.
-
-macOS-Version: 2.0.28
-Build-Number: 202609272024
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.28/CCMB-2.0.28.zip" length="2883400" type="application/octet-stream" sparkle:edSignature="CTOnFEErqfU3IQoct99mLy5hgObjhkqcMegT7y+Tg+iG7r/BK0AxmX65mbWEPF5s7RV70+i5p+0ueyDrIj2NCA=="/>
         </item>
     </channel>
 </rss>
