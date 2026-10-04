@@ -145,11 +145,14 @@ enum UsageConsumptionCore {
         return delta > 0 ? delta : 0
     }
 
-    /// Consumption per refresh is often a fraction of a percent or of a credit,
-    /// so two decimals would round most readings to "0". Small values keep four.
+    /// Percentage consumption uses one decimal; credit amounts retain their
+    /// existing precision, with four decimals for small readings.
     /// Lives here rather than in the app delegate because the hover tooltip in
     /// the chart view needs the same formatting.
     static func amountTitle(_ amount: Double, unit: String) -> String {
+        if unit == "%" {
+            return String(format: "%.1f%%", max(0, amount))
+        }
         guard amount > 0 else { return "0\(unit)" }
         let format = amount < 0.01 ? "%.4f" : "%.2f"
         let text = String(format: format, amount)
