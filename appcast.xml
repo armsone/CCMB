@@ -3,6 +3,22 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.32</title>
+            <pubDate>Sun, 04 Oct 2026 09:04:43 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.32</link>
+            <sparkle:version>202610040900</sparkle:version>
+            <sparkle:shortVersionString>2.0.32</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.32
+
+- 막대 열정 그래프의 갱신당 사용량과 막대에 마우스를 올렸을 때의 퍼센트를 0.1% 단위로 표시합니다.
+- 원형 그래프, 메뉴 막대와 나머지 퍼센트는 정수로 표시합니다.
+
+Build-Number: 202610040900
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.32/CCMB-2.0.32.zip" length="2883905" type="application/octet-stream" sparkle:edSignature="WNkoIKldSXcRHRgijnLG0bk7uYqGheWM3sbprwW6VpHwcnPQhMnJVh34CzuDuNwoK/MU3/NwvLyNTGPqZaWhDg=="/>
+        </item>
+        <item>
             <title>2.0.31</title>
             <pubDate>Sun, 04 Oct 2026 08:53:38 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.31</link>
@@ -32,21 +48,6 @@ macOS-Version: 2.0.30
 Build-Number: 202610011700
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.30/CCMB-2.0.30.zip" length="2884776" type="application/octet-stream" sparkle:edSignature="t/lymtC/iDLoh1CpOWvOlAT9A+o2j/hIMPc8tKXDZsC28+bT47olMBLZUDaYCC0PVhJjyN09GlHumW8BgoGBAA=="/>
-        </item>
-        <item>
-            <title>2.0.29</title>
-            <pubDate>Wed, 30 Sep 2026 10:37:25 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.29</link>
-            <sparkle:version>202609300958</sparkle:version>
-            <sparkle:shortVersionString>2.0.29</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.29
-
-로그인 계정 식별 누락으로 Codex 주간 잔여량이 공식 앱/CLI/웹과 다르게 보이던 문제를 수정했습니다. 계정을 확인할 수 없을 때는 잘못된 숫자를 표시하지 않습니다.
-
-Build-Number: 202609300958
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.29/CCMB-2.0.29.zip" length="2884749" type="application/octet-stream" sparkle:edSignature="rVZjmw+mDqA+/thOX/Q/Z26c3FKnLv6i58/it4KlmWlNVQjCW6f8HcZROsLTp1KMWvwpud1yhtt+3AoeEmATAw=="/>
         </item>
     </channel>
 </rss>
