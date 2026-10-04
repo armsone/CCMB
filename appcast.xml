@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.33</title>
+            <pubDate>Sun, 04 Oct 2026 10:47:05 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.33</link>
+            <sparkle:version>202610041041</sparkle:version>
+            <sparkle:shortVersionString>2.0.33</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.33
+
+열정 막대그래프의 퍼센트 표시에서 불필요한 .0을 제거했습니다. 정수는 1%, 소수는 최대 한 자리인 1.2%로 표시합니다. 수집 데이터의 소수 정밀도와 다른 숫자의 정수 표시는 유지합니다.
+
+Build-Number: 202610041041
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.33/CCMB-2.0.33.zip" length="2885349" type="application/octet-stream" sparkle:edSignature="iCrcBw0EhGEWq/dtH+BEzCEaAPjs4STiERLR4sCc1fQCsHQtipjYrbIkPaRMIec8Wla/3dgKjJCun0sYltk2AQ=="/>
+        </item>
+        <item>
             <title>2.0.32</title>
             <pubDate>Sun, 04 Oct 2026 09:04:43 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.32</link>
@@ -32,22 +47,6 @@ Build-Number: 202610040900
 Build-Number: 202610040848
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.31/CCMB-2.0.31.zip" length="2885408" type="application/octet-stream" sparkle:edSignature="yPH2vC3wuerUwktON83NX4xaD3mdfc6RxVEloUiZyAVAlDYhZMEfM6EQegieM9RHylsuVpU2cPtanNpRS/nZDQ=="/>
-        </item>
-        <item>
-            <title>2.0.30</title>
-            <pubDate>Thu, 01 Oct 2026 17:06:49 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.30</link>
-            <sparkle:version>202610011700</sparkle:version>
-            <sparkle:shortVersionString>2.0.30</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.30
-
-- 아래쪽 Codex 사용량 버튼이 새로운 ChatGPT 사용량 설정 페이지를 열도록 수정했습니다.
-
-macOS-Version: 2.0.30
-Build-Number: 202610011700
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.30/CCMB-2.0.30.zip" length="2884776" type="application/octet-stream" sparkle:edSignature="t/lymtC/iDLoh1CpOWvOlAT9A+o2j/hIMPc8tKXDZsC28+bT47olMBLZUDaYCC0PVhJjyN09GlHumW8BgoGBAA=="/>
         </item>
     </channel>
 </rss>
