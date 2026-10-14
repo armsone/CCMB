@@ -3,6 +3,21 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.0.34</title>
+            <pubDate>Wed, 14 Oct 2026 14:18:27 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.34</link>
+            <sparkle:version>202610141341</sparkle:version>
+            <sparkle:shortVersionString>2.0.34</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.34
+
+Gemini 온라인 사용량 표시를 정리하여 Mac과 iPhone의 수집·표시 상태를 맞췄습니다. 기존 사용량 기록과 CloudKit 동기화는 유지합니다.
+
+Build-Number: 202610141341
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.34/CCMB-2.0.34.zip" length="2874288" type="application/octet-stream" sparkle:edSignature="7fw1waKybi816pEeCc9seE11zA9xEOXdUq4g5b31pVgeM+F5wOpnUuEIlhpqFHzMNCq3inEsvzBvYe1Hj3gNAQ=="/>
+        </item>
+        <item>
             <title>2.0.33</title>
             <pubDate>Sun, 04 Oct 2026 10:47:05 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.0.33</link>
@@ -32,21 +47,6 @@ Build-Number: 202610041041
 Build-Number: 202610040900
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.32/CCMB-2.0.32.zip" length="2883905" type="application/octet-stream" sparkle:edSignature="WNkoIKldSXcRHRgijnLG0bk7uYqGheWM3sbprwW6VpHwcnPQhMnJVh34CzuDuNwoK/MU3/NwvLyNTGPqZaWhDg=="/>
-        </item>
-        <item>
-            <title>2.0.31</title>
-            <pubDate>Sun, 04 Oct 2026 08:53:38 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.0.31</link>
-            <sparkle:version>202610040848</sparkle:version>
-            <sparkle:shortVersionString>2.0.31</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.0.31
-
-- 열정 그래프의 사용량을 0.1% 단위로 표시합니다.
-
-Build-Number: 202610040848
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.0.31/CCMB-2.0.31.zip" length="2885408" type="application/octet-stream" sparkle:edSignature="yPH2vC3wuerUwktON83NX4xaD3mdfc6RxVEloUiZyAVAlDYhZMEfM6EQegieM9RHylsuVpU2cPtanNpRS/nZDQ=="/>
         </item>
     </channel>
 </rss>
