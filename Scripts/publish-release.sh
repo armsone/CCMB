@@ -105,10 +105,17 @@ cp "$WORK_DIR/CCMB-$APP_VERSION.dmg" "$VERSIONED_DMG_PATH"
 cp "$WORK_DIR/CCMB-$APP_VERSION.zip" "$VERSIONED_ZIP_PATH"
 cp "$WORK_DIR/appcast.xml" "$APPCAST_PATH"
 
-gh release create "$TAG" "$VERSIONED_DMG_PATH" "$VERSIONED_ZIP_PATH" \
+METADATA_HELPER="${HANSTREE_RELEASE_METADATA_HELPER:-$ROOT_DIR/../NasFinder.com/build/release-metadata.mjs}"
+node "$METADATA_HELPER" --version "$APP_VERSION" --build "$APP_BUILD" \
+  --artifact "CCMB=$VERSIONED_DMG_PATH" --output "$WORK_DIR/release.json"
+
+gh release create "$TAG" "$VERSIONED_DMG_PATH" "$VERSIONED_ZIP_PATH" "$WORK_DIR/release.json" \
   --repo armsone/CCMB \
   --title "CCMB $APP_VERSION" \
-  --notes-file "$WORK_DIR/CCMB-$APP_VERSION.md"
+  --notes-file "$WORK_DIR/CCMB-$APP_VERSION.md" \
+  --draft
+
+gh release edit "$TAG" --repo armsone/CCMB --draft=false --latest
 
 git -C "$ROOT_DIR" add appcast.xml
 git -C "$ROOT_DIR" commit -m "Publish CCMB $APP_VERSION appcast"

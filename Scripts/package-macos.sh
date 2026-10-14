@@ -4,9 +4,9 @@ set -euo pipefail
 APP_NAME="CCMB"
 EXECUTABLE_NAME="CodexCreditMenuBar"
 BUNDLE_ID="com.codex.creditmenubar"
-APP_VERSION="2.0.33"
-APP_BUILD="202610041041"
-APP_BUILD_STAMP="202610041041"
+APP_VERSION="2.0.34"
+APP_BUILD="202610141341"
+APP_BUILD_STAMP="202610141341"
 DEPLOYMENT_TARGET="10.15"
 ARM64_DEPLOYMENT_TARGET="11.0"
 ARM64_TRIPLE="arm64-apple-macosx$ARM64_DEPLOYMENT_TARGET"
@@ -49,6 +49,9 @@ PACKAGE_LOCK_HELD=false
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 NOTARIZE=false
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+NOTARY_KEY_PATH="${NOTARY_KEY_PATH:-}"
+NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"
+NOTARY_ISSUER="${NOTARY_ISSUER:-}"
 PROVISIONING_PROFILE="${PROVISIONING_PROFILE:-}"
 
 usage() {
@@ -57,6 +60,9 @@ usage() {
   printf 'Environment:\n'
   printf '  CODESIGN_IDENTITY               Developer ID Application identity. Defaults to ad-hoc "-".\n'
   printf '  NOTARY_PROFILE                  xcrun notarytool keychain profile name.\n'
+  printf '  NOTARY_KEY_PATH                  Path to an App Store Connect API key (.p8) for notarytool --key auth.\n'
+  printf '  NOTARY_KEY_ID                    App Store Connect API key ID for notarytool --key-id auth.\n'
+  printf '  NOTARY_ISSUER                    App Store Connect API issuer ID for notarytool --issuer auth.\n'
   printf '  PROVISIONING_PROFILE            Developer ID provisioning profile with the CCMB iCloud container.\n'
 }
 
@@ -141,11 +147,26 @@ if [[ "$NOTARIZE" == true ]]; then
     fi
   fi
 
-  if [[ -z "$NOTARY_PROFILE" ]]; then
-    printf 'error: notarization requires NOTARY_PROFILE so credentials never appear in process arguments.\n' >&2
+  API_KEY_INPUT_COUNT=0
+  [[ -n "$NOTARY_KEY_PATH" ]] && ((API_KEY_INPUT_COUNT += 1))
+  [[ -n "$NOTARY_KEY_ID" ]] && ((API_KEY_INPUT_COUNT += 1))
+  [[ -n "$NOTARY_ISSUER" ]] && ((API_KEY_INPUT_COUNT += 1))
+
+  if ((API_KEY_INPUT_COUNT == 3)); then
+    if [[ ! -f "$NOTARY_KEY_PATH" ]]; then
+      printf 'error: NOTARY_KEY_PATH does not refer to a file: %s\n' "$NOTARY_KEY_PATH" >&2
+      exit 66
+    fi
+    notary_args=(--key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+  elif ((API_KEY_INPUT_COUNT > 0)); then
+    printf 'error: NOTARY_KEY_PATH, NOTARY_KEY_ID, and NOTARY_ISSUER must all be set together for API key authentication.\n' >&2
     exit 64
+  elif [[ -z "$NOTARY_PROFILE" ]]; then
+    printf 'error: notarization requires NOTARY_PROFILE, or NOTARY_KEY_PATH/NOTARY_KEY_ID/NOTARY_ISSUER, so credentials never appear in process arguments.\n' >&2
+    exit 64
+  else
+    notary_args=(--keychain-profile "$NOTARY_PROFILE")
   fi
-  notary_args=(--keychain-profile "$NOTARY_PROFILE")
 fi
 
 require_products_path() {

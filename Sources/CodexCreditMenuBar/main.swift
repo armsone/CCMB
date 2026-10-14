@@ -44,13 +44,8 @@ private enum SharedUsageStore {
         let staleReason: Any = circuitOpen ? "rate-limited" : (claudeFailureLabel as Any? ?? NSNull())
         claudePayload["staleReason"] = staleReason
 
-        // The Gemini web snapshot nests under `gemini.online` only when a
-        // truthful parsed snapshot exists; consumers that predate it keep
-        // reading the unchanged top-level `gemini` fields.
-        var geminiPayload = GeminiUsageCore.sharedPayload(from: geminiSnapshot)
-        if let onlinePayload = GeminiOnlineUsageCore.sharedPayload(from: geminiOnlineSnapshot) {
-            geminiPayload["online"] = onlinePayload
-        }
+        // Gemini 온라인 공유 발행은 중단한다. CLI의 top-level `gemini` 필드만 발행한다.
+        let geminiPayload = GeminiUsageCore.sharedPayload(from: geminiSnapshot)
 
         let payload: [String: Any] = [
             "schemaVersion": 1,
@@ -1533,7 +1528,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var lastErrorMessage: String?
     private var wakeRecoveryToken = 0
     private let wakeRestartDelay: TimeInterval = 14
-    /// Closed between system/display sleep and the next interactive wake.
+    /// Closed between system sleep and the next interactive wake.
     /// While closed, no provider fetch is started and no snapshot is
     /// published or uploaded, so a dark wake in a bag can never mint a fresh
     /// `fetchedAt`/`publishedAt` for the iPhone.
@@ -1663,7 +1658,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     @objc private func handleScreensDidSleep() {
-        closeSleepGate(reason: "display_sleep")
+        // Display sleep alone leaves the Mac running: keep collecting and
+        // uploading usage for the iPhone. Only system sleep closes the gate.
+        diagnosticLog.log("display_sleep_refresh_continues")
     }
 
     private func closeSleepGate(reason: String) {
@@ -1690,6 +1687,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     @objc private func handleScreensDidWake() {
+        guard isSleepGateClosed else { return }
         openSleepGateAndRecover(reason: "screens_wake")
     }
 
@@ -1884,9 +1882,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if refreshClaude { refreshClaudeUsage() }
         if refreshGemini {
             refreshGeminiUsage()
-            // Quiet Gemini web re-read: only after a prior successful
-            // connection, and never below its own 15-minute floor.
-            refreshGeminiOnlineQuietly()
+            // Gemini 온라인 자동 수집은 중단한다. CLI 세션/주간만 갱신한다.
         }
         if refreshGrok { refreshGrokUsage() }
     }
@@ -3349,7 +3345,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     ) -> UsagePanelColumn {
         let accent = UsageBrandColors.geminiText
         let now = Date()
-        let online = lastGeminiOnlineSnapshot
         let colors = UsageBrandColors.geminiGradient
         func makeQuota(caption: String, remaining: Double?, color: NSColor, accessibilityLabel: String) -> UsagePanelQuota {
             UsagePanelQuota(
@@ -3361,83 +3356,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     ?? "\(accessibilityLabel) 정보 없음"
             )
         }
-        func onlineResetValue(_ text: String?) -> String {
-            guard var text, !text.isEmpty else { return "정보 없음" }
-            for suffix in ["에 초기화", "에 재설정", " resets"] where text.hasSuffix(suffix) {
-                text.removeLast(suffix.count)
-                break
-            }
-
-            let locale = Locale(identifier: "ko_KR")
-            let timeZone = TimeZone.autoupdatingCurrent
-            let output = DateFormatter()
-            output.locale = locale
-            output.timeZone = timeZone
-
-            func resetDateTitle(_ date: Date) -> String {
-                let calendar = Calendar.autoupdatingCurrent
-                if calendar.isDateInToday(date) {
-                    output.dateFormat = "HH:mm"
-                } else if calendar.isDateInTomorrow(date) {
-                    output.dateFormat = "'내일' HH:mm"
-                } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: now),
-                          calendar.isDate(date, inSameDayAs: dayAfterTomorrow) {
-                    output.dateFormat = "'모레' HH:mm"
-                } else {
-                    output.dateFormat = "M/d(EEEEE) HH:mm"
-                }
-                return output.string(from: date)
-            }
-
-            let datedInput = DateFormatter()
-            datedInput.locale = locale
-            datedInput.timeZone = timeZone
-            datedInput.dateFormat = "yyyy년 M월 d일 a h:mm"
-            let currentYear = Calendar.current.component(.year, from: now)
-            if let date = datedInput.date(from: "\(currentYear)년 \(text)") {
-                return resetDateTitle(date)
-            }
-
-            for format in ["yyyy MMM d 'at' h:mm a", "yyyy MMM d, 'at' h:mm a"] {
-                let englishInput = DateFormatter()
-                englishInput.locale = Locale(identifier: "en_US_POSIX")
-                englishInput.timeZone = timeZone
-                englishInput.dateFormat = format
-                if let date = englishInput.date(from: "\(currentYear) \(text)") {
-                    return resetDateTitle(date)
-                }
-            }
-
-            let timeFormats = [
-                (locale, "a h:mm"),
-                (Locale(identifier: "en_US_POSIX"), "h:mm a")
-            ]
-            for (timeLocale, timeFormat) in timeFormats {
-                let timeInput = DateFormatter()
-                timeInput.locale = timeLocale
-                timeInput.timeZone = timeZone
-                timeInput.dateFormat = timeFormat
-                if let parsedTime = timeInput.date(from: text) {
-                    let parsedComponents = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: parsedTime)
-                    guard let hour = parsedComponents.hour, let minute = parsedComponents.minute else { continue }
-                    var dateComponents = Calendar.autoupdatingCurrent.dateComponents([.year, .month, .day], from: now)
-                    dateComponents.hour = hour
-                    dateComponents.minute = minute
-                    guard var date = Calendar.autoupdatingCurrent.date(from: dateComponents) else { continue }
-                    if date < now {
-                        date = Calendar.autoupdatingCurrent.date(byAdding: .day, value: 1, to: date) ?? date
-                    }
-                    return resetDateTitle(date)
-                }
-            }
-            return text
-        }
-
         let cliSessionRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.fiveHourRemainingFraction) }
         let cliWeeklyRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.weeklyRemainingFraction) }
-        let onlineSessionRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.sessionUsedPercent) }
-        let onlineWeeklyRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.weeklyUsedPercent) }
-        let onlineNeedsLogin = online == nil || geminiOnlineNeedsConnection
 
         func cliSessionResetValue() -> String {
             if let resetsAt = snapshot?.fiveHourResetsAt {
@@ -3451,8 +3371,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         let cliSessionQuota = makeQuota(caption: "C세션", remaining: cliSessionRemaining, color: colors[0], accessibilityLabel: "남은 Gemini CLI 세션 사용량")
         let cliWeeklyQuota = makeQuota(caption: "C주간", remaining: cliWeeklyRemaining, color: colors[1], accessibilityLabel: "남은 Gemini CLI 주간 사용량")
-        let onlineSessionQuota = makeQuota(caption: "O세션", remaining: onlineSessionRemaining, color: colors[2], accessibilityLabel: "남은 Gemini 온라인 세션 사용량")
-        let onlineWeeklyQuota = makeQuota(caption: "O주간", remaining: onlineWeeklyRemaining, color: colors[3], accessibilityLabel: "남은 Gemini 온라인 주간 사용량")
 
         var rowGroups: [UsagePanelRowGroup] = []
         var rows: [UsagePanelRow] = []
@@ -3461,16 +3379,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         rows.append(UsagePanelRow(label: "C세션 초기화", value: cliSessionResetValue()))
         rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
-        rows.append(UsagePanelRow(
-            label: "O세션 초기화",
-            value: onlineNeedsLogin ? "" : onlineResetValue(online?.sessionResetText),
-            action: onlineNeedsLogin ? UsagePanelRowAction(
-                title: "로그인",
-                accessibilityLabel: "Gemini 온라인 로그인",
-                handler: { [weak self] in self?.connectGeminiOnline() }
-            ) : nil
-        ))
-        rows.append(UsagePanelRow(label: "O주간 초기화", value: onlineResetValue(online?.weeklyResetText)))
         rowGroups.append(UsagePanelRowGroup(rows: rows))
 
         var statusLines: [String] = []
@@ -3479,37 +3387,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             statusLines.append("CLI 갱신 실패: \(fetchFailureLabel)")
             statusColor = .systemRed
         }
-        if geminiOnlineParseFailed {
-            statusLines.append("온라인 확인 불가")
-            statusColor = .systemOrange
-        } else if let online, !GeminiOnlineUsageCore.isFresh(fetchedAt: online.fetchedAt, now: now) {
-            statusLines.append("온라인 마지막 값")
-            statusColor = .systemOrange
-        }
 
         return UsagePanelColumn(
             title: "Gemini",
             accentColor: accent,
             quota: cliSessionQuota,
             secondaryQuota: cliWeeklyQuota,
-            tertiaryQuota: onlineSessionQuota,
-            quaternaryQuota: onlineWeeklyQuota,
             rowGroups: rowGroups,
             accountLines: [
-                online?.accountEmail.map { "계정 \($0)" }
-                    ?? snapshot?.accountEmail.map { "계정 \($0)" }
+                snapshot?.accountEmail.map { "계정 \($0)" }
                     ?? "계정 정보 없음"
             ],
-            refreshLine: {
-                var parts: [String] = []
-                if let publishedAt = snapshot?.publishedAt {
-                    parts.append("C \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))")
-                }
-                if let fetchedAt = online?.fetchedAt {
-                    parts.append("O \(Self.relativeFormatter.localizedString(for: fetchedAt, relativeTo: now))")
-                }
-                return parts.isEmpty ? nil : parts.joined(separator: " · ")
-            }(),
+            refreshLine: snapshot?.publishedAt.map { publishedAt in
+                "C \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))"
+            },
             statusLines: statusLines,
             statusColor: statusColor
         )
@@ -3977,7 +3868,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         client.refreshRateLimits()
         refreshClaudeUsage(force: true)
         refreshGeminiUsage(force: true)
-        refreshGeminiOnlineQuietly(force: true)
         refreshGrokUsage()
     }
 
