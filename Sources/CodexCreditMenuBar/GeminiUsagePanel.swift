@@ -2,6 +2,144 @@ import AppKit
 import Darwin
 import Foundation
 
+/// 전역 수집 소스 선택: Codex·Claude·Gemini(본·부계정) 네 카드 전체에
+/// 적용되는 전역 설정이다. 놀이터(NAS)가 기본이며, 이 Mac에서 직접 조회는
+/// 명시적으로 선택하는 보조 옵션이다. NAS 연결 실패는 결코 이 Mac 직접
+/// 조회로 자동 전환되지 않으며, 사용자가 명시적으로 선택을 바꾸기 전까지
+/// 마지막 값/오래됨 표시만 보여준다. "이 Mac에서 직접 조회"를 선택했을 때만
+/// 로컬 Codex app-server/Claude OAuth/Gemini `agy` 수집기가 호출된다.
+enum DataCollectionSource: String {
+    case nas
+    case localMac
+
+    var title: String {
+        switch self {
+        case .nas: return "놀이터(기본)"
+        case .localMac: return "이 Mac에서 직접 조회(보조)"
+        }
+    }
+}
+
+/// Fetches the NAS's stored four-service snapshot (Codex, Claude, Gemini
+/// account1, Gemini account2) over the read-only SSH transport in one
+/// call, so a single throttled cadence updates all four NAS-sourced cards.
+/// Entirely separate from any local collector (`agy`, Codex/Claude OAuth
+/// clients) — this client never touches local CLI credentials and never
+/// spawns them. A connection or schema-validation failure is reported
+/// as-is; it never silently falls back to a local collector.
+enum NASFourServiceClient {
+    static let minimumRequestIntervalSeconds: TimeInterval = 180
+
+    @MainActor private static var isFetchInFlight = false
+    @MainActor private static var lastFetchDate: Date?
+    @MainActor private static var currentTask: Task<Void, Never>?
+
+    enum Outcome {
+        case success(NASSnapshotV2)
+        case skippedInFlight
+        case skippedThrottled
+        case failure(NASFetchError)
+        /// The envelope failed strict v2 validation (unknown schema, missing
+        /// or reordered service, wrong identity pairing).
+        case unreadableResponse
+    }
+
+    @MainActor
+    static func fetchIfDue(minimumInterval: TimeInterval, completion: @escaping (Outcome) -> Void) {
+        guard !isFetchInFlight else {
+            completion(.skippedInFlight)
+            return
+        }
+        let now = Date()
+        if let lastFetchDate, minimumInterval > 0, now.timeIntervalSince(lastFetchDate) < minimumInterval {
+            completion(.skippedThrottled)
+            return
+        }
+        isFetchInFlight = true
+        lastFetchDate = now
+        currentTask = Task { @MainActor in
+            defer {
+                isFetchInFlight = false
+                currentTask = nil
+            }
+            do {
+                let data = try await NASSnapshotClient().fetchSnapshot()
+                guard let parsed = NASSnapshotV2Core.parse(data) else {
+                    completion(.unreadableResponse)
+                    return
+                }
+                completion(.success(parsed))
+            } catch let error as NASFetchError {
+                completion(.failure(error))
+            } catch {
+                completion(.failure(.cancelled))
+            }
+        }
+    }
+
+    /// Stops an in-flight read (SIGTERM→SIGKILL on the ssh child, then the
+    /// normal reaped completion) when the user leaves NAS mode.
+    @MainActor
+    static func cancelInFlight() {
+        currentTask?.cancel()
+    }
+}
+
+/// Fetches the NAS's stored consumption-history v2 output over the same
+/// read-only SSH transport as `NASFourServiceClient`, on its own throttle
+/// so a slow or unavailable history never blocks the four-service snapshot
+/// cadence. The helper's structured `{ok:false,error}` result is passed
+/// through as such; the caller keeps whatever history it last parsed — this
+/// client itself holds no cache.
+enum NASHistoryClient {
+    static let minimumRequestIntervalSeconds: TimeInterval = 180
+
+    @MainActor private static var isFetchInFlight = false
+    @MainActor private static var lastFetchDate: Date?
+    @MainActor private static var currentTask: Task<Void, Never>?
+
+    enum Outcome {
+        case success(NASHistoryReadResult)
+        case skippedInFlight
+        case skippedThrottled
+        case failure(NASFetchError)
+    }
+
+    @MainActor
+    static func fetchIfDue(minimumInterval: TimeInterval, completion: @escaping (Outcome) -> Void) {
+        guard !isFetchInFlight else {
+            completion(.skippedInFlight)
+            return
+        }
+        let now = Date()
+        if let lastFetchDate, minimumInterval > 0, now.timeIntervalSince(lastFetchDate) < minimumInterval {
+            completion(.skippedThrottled)
+            return
+        }
+        isFetchInFlight = true
+        lastFetchDate = now
+        currentTask = Task { @MainActor in
+            defer {
+                isFetchInFlight = false
+                currentTask = nil
+            }
+            do {
+                let result = try await NASSnapshotClient().fetchHistory()
+                completion(.success(result))
+            } catch let error as NASFetchError {
+                completion(.failure(error))
+            } catch {
+                completion(.failure(.cancelled))
+            }
+        }
+    }
+
+    @MainActor
+    static func cancelInFlight() {
+        currentTask?.cancel()
+    }
+}
+
 /// Reads only the active account identifier maintained by the local Gemini
 /// CLI. OAuth credentials live in a different file and are never opened.
 enum GeminiAccountStore {

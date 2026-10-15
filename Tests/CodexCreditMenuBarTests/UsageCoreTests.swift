@@ -834,6 +834,1028 @@ final class GeminiUsageCoreTests: XCTestCase {
     }
 }
 
+/// Fixtures mirror the sanitized backend output (`safeCcmbService` /
+/// `usage.py --snapshot-json`): fixed service order, fixed provider and
+/// account_ref, `window_minutes`, structured `{code,message}` errors.
+enum NASSnapshotFixtures {
+    static let codexItems = """
+    [
+        {"name": "codex", "window": "session", "window_minutes": 300, "remaining_percent": 90, "resets_at": 1792055000},
+        {"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": 1792400000,
+         "credits": {"balance": 12.5, "unlimited": false}}
+    ]
+    """
+    static let claudeItems = """
+    [
+        {"name": "전체", "window": "session", "window_minutes": 300, "remaining_percent": 60, "resets_at": 1792055000},
+        {"name": "전체", "window": "weekly", "window_minutes": 10080, "remaining_percent": 80, "resets_at": 1792400000},
+        {"name": "fable", "window": "weekly", "window_minutes": 10080, "remaining_percent": 45, "resets_at": 1792400500}
+    ]
+    """
+    static let geminiItems = """
+    [
+        {"name": "Gemini Models", "window": "session", "window_minutes": 300, "remaining_percent": 80, "resets_at": 1792055000},
+        {"name": "Gemini Models", "window": "weekly", "window_minutes": 10080, "remaining_percent": 90, "resets_at": 1792400000},
+        {"name": "Claude and GPT models", "window": "session", "window_minutes": 300, "remaining_percent": 5, "resets_at": 1792055000},
+        {"name": "Claude and GPT models", "window": "weekly", "window_minutes": 10080, "remaining_percent": 6, "resets_at": 1792400000}
+    ]
+    """
+    static let gemini2Items = """
+    [
+        {"name": "Gemini Models", "window": "session", "window_minutes": 300, "remaining_percent": 60, "resets_at": 1792055100},
+        {"name": "Gemini Models", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": 1792400100}
+    ]
+    """
+
+    static func service(
+        _ id: String,
+        provider: String,
+        accountRef: String?,
+        ok: Bool = true,
+        stale: Bool = false,
+        fetchedAt: String = "1792051100",
+        items: String = "[]",
+        error: String = "null"
+    ) -> String {
+        let ref = accountRef.map { "\"\($0)\"" } ?? "null"
+        return """
+        {"service": "\(id)", "provider": "\(provider)", "account_ref": \(ref), "ok": \(ok), "fetched_at": \(fetchedAt), "stale": \(stale), "items": \(items), "error": \(error)}
+        """
+    }
+
+    static func codex(ok: Bool = true, items: String = codexItems, error: String = "null") -> String {
+        service("codex", provider: "codex", accountRef: nil, ok: ok, items: items, error: error)
+    }
+    static func claude(ok: Bool = true, items: String = claudeItems, error: String = "null") -> String {
+        service("claude", provider: "claude", accountRef: nil, ok: ok, items: items, error: error)
+    }
+    static func gemini(ok: Bool = true, items: String = geminiItems, error: String = "null") -> String {
+        service("gemini", provider: "gemini", accountRef: "account1", ok: ok, items: items, error: error)
+    }
+    static func gemini2(ok: Bool = true, items: String = gemini2Items, error: String = "null") -> String {
+        service("gemini2", provider: "gemini", accountRef: "account2", ok: ok, items: items, error: error)
+    }
+
+    static let notCollected = #"{"code": "not_collected", "message": "아직 수집된 값이 없습니다."}"#
+
+    /// `executionHosts`/`autoSwitch` are raw JSON fragments; `nil` omits
+    /// the key entirely (legacy NAS).
+    static func envelope(
+        services: [String],
+        schemaVersion: String = "2",
+        quotaOrigin: String = "\"nas\"",
+        executionHosts: String? = "[]",
+        autoSwitch: String? = "false"
+    ) -> String {
+        var optional = ""
+        if let executionHosts { optional += ",\n    \"execution_hosts\": \(executionHosts)" }
+        if let autoSwitch { optional += ",\n    \"auto_switch_enabled\": \(autoSwitch)" }
+        return """
+        {
+            "schema_version": \(schemaVersion),
+            "generated_at": 1792051200,
+            "quota_origin": \(quotaOrigin),
+            "collection": {"state": "idle", "job_id": null, "retry_at": null},
+            "services": [\(services.joined(separator: ","))]\(optional)
+        }
+        """
+    }
+
+    static func host(
+        id: String = "tm-mini",
+        run: String = "\"run-42\"",
+        account: String = "\"account1\"",
+        phase: String = "\"running\"",
+        changedAt: String = "1792051000",
+        heartbeatAt: String = "1792051150",
+        returnState: String = "null",
+        extra: String = ""
+    ) -> String {
+        """
+        {"host_id": "\(id)", "run_id": \(run), "execution_account": \(account), "phase": \(phase), \
+        "state_changed_at": \(changedAt), "last_heartbeat_at": \(heartbeatAt), "return_state": \(returnState)\(extra)}
+        """
+    }
+
+    /// Two different hosts on the two fixed accounts; the second has null
+    /// times and a confirmed return.
+    static let twoHosts = "[" + host() + "," + host(
+        id: "api-worker",
+        run: "null",
+        account: "\"account2\"",
+        phase: "\"returning\"",
+        changedAt: "null",
+        heartbeatAt: "null",
+        returnState: "\"confirmed\""
+    ) + "]"
+
+    static let withHosts = envelope(services: [codex(), claude(), gemini(), gemini2()], executionHosts: twoHosts, autoSwitch: "true")
+
+    static let valid = envelope(services: [codex(), claude(), gemini(), gemini2()])
+
+    static func data(_ json: String) -> Data { Data(json.utf8) }
+
+    static func parse(_ json: String) -> NASSnapshotV2? {
+        NASSnapshotV2Core.parse(data(json))
+    }
+}
+
+final class NASSnapshotV2CoreTests: XCTestCase {
+    private typealias F = NASSnapshotFixtures
+
+    func testParsesFourFixedServicesInOrder() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.valid))
+        XCTAssertEqual(snapshot.entries.map(\.service), ["codex", "claude", "gemini", "gemini2"])
+        XCTAssertEqual(snapshot.gemini.accountRef, "account1")
+        XCTAssertEqual(snapshot.gemini2.accountRef, "account2")
+        XCTAssertEqual(snapshot.gemini2.provider, "gemini")
+        XCTAssertNil(snapshot.codex.accountRef)
+        XCTAssertEqual(snapshot.generatedAt, Date(timeIntervalSince1970: 1792051200))
+    }
+
+    func testCodexWeeklyMapsToPrimaryWeeklyFieldsAndCredits() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.valid))
+        let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertEqual(codex.usedPercent ?? -1, 30, accuracy: 0.0001)
+        XCTAssertEqual(codex.windowDurationMinutes, 10080)
+        XCTAssertEqual(codex.resetsAt, Date(timeIntervalSince1970: 1792400000))
+        XCTAssertEqual(codex.creditBalance, 12.5)
+        XCTAssertTrue(codex.detailedCreditsReturned)
+        XCTAssertFalse(codex.creditsUnlimited)
+        XCTAssertEqual(codex.updatedAt, Date(timeIntervalSince1970: 1792051100))
+        // The session window is never folded into the Spark slots, and NAS
+        // never borrows a local account ID.
+        XCTAssertNil(codex.sparkUsedPercent)
+        XCTAssertNil(codex.sparkResetsAt)
+        XCTAssertNil(codex.accountID)
+    }
+
+    func testCodexUnlimitedCreditsAreCarried() throws {
+        let items = """
+        [{"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 0, "resets_at": null,
+          "credits": {"balance": null, "unlimited": true}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+        let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertTrue(codex.creditsUnlimited)
+        XCTAssertNil(codex.creditBalance)
+        XCTAssertNil(codex.resetsAt)
+    }
+
+    func testCodexWithoutNamedWeeklyItemIsUnavailableNotFirstWindow() throws {
+        let items = """
+        [{"name": "codex", "window": "session", "window_minutes": 300, "remaining_percent": 50, "resets_at": null},
+         {"name": "reserve", "window": "weekly", "window_minutes": 10080, "remaining_percent": 10, "resets_at": null}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+        XCTAssertNil(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+    }
+
+    func testClaudeOverallAndFableMapSeparately() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.valid))
+        let claude = try XCTUnwrap(NASItemMappingCore.claudeSnapshot(from: snapshot.claude))
+        XCTAssertEqual(claude.fiveHourUsedPercent ?? -1, 40, accuracy: 0.0001)
+        XCTAssertEqual(claude.weeklyUsedPercent ?? -1, 20, accuracy: 0.0001)
+        let fable = try XCTUnwrap(ClaudeUsageCore.fableWeeklyLimit(in: claude.modelWeeklyLimits))
+        XCTAssertEqual(fable.usedPercent ?? -1, 55, accuracy: 0.0001)
+        XCTAssertEqual(fable.resetsAt, Date(timeIntervalSince1970: 1792400500))
+        XCTAssertEqual(claude.quotaSource, "nas")
+    }
+
+    func testGeminiReadsOnlyGeminiModelsAndAccountsStayFixed() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.valid))
+        let account1 = try XCTUnwrap(NASItemMappingCore.geminiSnapshot(from: snapshot.gemini))
+        let account2 = try XCTUnwrap(NASItemMappingCore.geminiSnapshot(from: snapshot.gemini2))
+        // The "Claude and GPT models" pool (5%/6%) is never read.
+        XCTAssertEqual(account1.fiveHourRemainingFraction ?? -1, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(account1.weeklyRemainingFraction ?? -1, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(account2.fiveHourRemainingFraction ?? -1, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(account2.weeklyRemainingFraction ?? -1, 0.7, accuracy: 0.0001)
+        XCTAssertNil(account1.accountEmail)
+        XCTAssertNil(account2.accountEmail)
+    }
+
+    func testDuplicateGeminiWindowIsUnknownRatherThanFirstMatch() throws {
+        let items = """
+        [{"name": "Gemini Models", "window": "session", "window_minutes": 300, "remaining_percent": 80, "resets_at": null},
+         {"name": "Gemini Models", "window": "session", "window_minutes": 300, "remaining_percent": 20, "resets_at": null},
+         {"name": "Gemini Models", "window": "weekly", "window_minutes": 10080, "remaining_percent": 90, "resets_at": null}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(items: items), F.gemini2()])))
+        let account1 = try XCTUnwrap(NASItemMappingCore.geminiSnapshot(from: snapshot.gemini))
+        XCTAssertNil(account1.fiveHourRemainingFraction)
+        XCTAssertEqual(account1.weeklyRemainingFraction ?? -1, 0.9, accuracy: 0.0001)
+    }
+
+    func testRemainingFractionIsPreferredAndStrict() throws {
+        let fractionItems = """
+        [{"name": "Gemini Models", "window": "session", "window_minutes": 300, "remaining_fraction": 0.25, "resets_at": null}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(items: fractionItems), F.gemini2()])))
+        let account1 = try XCTUnwrap(NASItemMappingCore.geminiSnapshot(from: snapshot.gemini))
+        XCTAssertEqual(account1.fiveHourRemainingFraction ?? -1, 0.25, accuracy: 0.0001)
+
+        for bad in ["1.5", "-0.1", "true", "\"0.5\""] {
+            let items = """
+            [{"name": "Gemini Models", "window": "session", "window_minutes": 300, "remaining_fraction": \(bad), "resets_at": null}]
+            """
+            let parsed = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(items: items), F.gemini2()])))
+            XCTAssertEqual(parsed.gemini.error?.code, "schema_changed", bad)
+            XCTAssertNil(NASItemMappingCore.geminiSnapshot(from: parsed.gemini), bad)
+        }
+    }
+
+    func testOneServiceContentErrorNeverHidesTheOthers() throws {
+        let badItems = """
+        [{"name": "Gemini Models", "window": "session", "window_minutes": 300, "remaining_percent": 120, "resets_at": null}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(), F.gemini2(items: badItems)])))
+        XCTAssertFalse(snapshot.gemini2.ok)
+        XCTAssertEqual(snapshot.gemini2.error?.code, "schema_changed")
+        XCTAssertNotNil(NASItemMappingCore.geminiSnapshot(from: snapshot.gemini))
+        XCTAssertNotNil(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertNotNil(NASItemMappingCore.claudeSnapshot(from: snapshot.claude))
+    }
+
+    func testStructuredErrorIsParsedAsFields() throws {
+        let unavailable = F.envelope(services: [
+            F.codex(ok: false, items: "[]", error: F.notCollected),
+            F.claude(),
+            F.gemini(),
+            F.gemini2(ok: false, items: "[]", error: #"{"code": "login_required", "message": null}"#),
+        ])
+        let snapshot = try XCTUnwrap(F.parse(unavailable))
+        XCTAssertEqual(snapshot.codex.error, NASServiceError(code: "not_collected", message: "아직 수집된 값이 없습니다."))
+        XCTAssertEqual(snapshot.gemini2.error?.code, "login_required")
+        XCTAssertNil(snapshot.gemini2.error?.message)
+        XCTAssertEqual(snapshot.gemini2.error?.label, "NAS 쪽 다시 로그인 필요")
+        XCTAssertEqual(NASServiceError(code: "brand_new", message: nil).label, "NAS 오류(brand_new)")
+
+        // A plain-string error is not the contract: that service becomes a
+        // schema error rather than showing the string.
+        let stringError = F.envelope(services: [F.codex(ok: false, items: "[]", error: "\"boom\""), F.claude(), F.gemini(), F.gemini2()])
+        XCTAssertEqual(try XCTUnwrap(F.parse(stringError)).codex.error?.code, "schema_changed")
+    }
+
+    func testOkWithoutItemsOrWithErrorIsSchemaInvalid() throws {
+        let emptyOk = F.envelope(services: [F.codex(items: "[]"), F.claude(), F.gemini(), F.gemini2()])
+        XCTAssertEqual(try XCTUnwrap(F.parse(emptyOk)).codex.error?.code, "schema_changed")
+        let okWithError = F.envelope(services: [F.codex(error: F.notCollected), F.claude(), F.gemini(), F.gemini2()])
+        XCTAssertEqual(try XCTUnwrap(F.parse(okWithError)).codex.error?.code, "schema_changed")
+    }
+
+    func testTimestampsMustBePositiveFiniteNonBool() throws {
+        for bad in ["true", "-5", "0", "\"1792051100\""] {
+            let service = F.service("codex", provider: "codex", accountRef: nil, fetchedAt: bad, items: F.codexItems)
+            let parsed = try XCTUnwrap(F.parse(F.envelope(services: [service, F.claude(), F.gemini(), F.gemini2()])))
+            XCTAssertEqual(parsed.codex.error?.code, "schema_changed", bad)
+        }
+        let boolReset = """
+        [{"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": true}]
+        """
+        let parsed = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: boolReset), F.claude(), F.gemini(), F.gemini2()])))
+        XCTAssertEqual(parsed.codex.error?.code, "schema_changed")
+    }
+
+    func testWindowMinutesMustMatchWindow() throws {
+        let items = """
+        [{"name": "codex", "window": "weekly", "window_minutes": 300, "remaining_percent": 70, "resets_at": null}]
+        """
+        let parsed = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+        XCTAssertEqual(parsed.codex.error?.code, "schema_changed")
+    }
+
+    func testRejectsUnknownOrNonIntegerSchemaVersion() {
+        for version in ["3", "1", "2.5", "true", "\"2\"", "null"] {
+            XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(), F.gemini2()], schemaVersion: version)), version)
+        }
+    }
+
+    func testRejectsNonNASOriginAndLegacyShapes() {
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(), F.gemini2()], quotaOrigin: "\"local\"")))
+        XCTAssertNil(F.parse(#"{"report":{"services":[]}}"#))
+        XCTAssertNil(F.parse("not-json"))
+    }
+
+    func testRejectsMissingDuplicateExtraOrReorderedServices() {
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini()])))
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.codex(), F.gemini(), F.gemini2()])))
+        XCTAssertNil(F.parse(F.envelope(services: [
+            F.codex(), F.claude(), F.gemini(), F.gemini2(),
+            F.service("grok", provider: "grok", accountRef: nil),
+        ])))
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini2(), F.gemini()])))
+    }
+
+    func testRejectsWrongIdentityPairing() {
+        let swappedAccount = F.service("gemini", provider: "gemini", accountRef: "account2", items: F.geminiItems)
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), swappedAccount, F.gemini2()])))
+        let wrongProvider = F.service("codex", provider: "claude", accountRef: nil, items: F.codexItems)
+        XCTAssertNil(F.parse(F.envelope(services: [wrongProvider, F.claude(), F.gemini(), F.gemini2()])))
+        let codexWithAccount = F.service("codex", provider: "codex", accountRef: "account1", items: F.codexItems)
+        XCTAssertNil(F.parse(F.envelope(services: [codexWithAccount, F.claude(), F.gemini(), F.gemini2()])))
+    }
+}
+
+final class NASFourServiceStateTests: XCTestCase {
+    private typealias F = NASSnapshotFixtures
+
+    func testFreshSnapshotFillsAllFourSlotsIndependently() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        XCTAssertNotNil(state.codexSnapshot)
+        XCTAssertNotNil(state.claudeSnapshot)
+        XCTAssertEqual(state.geminiSnapshot?.fiveHourRemainingFraction ?? -1, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(state.gemini2Snapshot?.fiveHourRemainingFraction ?? -1, 0.6, accuracy: 0.0001)
+        for id in NASServiceID.allCases {
+            XCTAssertNil(state.slot(id).issue)
+            XCTAssertFalse(state.slot(id).isStale)
+        }
+    }
+
+    func testServiceFailureKeepsThatSlotsLastGoodValueAndUpdatesOthers() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        let laterItems = F.geminiItems.replacingOccurrences(of: "\"remaining_percent\": 80", with: "\"remaining_percent\": 55")
+        let later = F.envelope(services: [
+            F.codex(),
+            F.claude(),
+            F.gemini(items: laterItems),
+            F.gemini2(ok: false, items: "[]", error: F.notCollected),
+        ])
+        state.apply(try XCTUnwrap(F.parse(later)))
+        XCTAssertEqual(state.geminiSnapshot?.fiveHourRemainingFraction ?? -1, 0.55, accuracy: 0.0001)
+        // account2 keeps its own last value, marked stale with its own issue.
+        XCTAssertEqual(state.gemini2Snapshot?.fiveHourRemainingFraction ?? -1, 0.6, accuracy: 0.0001)
+        XCTAssertTrue(state.slot(.gemini2).isStale)
+        XCTAssertEqual(state.slot(.gemini2).issue, "NAS 미수집")
+        XCTAssertNil(state.slot(.gemini).issue)
+    }
+
+    func testAccountTwoNeverBorrowsAccountOneValues() throws {
+        var state = NASFourServiceState()
+        let snapshot = F.envelope(services: [F.codex(), F.claude(), F.gemini(), F.gemini2(ok: false, items: "[]", error: F.notCollected)])
+        state.apply(try XCTUnwrap(F.parse(snapshot)))
+        XCTAssertNotNil(state.geminiSnapshot)
+        XCTAssertNil(state.gemini2Snapshot)
+        XCTAssertEqual(state.slot(.gemini2).issue, "NAS 미수집")
+    }
+
+    func testTransportFailureKeepsEveryValueAndMarksStale() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        let before = state.codexSnapshot?.usedPercent
+        state.applyFailure(label: NASFetchError.timeout.label)
+        XCTAssertEqual(state.codexSnapshot?.usedPercent, before)
+        XCTAssertNotNil(state.gemini2Snapshot)
+        for id in NASServiceID.allCases {
+            XCTAssertTrue(state.slot(id).isStale)
+            XCTAssertEqual(state.slot(id).issue, "NAS 응답 시간 초과")
+        }
+    }
+
+    func testCacheRoundTripRestoresValuesAsStale() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        let data = try XCTUnwrap(state.encodedCache())
+        let restored = try XCTUnwrap(NASFourServiceState.decodeCache(data))
+        XCTAssertEqual(restored.codexSnapshot?.usedPercent ?? -1, 30, accuracy: 0.0001)
+        XCTAssertEqual(restored.codexSnapshot?.creditBalance, 12.5)
+        XCTAssertEqual(restored.claudeSnapshot?.weeklyUsedPercent ?? -1, 20, accuracy: 0.0001)
+        XCTAssertEqual(restored.geminiSnapshot?.fiveHourRemainingFraction ?? -1, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(restored.gemini2Snapshot?.fiveHourRemainingFraction ?? -1, 0.6, accuracy: 0.0001)
+        for id in NASServiceID.allCases {
+            XCTAssertTrue(restored.slot(id).isStale)
+        }
+    }
+
+    func testCacheRejectsUnknownVersionOrSource() {
+        XCTAssertNil(NASFourServiceState.decodeCache(Data(#"{"version": 2, "source": "nas", "services": {}}"#.utf8)))
+        XCTAssertNil(NASFourServiceState.decodeCache(Data(#"{"version": 1, "source": "local", "services": {}}"#.utf8)))
+        XCTAssertNil(NASFourServiceState.decodeCache(Data("garbage".utf8)))
+    }
+}
+
+final class NASHostStatusTests: XCTestCase {
+    private typealias F = NASSnapshotFixtures
+    private let now = Date(timeIntervalSince1970: 1792051200)
+
+    func testParsesTwoHostObjectsOnFixedAccountsWithNullTimes() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.withHosts))
+        let status = snapshot.hostStatus
+        XCTAssertEqual(status.autoSwitchEnabled, true)
+        XCTAssertEqual(status.hosts.count, 2)
+        let first = try XCTUnwrap(status.hosts(for: .gemini).first)
+        XCTAssertEqual(first.hostID, "tm-mini")
+        XCTAssertEqual(first.runID, "run-42")
+        XCTAssertEqual(first.phase, "running")
+        XCTAssertEqual(first.stateChangedAt, Date(timeIntervalSince1970: 1792051000))
+        XCTAssertEqual(first.lastHeartbeatAt, Date(timeIntervalSince1970: 1792051150))
+        XCTAssertNil(first.returnState)
+        let second = try XCTUnwrap(status.hosts(for: .gemini2).first)
+        XCTAssertEqual(second.hostID, "api-worker")
+        XCTAssertNil(second.runID)
+        XCTAssertNil(second.stateChangedAt)
+        XCTAssertNil(second.lastHeartbeatAt)
+        XCTAssertEqual(second.returnState, "confirmed")
+        // Quota cards are unaffected by host metadata.
+        XCTAssertNotNil(NASItemMappingCore.geminiSnapshot(from: snapshot.gemini))
+        XCTAssertNotNil(NASItemMappingCore.geminiSnapshot(from: snapshot.gemini2))
+    }
+
+    func testMalformedHostsAreDroppedWithoutRejectingQuotaCards() throws {
+        let malformed = [
+            "\"tm-mini\"",                                              // string, not object
+            F.host(account: "\"account3\""),                             // unknown account
+            F.host(account: "null"),                                     // missing account
+            F.host(id: "user@example.com"),                              // email-like id
+            F.host(id: "/volume1/worker"),                               // path-like id
+            F.host(run: "\"run 1\""),                                    // unsafe run id
+            F.host(phase: "\"Running Now\""),                            // unsafe phase
+            F.host(phase: "{\"x\": 1}"),                                  // object, never stringified
+            F.host(changedAt: "true"),                                   // bool timestamp
+            F.host(heartbeatAt: "0"),                                    // non-positive
+            F.host(heartbeatAt: "-5"),
+            F.host(heartbeatAt: "\"1792051150\""),                       // string timestamp
+            F.host(returnState: "42"),
+        ]
+        let hosts = "[" + (malformed + [F.host(id: "ok-host", extra: #", "binding": {"email": "a@b.c"}, "worker_path": "/x""#)])
+            .joined(separator: ",") + "]"
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: hosts,
+            autoSwitch: "true"
+        )))
+        XCTAssertEqual(snapshot.hostStatus.hosts.map(\.hostID), ["ok-host"])
+        XCTAssertEqual(snapshot.entries.filter(\.ok).count, 4)
+    }
+
+    func testNonArrayHostsAndNonBoolAutoSwitchDoNotRejectEnvelope() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: #"{"host_id": "tm-mini"}"#,
+            autoSwitch: "1"
+        )))
+        XCTAssertEqual(snapshot.hostStatus.hosts, [])
+        XCTAssertNil(snapshot.hostStatus.autoSwitchEnabled)
+        XCTAssertEqual(snapshot.entries.filter(\.ok).count, 4)
+    }
+
+    func testAutoSwitchReflectsActualServerValue() throws {
+        let services = [F.codex(), F.claude(), F.gemini(), F.gemini2()]
+        XCTAssertEqual(try XCTUnwrap(F.parse(F.envelope(services: services, autoSwitch: "true"))).hostStatus.autoSwitchEnabled, true)
+        XCTAssertEqual(try XCTUnwrap(F.parse(F.envelope(services: services, autoSwitch: "false"))).hostStatus.autoSwitchEnabled, false)
+        XCTAssertNil(try XCTUnwrap(F.parse(F.envelope(services: services, autoSwitch: nil))).hostStatus.autoSwitchEnabled)
+        XCTAssertNil(try XCTUnwrap(F.parse(F.envelope(services: services, autoSwitch: "null"))).hostStatus.autoSwitchEnabled)
+    }
+
+    func testLegacyEnvelopeWithoutHostKeysOrWithEmptyArrayIsCompatible() throws {
+        let services = [F.codex(), F.claude(), F.gemini(), F.gemini2()]
+        let legacy = try XCTUnwrap(F.parse(F.envelope(services: services, executionHosts: nil, autoSwitch: nil)))
+        XCTAssertEqual(legacy.hostStatus, NASHostStatus(hosts: [], autoSwitchEnabled: nil))
+        let empty = try XCTUnwrap(F.parse(F.valid))
+        XCTAssertEqual(empty.hostStatus, NASHostStatus(hosts: [], autoSwitchEnabled: false))
+        XCTAssertEqual(empty.entries.filter(\.ok).count, 4)
+    }
+
+    func testStateCarriesHostStatusIndependentlyAndThroughFailure() throws {
+        var state = NASFourServiceState()
+        XCTAssertNil(state.hostStatus)
+        state.apply(try XCTUnwrap(F.parse(F.withHosts)))
+        XCTAssertEqual(state.hostStatus?.hosts.count, 2)
+        XCTAssertFalse(state.hostStatusIsStale)
+        state.applyFailure(label: NASFetchError.timeout.label)
+        XCTAssertEqual(state.hostStatus?.hosts.count, 2)
+        XCTAssertTrue(state.hostStatusIsStale)
+        // Per-service freshness stays its own.
+        XCTAssertEqual(state.slot(.gemini).issue, "NAS 응답 시간 초과")
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        XCTAssertEqual(state.hostStatus, NASHostStatus(hosts: [], autoSwitchEnabled: false))
+        XCTAssertFalse(state.hostStatusIsStale)
+    }
+
+    func testCacheRoundTripRestoresHostStatusAsStale() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.withHosts)))
+        let restored = try XCTUnwrap(NASFourServiceState.decodeCache(try XCTUnwrap(state.encodedCache())))
+        XCTAssertEqual(restored.hostStatus, state.hostStatus)
+        XCTAssertTrue(restored.hostStatusIsStale)
+        XCTAssertNotNil(restored.gemini2Snapshot)
+    }
+
+    func testOldCacheWithoutHostStatusStillRestores() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        let data = try XCTUnwrap(state.encodedCache())
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        root.removeValue(forKey: "host_status")
+        let restored = try XCTUnwrap(NASFourServiceState.decodeCache(JSONSerialization.data(withJSONObject: root)))
+        XCTAssertNil(restored.hostStatus)
+        XCTAssertNotNil(restored.geminiSnapshot)
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: restored, source: .nas, now: now), [])
+    }
+
+    func testFooterLinesForBothFixedGeminiCards() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.withHosts)))
+        XCTAssertEqual(
+            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now),
+            ["호스트 tm-mini", "실행 중 · 신호 방금", "자동 전환 켜짐"]
+        )
+        XCTAssertEqual(
+            NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas, now: now),
+            ["호스트 api-worker", "복귀 중", "복귀 확인됨", "자동 전환 켜짐"]
+        )
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .codex, state: state, source: .nas, now: now), [])
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .claude, state: state, source: .nas, now: now), [])
+    }
+
+    func testFooterNeverClaimsAutoSwitchUnlessServerTrue() throws {
+        let services = [F.codex(), F.claude(), F.gemini(), F.gemini2()]
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.envelope(services: services, executionHosts: nil, autoSwitch: nil))))
+        XCTAssertEqual(
+            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now),
+            ["실행 호스트 없음", "자동 전환 정보 없음"]
+        )
+        state.apply(try XCTUnwrap(F.parse(F.envelope(services: services, executionHosts: "[" + F.host(account: "\"account2\"") + "]"))))
+        XCTAssertEqual(
+            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now),
+            ["실행 중: 부계정", "자동 전환 꺼짐"]
+        )
+        state.applyFailure(label: NASFetchError.timeout.label)
+        XCTAssertEqual(
+            NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas, now: now).last,
+            "호스트 상태 오래됨"
+        )
+    }
+
+    func testLocalMacSourceShowsNoNASHostState() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.withHosts)))
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .localMac, now: now), [])
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .localMac, now: now), [])
+    }
+
+    func testFooterRendersOnlySanitizedFields() throws {
+        let hosts = "[" + F.host(
+            id: "a-very-long-host-identifier-name",
+            extra: #", "binding": {"email": "secret@example.com"}, "worker_path": "/volume1/secret""#
+        ) + "]"
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: hosts,
+            autoSwitch: "true"
+        ))))
+        let lines = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now)
+        XCTAssertEqual(lines.first, "호스트 a-very-long-host-id…")
+        let joined = lines.joined(separator: "\n")
+        XCTAssertFalse(joined.contains("@"))
+        XCTAssertFalse(joined.contains("/"))
+        XCTAssertFalse(joined.contains("{"))
+        let cache = String(decoding: try XCTUnwrap(state.encodedCache()), as: UTF8.self)
+        XCTAssertFalse(cache.contains("secret"))
+    }
+}
+
+final class NASHistoryV2CoreTests: XCTestCase {
+    private func data(_ json: String) -> Data {
+        Data(json.utf8)
+    }
+
+    private static func point(at: String = "1792051200000", consumed: String = "12.5", unit: String = "percent", segment: String = "a1b2c3d4e5f60718") -> String {
+        "{\"at\": \(at), \"consumed\": \(consumed), \"unit\": \"\(unit)\", \"segmentId\": \"\(segment)\"}"
+    }
+
+    private static func series(identityGeneration: String = "null", points: [String] = []) -> String {
+        "{\"identityGeneration\": \(identityGeneration), \"points\": [\(points.joined(separator: ","))]}"
+    }
+
+    private static func envelope(
+        overrides: [String: String] = [:],
+        schemaVersion: String = "2",
+        generatedAt: String = "1792051200000",
+        extraRoot: String = "",
+        ok: String? = "true"
+    ) -> String {
+        var objects: [String: String] = [
+            "codex": series(points: [point()]),
+            "codexCredits": series(points: [point(consumed: "3", unit: "credits")]),
+            "claude": series(points: [point()]),
+            "claudeFable": series(),
+            "gemini": series(identityGeneration: "\"gen-1\"", points: [point()]),
+            "gemini2": series(identityGeneration: "\"gen-7\"", points: [point(consumed: "4")]),
+        ]
+        for (key, value) in overrides { objects[key] = value }
+        let body = objects.keys.sorted().map { "\"\($0)\": \(objects[$0]!)" }.joined(separator: ",")
+        let okField = ok.map { "\"ok\": \($0), " } ?? ""
+        return """
+        {\(okField)"schemaVersion": \(schemaVersion), "generatedAt": \(generatedAt), "source": "nas", "series": {\(body)}\(extraRoot)}
+        """
+    }
+
+    func testParsesHelperOutputWithSixFixedSeriesAndUnits() throws {
+        let history = try XCTUnwrap(NASHistoryV2Core.parse(data(Self.envelope())))
+        XCTAssertEqual(Set(history.series.keys), Set(NASHistoryV2.seriesKeys))
+        XCTAssertEqual(history.series["codexCredits"]?.points.first?.unit, .credits)
+        XCTAssertEqual(history.series["codex"]?.points.first?.unit, .percent)
+        XCTAssertEqual(history.series["gemini"]?.identityGeneration, "gen-1")
+        XCTAssertEqual(history.series["gemini2"]?.identityGeneration, "gen-7")
+        XCTAssertEqual(history.series["gemini2"]?.points.first?.consumed, 4)
+        XCTAssertEqual(history.series["claudeFable"]?.points, [])
+        XCTAssertEqual(history.generatedAt, Date(timeIntervalSince1970: 1792051200))
+        // The persisted file shape (no helper `ok`) parses too.
+        XCTAssertNotNil(NASHistoryV2Core.parse(data(Self.envelope(ok: nil))))
+    }
+
+    func testRejectsUnknownOrNonIntegerSchemaVersion() {
+        for version in ["1", "3", "2.5", "true", "\"2\""] {
+            XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(schemaVersion: version))), version)
+        }
+    }
+
+    func testRejectsBadGeneratedAtAndExtraRootKeys() {
+        for generatedAt in ["0", "-1", "true", "\"1792051200000\"", "null"] {
+            XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(generatedAt: generatedAt))), generatedAt)
+        }
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(extraRoot: ", \"extra\": 1"))))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(ok: "false"))))
+    }
+
+    func testRejectsMissingOrExtraSeriesAndSeriesKeys() {
+        var missing = Self.envelope()
+        missing = missing.replacingOccurrences(of: "\"claudeFable\": \(Self.series()),", with: "")
+        XCTAssertNil(NASHistoryV2Core.parse(data(missing)))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["grok": Self.series()]))))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codex": "{\"points\": []}"]))))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codex": "{\"identityGeneration\": null, \"points\": [], \"x\": 1}"]))))
+    }
+
+    func testIdentityGenerationMustBeStringOrNull() {
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["gemini": Self.series(identityGeneration: "3")]))))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["gemini": Self.series(identityGeneration: "true")]))))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["gemini": Self.series(identityGeneration: "\"\"")]))))
+    }
+
+    func testRejectsMoreThanFortyPoints() {
+        let points = (0..<41).map { Self.point(at: String(1792051200000 + $0)) }
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codex": Self.series(points: points)]))))
+        let forty = Array(points.prefix(40))
+        XCTAssertNotNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codex": Self.series(points: forty)]))))
+    }
+
+    func testRejectsInvalidPointFields() {
+        let badPoints = [
+            Self.point(at: "0"),
+            Self.point(at: "-5"),
+            Self.point(at: "true"),
+            Self.point(consumed: "-1"),
+            Self.point(consumed: "true"),
+            Self.point(consumed: "\"1\""),
+            Self.point(segment: ""),
+            Self.point(segment: "has space"),
+            Self.point(segment: String(repeating: "a", count: 65)),
+            "{\"at\": 1792051200000, \"consumed\": 1, \"unit\": \"percent\"}",
+            "{\"at\": 1792051200000, \"consumed\": 1, \"unit\": \"percent\", \"segmentId\": \"a1\", \"extra\": 1}",
+        ]
+        for bad in badPoints {
+            XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codex": Self.series(points: [bad])]))), bad)
+        }
+    }
+
+    func testEachSeriesHasExactlyItsOwnUnit() {
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codex": Self.series(points: [Self.point(unit: "credits")])]))))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codexCredits": Self.series(points: [Self.point(unit: "percent")])]))))
+        XCTAssertNil(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["gemini2": Self.series(points: [Self.point(unit: "tokens")])]))))
+    }
+
+    func testHelperErrorIsAnErrorNeverAnEmptyHistory() {
+        let body = #"{"ok": false, "error": {"code": "not_collected", "message": "아직 수집된 기록이 없습니다."}}"#
+        XCTAssertEqual(
+            NASHistoryV2Core.interpret(stdout: data(body), exitStatus: 1),
+            .helperError(NASServiceError(code: "not_collected", message: "아직 수집된 기록이 없습니다."))
+        )
+        let storage = #"{"ok": false, "error": {"code": "storage_unavailable", "message": "저장소를 확인할 수 없습니다."}}"#
+        if case .helperError(let error) = NASHistoryV2Core.interpret(stdout: data(storage), exitStatus: 1) {
+            XCTAssertEqual(error.code, "storage_unavailable")
+        } else {
+            XCTFail("storage_unavailable must surface as a helper error")
+        }
+        XCTAssertEqual(NASHistoryV2Core.interpret(stdout: data(#"{"ok": false, "error": "boom"}"#), exitStatus: 1), .invalid)
+        XCTAssertEqual(NASHistoryV2Core.interpret(stdout: data("garbage"), exitStatus: 0), .invalid)
+        // A success-shaped body from a failing exit is contradictory.
+        XCTAssertEqual(NASHistoryV2Core.interpret(stdout: data(Self.envelope()), exitStatus: 1), .invalid)
+        if case .history = NASHistoryV2Core.interpret(stdout: data(Self.envelope()), exitStatus: 0) {} else {
+            XCTFail("valid helper output must parse")
+        }
+    }
+
+    func testCacheKeepsLastGoodHistoryOnHelperErrorOrInvalid() throws {
+        let previous = try XCTUnwrap(NASHistoryV2Core.parse(data(Self.envelope())))
+        let helper = NASHistoryV2Cache.apply(.helperError(NASServiceError(code: "schema_changed", message: nil)), previous: previous)
+        XCTAssertEqual(helper.history, previous)
+        XCTAssertEqual(helper.failureLabel, "이력 NAS 형식 변경으로 확인 불가")
+        let invalid = NASHistoryV2Cache.apply(.invalid, previous: previous)
+        XCTAssertEqual(invalid.history, previous)
+        XCTAssertNotNil(invalid.failureLabel)
+        let none = NASHistoryV2Cache.apply(.invalid, previous: nil)
+        XCTAssertNil(none.history)
+    }
+
+    func testCacheAdoptsNewGoodHistory() throws {
+        let previous = try XCTUnwrap(NASHistoryV2Core.parse(data(Self.envelope())))
+        let updated = try XCTUnwrap(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["codex": Self.series(points: [Self.point(consumed: "30")])]))))
+        let result = NASHistoryV2Cache.apply(.history(updated), previous: previous)
+        XCTAssertEqual(result.history?.series["codex"]?.points.first?.consumed, 30)
+        XCTAssertNil(result.failureLabel)
+    }
+
+    func testEncodeRoundTripsThroughStrictParser() throws {
+        let history = try XCTUnwrap(NASHistoryV2Core.parse(data(Self.envelope())))
+        let encoded = try XCTUnwrap(NASHistoryV2Core.encode(history))
+        XCTAssertEqual(NASHistoryV2Core.parse(encoded), history)
+    }
+
+    func testChartSamplesKeepSegmentsSeparateAndNeverSum() throws {
+        let points = [
+            Self.point(at: "1792051200000", consumed: "5", segment: "segmenta"),
+            Self.point(at: "1792051300000", consumed: "2", segment: "segmentb"),
+            Self.point(at: "1792051400000", consumed: "1", segment: "segmentb"),
+        ]
+        let history = try XCTUnwrap(NASHistoryV2Core.parse(data(Self.envelope(overrides: ["gemini2": Self.series(points: points)]))))
+        let series = history.series["gemini2"]
+        let samples = NASHistoryChartCore.samples(series, unit: .percent)
+        XCTAssertEqual(samples.map(\.amount), [5, 2, 1])
+        XCTAssertEqual(samples.map(\.at), samples.map(\.at).sorted())
+        XCTAssertEqual(NASHistoryChartCore.segmentCount(series), 2)
+        // Wrong unit for the strip: nothing drawn instead of a mis-scaled bar.
+        XCTAssertTrue(NASHistoryChartCore.samples(series, unit: .credits).isEmpty)
+        // account1 and account2 stay separate series.
+        XCTAssertEqual(NASHistoryChartCore.samples(history.series["gemini"], unit: .percent).map(\.amount), [12.5])
+    }
+}
+
+final class DataSourceGateTests: XCTestCase {
+    func testOnlyExplicitLocalModeAllowsLocalCollectors() {
+        XCTAssertTrue(DataSourceGate.allowsLocalCollection(.localMac))
+        XCTAssertFalse(DataSourceGate.allowsLocalCollection(.nas))
+    }
+
+    func testResultsFromAnotherSourceOrGenerationAreDropped() {
+        XCTAssertTrue(DataSourceGate.accepts(resultFrom: .nas, generation: 3, current: .nas, currentGeneration: 3))
+        // A local read finishing after the switch to NAS.
+        XCTAssertFalse(DataSourceGate.accepts(resultFrom: .localMac, generation: 3, current: .nas, currentGeneration: 4))
+        // A NAS read finishing after NAS → local → NAS (same source, new generation).
+        XCTAssertFalse(DataSourceGate.accepts(resultFrom: .nas, generation: 3, current: .nas, currentGeneration: 5))
+        XCTAssertFalse(DataSourceGate.accepts(resultFrom: .nas, generation: 3, current: .localMac, currentGeneration: 3))
+    }
+}
+
+final class NASTransportTests: XCTestCase {
+    private func shell(
+        _ script: String,
+        timeout: TimeInterval = 5,
+        maximumOutputBytes: Int = NASSSHTransport.maximumOutputBytes,
+        killGrace: TimeInterval = 0.5,
+        drainGrace: TimeInterval = 0.5
+    ) async throws -> NASProcessOutput {
+        try await NASSSHTransport.runProcess(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", script],
+            timeout: timeout,
+            maximumOutputBytes: maximumOutputBytes,
+            killGrace: killGrace,
+            drainGrace: drainGrace
+        )
+    }
+
+    func testFixedSSHArgumentsAndCommands() {
+        XCTAssertEqual(NASConfig.sshExecutablePath, "/usr/bin/ssh")
+        XCTAssertEqual(NASConfig.remoteCommand, "python3 /workspace/web-app/usage.py --snapshot-json")
+        XCTAssertEqual(NASConfig.remoteHistoryCommand, "python3 /workspace/web-app/usage.py --history-json")
+        XCTAssertEqual(NASConfig.sshArguments(remoteCommand: NASConfig.remoteHistoryCommand), [
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "ForwardAgent=no",
+            "-o", "ForwardX11=no",
+            "-o", "ClearAllForwardings=yes",
+            "-o", "ConnectTimeout=10",
+            "hanstree-dev",
+            "python3 /workspace/web-app/usage.py --history-json",
+        ])
+        XCTAssertLessThanOrEqual(NASSSHTransport.processTimeoutSeconds, 30)
+        XCTAssertGreaterThanOrEqual(NASSSHTransport.processTimeoutSeconds, 20)
+    }
+
+    func testShortStdoutIsReadCompletely() async throws {
+        let output = try await shell("printf '{\"ok\":true}'")
+        XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "{\"ok\":true}")
+        XCTAssertEqual(output.exitStatus, 0)
+    }
+
+    func testFinalChunkWrittenJustBeforeExitIsNotLost() async throws {
+        let output = try await shell("printf 'abc'; sleep 0.2; printf 'def'; exit 0")
+        XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "abcdef")
+    }
+
+    func testLargeStderrIsDrainedWithoutDeadlock() async throws {
+        let output = try await shell("head -c 300000 /dev/zero >&2; printf ok")
+        XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "ok")
+        XCTAssertEqual(output.stderrByteCount, 300000)
+    }
+
+    func testOversizedStdoutIsRejectedNotTruncated() async {
+        do {
+            _ = try await shell("head -c 5000 /dev/zero", maximumOutputBytes: 1000)
+            XCTFail("oversized output must not be returned")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .outputTooLarge)
+        }
+    }
+
+    func testNonZeroExitAndGoneChildAreReportedAfterReaping() async throws {
+        let output = try await shell("printf 'partial'; exit 3")
+        XCTAssertEqual(output.exitStatus, 3)
+        XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "partial")
+    }
+
+    func testTimeoutTerminatesTheChild() async {
+        let started = Date()
+        do {
+            _ = try await shell("exec sleep 10", timeout: 0.3)
+            XCTFail("must time out")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .timeout)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4)
+    }
+
+    func testTimeoutEscalatesToKillWhenTermIsIgnored() async {
+        let started = Date()
+        do {
+            _ = try await shell("trap '' TERM; exec sleep 10", timeout: 0.3, killGrace: 0.3)
+            XCTFail("must time out")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .timeout)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4)
+    }
+
+    func testTaskCancellationStopsTheChild() async {
+        let started = Date()
+        let task = Task { try await self.shell("exec sleep 10", timeout: 20) }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("must be cancelled")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .cancelled)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4)
+    }
+
+    func testMissingExecutableIsSSHUnavailable() async {
+        do {
+            _ = try await NASSSHTransport.runProcess(executableURL: URL(fileURLWithPath: "/nonexistent/ssh"), arguments: [])
+            XCTFail("must fail to launch")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .sshUnavailable)
+        }
+    }
+
+    func testHistoryClientSurfacesHelperErrorAndSSHFailure() async throws {
+        let body = Data(#"{"ok": false, "error": {"code": "not_collected", "message": "아직 수집된 기록이 없습니다."}}"#.utf8)
+        let helperClient = NASSnapshotClient { command in
+            XCTAssertEqual(command, NASConfig.remoteHistoryCommand)
+            return NASProcessOutput(exitStatus: 1, terminatedBySignal: false, stdout: body, stderrByteCount: 0)
+        }
+        let result = try await helperClient.fetchHistory()
+        XCTAssertEqual(result, .helperError(NASServiceError(code: "not_collected", message: "아직 수집된 기록이 없습니다.")))
+
+        let sshFailure = NASSnapshotClient { _ in
+            NASProcessOutput(exitStatus: 255, terminatedBySignal: false, stdout: Data(), stderrByteCount: 40)
+        }
+        do {
+            _ = try await sshFailure.fetchHistory()
+            XCTFail("ssh failure must throw")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .connectionFailed)
+        }
+        do {
+            _ = try await sshFailure.fetchSnapshot()
+            XCTFail("ssh failure must throw")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .connectionFailed)
+        }
+
+        let empty = NASSnapshotClient { _ in
+            NASProcessOutput(exitStatus: 0, terminatedBySignal: false, stdout: Data(), stderrByteCount: 0)
+        }
+        do {
+            _ = try await empty.fetchSnapshot()
+            XCTFail("empty snapshot must throw")
+        } catch {
+            XCTAssertEqual(error as? NASFetchError, .emptyResponse)
+        }
+    }
+}
+
+@MainActor
+final class FourServiceCardLayoutTests: XCTestCase {
+    private func column(_ title: String, percent: Double? = nil) -> UsagePanelColumn {
+        UsagePanelColumn(
+            title: title,
+            accentColor: .systemBlue,
+            quota: percent.map {
+                UsagePanelQuota(caption: "세션", percentText: "\(Int($0))%", fraction: $0 / 100, color: .systemBlue, accessibilityValue: "\(Int($0))%")
+            },
+            secondaryQuota: nil,
+            rowGroups: [],
+            accountLines: ["놀이터(NAS) 기준"],
+            refreshLine: nil,
+            statusLines: [],
+            statusColor: .secondaryLabelColor
+        )
+    }
+
+    private func model() -> UsagePanelModel {
+        UsagePanelModel(
+            codex: column("Codex", percent: 70),
+            claude: column("Claude", percent: 60),
+            gemini: column("Gemini 본계정", percent: 80),
+            gemini2: column("Gemini 부계정"),
+            grok: column("Grok")
+        )
+    }
+
+    func testModelExposesExactlyFourCardsInFixedOrder() {
+        XCTAssertEqual(model().cards.map(\.title), ["Codex", "Claude", "Gemini 본계정", "Gemini 부계정"])
+        XCTAssertFalse(model().cards.map(\.title).contains("Grok"))
+    }
+
+    func testCardGridHasFourColumnsAndControlGridSpansSameWidth() {
+        XCTAssertEqual(UsagePanelLayout.cardColumnCount, 4)
+        XCTAssertEqual(UsagePanelLayout.cardColumnX.count, 4)
+        let lastCardEdge = UsagePanelLayout.cardColumnX[3] + UsagePanelLayout.cardColumnWidth + UsagePanelLayout.sidePadding
+        XCTAssertEqual(lastCardEdge, UsagePanelLayout.viewWidth, accuracy: 0.001)
+        let lastControlEdge = UsagePanelLayout.columnX[2] + UsagePanelLayout.columnWidth + UsagePanelLayout.sidePadding
+        XCTAssertEqual(lastControlEdge, UsagePanelLayout.viewWidth, accuracy: 0.001)
+        for index in 0..<3 {
+            XCTAssertGreaterThan(UsagePanelLayout.cardDividerX(after: index), UsagePanelLayout.cardColumnX[index] + UsagePanelLayout.cardColumnWidth)
+            XCTAssertLessThan(UsagePanelLayout.cardDividerX(after: index), UsagePanelLayout.cardColumnX[index + 1])
+        }
+    }
+
+    func testSplitPanelRendersFourCardsAtFullWidth() {
+        let view = SplitUsagePanelView()
+        view.apply(model())
+        XCTAssertEqual(view.frame.width, UsagePanelLayout.viewWidth, accuracy: 0.001)
+        let value = view.accessibilityValue() as? String ?? ""
+        XCTAssertTrue(value.contains("Gemini 본계정"))
+        XCTAssertTrue(value.contains("Gemini 부계정 정보 없음"))
+        let cardFrames = view.subviews
+            .filter { $0.frame.width == UsagePanelLayout.cardColumnWidth }
+            .map(\.frame.minX)
+            .sorted()
+        XCTAssertEqual(cardFrames, UsagePanelLayout.cardColumnX)
+    }
+
+    func testHistoryChartShowsAccountTwoStripUnderItsOwnCard() throws {
+        let view = UsageHistoryChartView()
+        let strip = UsageHistoryStrip(
+            caption: "갱신당 세션 4%",
+            samples: [UsageConsumptionSample(at: Date(timeIntervalSince1970: 1), amount: 4)],
+            slotCount: 3,
+            unitSuffix: "%",
+            color: .systemGreen,
+            accessibilityValue: "부계정"
+        )
+        XCTAssertTrue(view.apply(codex: nil, claude: nil, gemini: nil, gemini2: strip, grok: nil))
+        let caption = try XCTUnwrap(view.subviews.compactMap { $0 as? NSTextField }.first { !$0.isHidden })
+        XCTAssertEqual(caption.stringValue, "갱신당 세션 4%")
+        XCTAssertGreaterThanOrEqual(caption.frame.minX, UsagePanelLayout.cardColumnX[3])
+        // No strips at all hides the row rather than drawing zero bars.
+        XCTAssertFalse(view.apply(codex: nil, claude: nil, gemini: nil, gemini2: nil, grok: nil))
+    }
+
+    func testAppWiresFourCardsAndNASOnlyHistoryThroughEveryPanel() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/CodexCreditMenuBar/main.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        // Status menu chart, dropdown and pinned panel all take the same
+        // four strips, including account2's.
+        XCTAssertEqual(source.components(separatedBy: "gemini2History: strips.gemini2").count - 1, 2)
+        XCTAssertTrue(source.contains("gemini2: strips.gemini2"))
+        // The old nested account2 ring and the local-fallback NAS history are gone.
+        XCTAssertFalse(source.contains("account2Snapshot"))
+        XCTAssertFalse(source.contains("nasHistorySeries()"))
+    }
+}
+
 final class GeminiUsageFetchOutcomeTests: XCTestCase {
     func testSkippedOutcomesCarryNoDiagnosticOrLabel() {
         for outcome: GeminiUsageFetchOutcome in [.skippedInFlight, .skippedThrottled] {
@@ -2322,5 +3344,542 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
         )
         XCTAssertFalse(recoveryDiagnostic.lowercased().contains("bearer"))
         XCTAssertFalse(recoveryDiagnostic.lowercased().contains("refresh_token"))
+    }
+}
+
+final class NASFutureTimestampTests: XCTestCase {
+    private let fixedNow = Date(timeIntervalSince1970: 1792051200)
+
+    // MARK: - Snapshot generated_at tests
+
+    func testSnapshotGeneratedAtNowPlus60Accepted() {
+        let envelope = NASSnapshotFixtures.envelope(
+            services: [
+                NASSnapshotFixtures.codex(),
+                NASSnapshotFixtures.claude(),
+                NASSnapshotFixtures.gemini(),
+                NASSnapshotFixtures.gemini2()
+            ]
+        ).replacingOccurrences(of: "\"generated_at\": 1792051200", with: "\"generated_at\": 1792051260")
+
+        let parsed = NASSnapshotV2Core.parse(NASSnapshotFixtures.data(envelope), now: fixedNow)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.generatedAt, Date(timeIntervalSince1970: 1792051260))
+    }
+
+    func testSnapshotGeneratedAtNowPlus61Rejected() {
+        let envelope = NASSnapshotFixtures.envelope(
+            services: [
+                NASSnapshotFixtures.codex(),
+                NASSnapshotFixtures.claude(),
+                NASSnapshotFixtures.gemini(),
+                NASSnapshotFixtures.gemini2()
+            ]
+        ).replacingOccurrences(of: "\"generated_at\": 1792051200", with: "\"generated_at\": 1792051261")
+
+        let parsed = NASSnapshotV2Core.parse(NASSnapshotFixtures.data(envelope), now: fixedNow)
+        XCTAssertNil(parsed)
+    }
+
+    // MARK: - Service fetched_at tests
+
+    func testServiceFetchedAtNowPlus60Accepted() {
+        let codexService = NASSnapshotFixtures.service(
+            "codex",
+            provider: "codex",
+            accountRef: nil,
+            ok: true,
+            fetchedAt: "1792051260",
+            items: NASSnapshotFixtures.codexItems
+        )
+        let envelope = NASSnapshotFixtures.envelope(
+            services: [
+                codexService,
+                NASSnapshotFixtures.claude(),
+                NASSnapshotFixtures.gemini(),
+                NASSnapshotFixtures.gemini2()
+            ]
+        )
+
+        let parsed = NASSnapshotV2Core.parse(NASSnapshotFixtures.data(envelope), now: fixedNow)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.codex.fetchedAt, Date(timeIntervalSince1970: 1792051260))
+        XCTAssertTrue(parsed?.codex.ok == true)
+    }
+
+    func testServiceFetchedAtNowPlus61SchemaInvalidIsolatedOthersGood() {
+        let badCodexService = NASSnapshotFixtures.service(
+            "codex",
+            provider: "codex",
+            accountRef: nil,
+            ok: true,
+            fetchedAt: "1792051261",
+            items: NASSnapshotFixtures.codexItems
+        )
+        let envelope = NASSnapshotFixtures.envelope(
+            services: [
+                badCodexService,
+                NASSnapshotFixtures.claude(),
+                NASSnapshotFixtures.gemini(),
+                NASSnapshotFixtures.gemini2()
+            ]
+        )
+
+        let parsed = NASSnapshotV2Core.parse(NASSnapshotFixtures.data(envelope), now: fixedNow)
+        XCTAssertNotNil(parsed)
+        // Codex card was isolated as schemaInvalid
+        XCTAssertEqual(parsed?.codex, NASServiceEntry.schemaInvalid(.codex))
+        // Other services remain good
+        XCTAssertTrue(parsed?.claude.ok == true)
+        XCTAssertTrue(parsed?.gemini.ok == true)
+        XCTAssertTrue(parsed?.gemini2.ok == true)
+    }
+
+    // MARK: - Future reset timestamp accepted
+
+    func testFutureResetTimestampStillAccepted() {
+        let farFutureResetItems = """
+        [
+            {"name": "codex", "window": "session", "window_minutes": 300, "remaining_percent": 90, "resets_at": 1892055000},
+            {"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": 1992400000}
+        ]
+        """
+        let codexService = NASSnapshotFixtures.service(
+            "codex",
+            provider: "codex",
+            accountRef: nil,
+            ok: true,
+            fetchedAt: "1792051200",
+            items: farFutureResetItems
+        )
+        let envelope = NASSnapshotFixtures.envelope(
+            services: [
+                codexService,
+                NASSnapshotFixtures.claude(),
+                NASSnapshotFixtures.gemini(),
+                NASSnapshotFixtures.gemini2()
+            ]
+        )
+
+        let parsed = NASSnapshotV2Core.parse(NASSnapshotFixtures.data(envelope), now: fixedNow)
+        XCTAssertNotNil(parsed)
+        XCTAssertTrue(parsed?.codex.ok == true)
+        XCTAssertEqual(parsed?.codex.items.first?.resetsAt, Date(timeIntervalSince1970: 1892055000))
+    }
+
+    // MARK: - History generatedAt and point.at tests
+
+    private func makeHistoryJSON(
+        generatedAtMillis: Double,
+        points: [[String: Any]]
+    ) -> [String: Any] {
+        var series: [String: Any] = [:]
+        for key in NASHistoryV2.seriesKeys {
+            let unit = key == "codexCredits" ? "credits" : "percent"
+            let mappedPoints = points.map { point -> [String: Any] in
+                var p = point
+                p["unit"] = unit
+                return p
+            }
+            series[key] = [
+                "identityGeneration": NSNull(),
+                "points": mappedPoints
+            ]
+        }
+        return [
+            "schemaVersion": 2,
+            "generatedAt": generatedAtMillis,
+            "source": "nas",
+            "series": series
+        ]
+    }
+
+    func testHistoryGeneratedAtNowPlus300Accepted() {
+        let obj = makeHistoryJSON(
+            generatedAtMillis: (fixedNow.timeIntervalSince1970 + 300) * 1000,
+            points: [
+                [
+                    "at": fixedNow.timeIntervalSince1970 * 1000,
+                    "consumed": 10.0,
+                    "unit": "percent",
+                    "segmentId": "seg-1"
+                ]
+            ]
+        )
+        let parsed = NASHistoryV2Core.parse(object: obj, now: fixedNow)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.generatedAt, Date(timeIntervalSince1970: fixedNow.timeIntervalSince1970 + 300))
+    }
+
+    func testHistoryGeneratedAtNowPlus301Rejected() {
+        let obj = makeHistoryJSON(
+            generatedAtMillis: (fixedNow.timeIntervalSince1970 + 301) * 1000,
+            points: [
+                [
+                    "at": fixedNow.timeIntervalSince1970 * 1000,
+                    "consumed": 10.0,
+                    "unit": "percent",
+                    "segmentId": "seg-1"
+                ]
+            ]
+        )
+        let parsed = NASHistoryV2Core.parse(object: obj, now: fixedNow)
+        XCTAssertNil(parsed)
+    }
+
+    func testHistoryPointAtNowPlus300Accepted() {
+        let obj = makeHistoryJSON(
+            generatedAtMillis: fixedNow.timeIntervalSince1970 * 1000,
+            points: [
+                [
+                    "at": (fixedNow.timeIntervalSince1970 + 300) * 1000,
+                    "consumed": 10.0,
+                    "unit": "percent",
+                    "segmentId": "seg-1"
+                ]
+            ]
+        )
+        let parsed = NASHistoryV2Core.parse(object: obj, now: fixedNow)
+        XCTAssertNotNil(parsed)
+    }
+
+    func testHistoryPointAtNowPlus301Rejected() {
+        let obj = makeHistoryJSON(
+            generatedAtMillis: fixedNow.timeIntervalSince1970 * 1000,
+            points: [
+                [
+                    "at": (fixedNow.timeIntervalSince1970 + 301) * 1000,
+                    "consumed": 10.0,
+                    "unit": "percent",
+                    "segmentId": "seg-1"
+                ]
+            ]
+        )
+        let parsed = NASHistoryV2Core.parse(object: obj, now: fixedNow)
+        XCTAssertNil(parsed)
+    }
+
+    func testHistoryDuplicatePointTimesRejected() {
+        let timestampMillis = fixedNow.timeIntervalSince1970 * 1000
+        let obj = makeHistoryJSON(
+            generatedAtMillis: timestampMillis,
+            points: [
+                [
+                    "at": timestampMillis,
+                    "consumed": 10.0,
+                    "unit": "percent",
+                    "segmentId": "seg-1"
+                ],
+                [
+                    "at": timestampMillis,
+                    "consumed": 20.0,
+                    "unit": "percent",
+                    "segmentId": "seg-2"
+                ]
+            ]
+        )
+        let parsed = NASHistoryV2Core.parse(object: obj, now: fixedNow)
+        XCTAssertNil(parsed)
+    }
+
+    func testHistoryNonAscendingPointTimesRejected() {
+        let timestampMillis = fixedNow.timeIntervalSince1970 * 1000
+        let obj = makeHistoryJSON(
+            generatedAtMillis: timestampMillis,
+            points: [
+                [
+                    "at": timestampMillis,
+                    "consumed": 10.0,
+                    "unit": "percent",
+                    "segmentId": "seg-1"
+                ],
+                [
+                    "at": timestampMillis - 1000,
+                    "consumed": 20.0,
+                    "unit": "percent",
+                    "segmentId": "seg-2"
+                ]
+            ]
+        )
+        let parsed = NASHistoryV2Core.parse(object: obj, now: fixedNow)
+        XCTAssertNil(parsed)
+    }
+}
+
+final class NASBackendPhaseTests: XCTestCase {
+    private let fixedNow = Date(timeIntervalSince1970: 1792051200)
+
+    func testBackendUppercaseRunningPhaseNormalizedAndCardAttributed() {
+        let runningHost = NASSnapshotFixtures.host(
+            id: "host-gemini2",
+            run: "\"run-101\"",
+            account: "\"account2\"",
+            phase: "\"RUNNING\"",
+            changedAt: "1792051100",
+            heartbeatAt: "1792051180",
+            returnState: "null"
+        )
+        let envelope = NASSnapshotFixtures.envelope(
+            services: [
+                NASSnapshotFixtures.codex(),
+                NASSnapshotFixtures.claude(),
+                NASSnapshotFixtures.gemini(),
+                NASSnapshotFixtures.gemini2()
+            ],
+            executionHosts: "[\(runningHost)]",
+            autoSwitch: "true"
+        )
+
+        let parsed = NASSnapshotV2Core.parse(NASSnapshotFixtures.data(envelope), now: fixedNow)
+        XCTAssertNotNil(parsed)
+        guard let snapshot = parsed else { return }
+
+        let hosts = snapshot.hostStatus.hosts(for: .gemini2)
+        XCTAssertEqual(hosts.count, 1)
+        XCTAssertEqual(hosts.first?.phase, "running")
+
+        var state = NASFourServiceState()
+        state.apply(snapshot)
+        let footer = NASHostStatusPresentation.footerLines(
+            for: .gemini2,
+            state: state,
+            source: .nas,
+            now: fixedNow
+        )
+        XCTAssertEqual(footer, ["호스트 host-gemini2", "실행 중 · 신호 방금", "자동 전환 켜짐"])
+    }
+
+    func testKnownUppercasePhasesNormalizedAndHumanReadableLabels() {
+        let cases: [(raw: String, expected: String, expectedLabel: String)] = [
+            ("RUNNING", "running", "실행 중"),
+            ("PREPARED", "prepared", "시작 중"),
+            ("READY", "ready", "준비 완료"),
+            ("FINISHING", "finishing", "마무리 중"),
+            ("COMMITTED", "committed", "완료"),
+            ("REJECTED", "rejected", "실패"),
+            ("ABORTED", "aborted", "실패")
+        ]
+
+        for (raw, expected, expectedLabel) in cases {
+            let hostJSON: [String: Any] = [
+                "host_id": "host-test",
+                "execution_account": "account1",
+                "phase": raw
+            ]
+            let host = NASExecutionHost.parse(hostJSON)
+            XCTAssertNotNil(host, "Phase \(raw) should be parsed")
+            XCTAssertEqual(host?.phase, expected)
+            XCTAssertEqual(NASHostStatusPresentation.phaseLabel(host?.phase), expectedLabel)
+        }
+    }
+
+    func testUnknownUppercasePhaseRejected() {
+        let hostJSON: [String: Any] = [
+            "host_id": "host-test",
+            "execution_account": "account1",
+            "phase": "UNKNOWN_PHASE"
+        ]
+        XCTAssertNil(NASExecutionHost.parse(hostJSON))
+    }
+
+    func testIdleNullExecutionAccountDoesNotEraseQuotaCard() {
+        let idleHost = """
+        {"host_id": "idle-host", "run_id": null, "execution_account": null, "phase": "IDLE"}
+        """
+        let envelope = NASSnapshotFixtures.envelope(
+            services: [
+                NASSnapshotFixtures.codex(),
+                NASSnapshotFixtures.claude(),
+                NASSnapshotFixtures.gemini(),
+                NASSnapshotFixtures.gemini2()
+            ],
+            executionHosts: "[\(idleHost)]"
+        )
+
+        let parsed = NASSnapshotV2Core.parse(NASSnapshotFixtures.data(envelope), now: fixedNow)
+        XCTAssertNotNil(parsed)
+        XCTAssertTrue(parsed?.gemini.ok == true)
+        XCTAssertTrue(parsed?.gemini2.ok == true)
+        XCTAssertEqual(parsed?.hostStatus.hosts.count, 0)
+    }
+}
+
+final class NASExecutionHostGuardTests: XCTestCase {
+    private typealias F = NASSnapshotFixtures
+    private let fixedNow = Date(timeIntervalSince1970: 1792051200)
+
+    func testDuplicateHostIDsRetainFirstValidOnly() throws {
+        let host1 = F.host(
+            id: "duplicate-host-id",
+            run: "\"run-1\"",
+            account: "\"account1\"",
+            phase: "\"running\"",
+            changedAt: "1792051000",
+            heartbeatAt: "1792051150"
+        )
+        let host2 = F.host(
+            id: "duplicate-host-id",
+            run: "\"run-2\"",
+            account: "\"account2\"",
+            phase: "\"running\"",
+            changedAt: "1792051050",
+            heartbeatAt: "1792051160"
+        )
+        let envelope = F.envelope(
+            services: [
+                F.codex(),
+                F.claude(),
+                F.gemini(),
+                F.gemini2()
+            ],
+            executionHosts: "[\(host1), \(host2)]"
+        )
+
+        let parsed = try XCTUnwrap(NASSnapshotV2Core.parse(F.data(envelope), now: fixedNow))
+        XCTAssertEqual(parsed.hostStatus.hosts.count, 1)
+        XCTAssertEqual(parsed.hostStatus.hosts(for: .gemini).count, 1)
+        XCTAssertEqual(parsed.hostStatus.hosts(for: .gemini2).count, 0)
+    }
+
+    func testIdleNullExecutionAccountConfirmedSurvivesParseCacheAndFooter() throws {
+        let idleHost = F.host(
+            id: "idle-worker-1",
+            run: "null",
+            account: "null",
+            phase: "\"idle\"",
+            changedAt: "1792051000",
+            heartbeatAt: "1792051150",
+            returnState: "\"confirmed\""
+        )
+        let envelope = F.envelope(
+            services: [
+                F.codex(),
+                F.claude(),
+                F.gemini(),
+                F.gemini2()
+            ],
+            executionHosts: "[\(idleHost)]",
+            autoSwitch: "true"
+        )
+
+        let parsed = try XCTUnwrap(NASSnapshotV2Core.parse(F.data(envelope), now: fixedNow))
+        XCTAssertEqual(parsed.hostStatus.hosts.count, 1)
+        let host = try XCTUnwrap(parsed.hostStatus.hosts.first)
+        XCTAssertEqual(host.phase, "idle")
+        XCTAssertNil(host.executionAccount)
+        XCTAssertEqual(host.returnState, "confirmed")
+        XCTAssertTrue(parsed.hostStatus.hosts(for: .gemini).isEmpty)
+        XCTAssertTrue(parsed.hostStatus.hosts(for: .gemini2).isEmpty)
+
+        var state = NASFourServiceState()
+        state.apply(parsed)
+        let restored = try XCTUnwrap(NASFourServiceState.decodeCache(try XCTUnwrap(state.encodedCache())))
+        XCTAssertEqual(restored.hostStatus?.hosts.count, 1)
+        XCTAssertEqual(restored.hostStatus?.hosts.first?.phase, "idle")
+        XCTAssertEqual(restored.hostStatus?.hosts.first?.returnState, "confirmed")
+
+        let footerGemini = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: fixedNow)
+        let footerGemini2 = NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas, now: fixedNow)
+        XCTAssertFalse(footerGemini.contains(where: { $0.contains("실행 중") }))
+        XCTAssertFalse(footerGemini2.contains(where: { $0.contains("실행 중") }))
+        XCTAssertTrue(footerGemini.contains(where: { $0.contains("대기") }))
+        XCTAssertTrue(footerGemini.contains(where: { $0.contains("복귀 확인됨") }))
+        XCTAssertTrue(footerGemini2.contains(where: { $0.contains("대기") }))
+        XCTAssertTrue(footerGemini2.contains(where: { $0.contains("복귀 확인됨") }))
+    }
+
+    func testRunningAccount2KeepsFixedSecondary() throws {
+        let runningHost = F.host(
+            id: "host-gemini2-secondary",
+            run: "\"run-202\"",
+            account: "\"account2\"",
+            phase: "\"RUNNING\"",
+            changedAt: "1792051100",
+            heartbeatAt: "1792051180",
+            returnState: "null"
+        )
+        let envelope = F.envelope(
+            services: [
+                F.codex(),
+                F.claude(),
+                F.gemini(),
+                F.gemini2()
+            ],
+            executionHosts: "[\(runningHost)]",
+            autoSwitch: "true"
+        )
+
+        let parsed = try XCTUnwrap(NASSnapshotV2Core.parse(F.data(envelope), now: fixedNow))
+        let gemini2Hosts = parsed.hostStatus.hosts(for: .gemini2)
+        XCTAssertEqual(gemini2Hosts.count, 1)
+        XCTAssertEqual(gemini2Hosts.first?.phase, "running")
+        XCTAssertTrue(parsed.hostStatus.hosts(for: .gemini).isEmpty)
+    }
+
+    func testRunningNullAccountDroppedQuotaAccepted() throws {
+        let runningNullAccount = F.host(
+            id: "running-null-account",
+            run: "\"run-303\"",
+            account: "null",
+            phase: "\"running\""
+        )
+        let envelope = F.envelope(
+            services: [
+                F.codex(),
+                F.claude(),
+                F.gemini(),
+                F.gemini2()
+            ],
+            executionHosts: "[\(runningNullAccount)]"
+        )
+
+        let parsed = try XCTUnwrap(NASSnapshotV2Core.parse(F.data(envelope), now: fixedNow))
+        XCTAssertTrue(parsed.gemini.ok)
+        XCTAssertTrue(parsed.gemini2.ok)
+        XCTAssertEqual(parsed.hostStatus.hosts.count, 0)
+    }
+
+    func testHostStatusTimestampValidationNumericSeconds() {
+        let now = Date().timeIntervalSince1970
+        let validHost: [String: Any] = [
+            "host_id": "ok",
+            "execution_account": "account1",
+            "phase": "RUNNING"
+        ]
+
+        for field in ["state_changed_at", "last_heartbeat_at"] {
+            var badHost = validHost
+            badHost["host_id"] = "bad_future"
+            badHost[field] = now + 120.0
+
+            var parsed = NASHostStatus.parse(executionHosts: [validHost, badHost], autoSwitchEnabled: true)
+            XCTAssertEqual(parsed.hosts.count, 1)
+            XCTAssertEqual(parsed.hosts.first?.hostID, "ok")
+
+            var nearFutureHost = validHost
+            nearFutureHost["host_id"] = "near_future"
+            nearFutureHost[field] = now + 30.0
+
+            parsed = NASHostStatus.parse(executionHosts: [validHost, nearFutureHost], autoSwitchEnabled: true)
+            XCTAssertEqual(parsed.hosts.count, 2)
+            let ids = Set(parsed.hosts.map { $0.hostID })
+            XCTAssertTrue(ids.contains("ok"))
+            XCTAssertTrue(ids.contains("near_future"))
+        }
+    }
+
+    func testHostStatusPendingReturnState() {
+        let host: [String: Any] = [
+            "host_id": "idle",
+            "execution_account": NSNull(),
+            "run_id": NSNull(),
+            "phase": "idle",
+            "return_state": "pending"
+        ]
+        let status = NASHostStatus.parse(executionHosts: [host], autoSwitchEnabled: false, autoSwitchAvailable: false)
+        XCTAssertNil(status.autoSwitchEnabled)
+        XCTAssertEqual(status.hosts.count, 1)
+        XCTAssertEqual(status.hosts.first?.returnState, "pending")
+        XCTAssertNil(status.hosts.first?.executionAccount)
     }
 }

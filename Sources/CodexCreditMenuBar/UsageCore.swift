@@ -16,6 +16,9 @@ struct RateLimitSnapshot {
     let sparkResetsAt: Date?
     let detailedCreditsReturned: Bool
     let updatedAt: Date
+    /// NAS `credits.unlimited`. Defaulted so the local app-server path,
+    /// which has no such flag, keeps constructing snapshots unchanged.
+    var creditsUnlimited: Bool = false
 }
 
 /// Provider-independent adaptive cadence. Each visible provider owns one
@@ -1004,6 +1007,1119 @@ enum GeminiUsageCore {
         formatter.formatOptions = [.withInternetDateTime]
         return formatter
     }()
+}
+
+/// Strict JSON scalar readers shared by the NAS parsers. `JSONSerialization`
+/// hands back JSON booleans as `NSNumber` too, so every numeric read here
+/// rejects booleans explicitly instead of letting `true` pass as `1`.
+enum NASJSON {
+    static func isBool(_ value: Any?) -> Bool {
+        guard let number = value as? NSNumber else { return false }
+        return CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID()
+    }
+
+    static func bool(_ value: Any?) -> Bool? {
+        guard isBool(value), let number = value as? NSNumber else { return nil }
+        return number.boolValue
+    }
+
+    /// Finite, non-boolean number.
+    static func number(_ value: Any?) -> Double? {
+        guard !isBool(value), let number = value as? NSNumber else { return nil }
+        let double = number.doubleValue
+        return double.isFinite ? double : nil
+    }
+
+    /// Non-boolean number with an exactly integral value (2.5 is rejected).
+    static func integer(_ value: Any?) -> Int? {
+        guard let double = number(value), double.rounded() == double, abs(double) < 9_007_199_254_740_992 else { return nil }
+        return Int(double)
+    }
+
+    /// Finite, strictly positive, non-boolean timestamp in whatever unit the
+    /// caller's contract names (Unix seconds for the snapshot, milliseconds
+    /// for history).
+    static func positiveTimestamp(_ value: Any?) -> Double? {
+        guard let double = number(value), double > 0 else { return nil }
+        return double
+    }
+
+    static func isNull(_ value: Any?) -> Bool {
+        guard let value else { return false }
+        return value is NSNull
+    }
+
+    /// Key missing or explicit JSON null.
+    static func isAbsent(_ value: Any?) -> Bool {
+        value == nil || isNull(value)
+    }
+}
+
+/// The four fixed card identities, in their fixed display order. Gemini's
+/// two accounts are bound to fixed `account_ref`s, never to whichever
+/// account currently happens to be active, so their numbers never swap.
+enum NASServiceID: String, CaseIterable {
+    case codex, claude, gemini, gemini2
+
+    var provider: String {
+        switch self {
+        case .codex: return "codex"
+        case .claude: return "claude"
+        case .gemini, .gemini2: return "gemini"
+        }
+    }
+
+    var accountRef: String? {
+        switch self {
+        case .codex, .claude: return nil
+        case .gemini: return "account1"
+        case .gemini2: return "account2"
+        }
+    }
+}
+
+/// A service-level `{code, message}` error. Only these two structured fields
+/// are read — the error object is never stringified as a whole — and the
+/// panel shows a fixed local label per known code rather than any free text.
+struct NASServiceError: Equatable {
+    let code: String
+    let message: String?
+
+    static let localSchemaCode = "schema_changed"
+
+    static func parse(_ value: Any?) -> NASServiceError? {
+        guard let object = value as? [String: Any] else { return nil }
+        guard let code = object["code"] as? String, isSafeCode(code) else { return nil }
+        let message: String?
+        if NASJSON.isAbsent(object["message"]) {
+            message = nil
+        } else if let text = object["message"] as? String, text.count <= 200 {
+            message = text
+        } else {
+            return nil
+        }
+        return NASServiceError(code: code, message: message)
+    }
+
+    static func isSafeCode(_ code: String) -> Bool {
+        !code.isEmpty && code.count <= 64 && code.unicodeScalars.allSatisfy {
+            ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "_"
+        }
+    }
+
+    var label: String {
+        switch code {
+        case "not_collected": return "NAS 미수집"
+        case "cli_missing": return "NAS 수집 도구 없음"
+        case "cli_failed": return "NAS 수집 도구 실패"
+        case "timeout": return "NAS 수집 시간 초과"
+        case "bad_response", "schema": return "NAS 응답 형식 오류"
+        case "schema_changed": return "NAS 형식 변경으로 확인 불가"
+        case "creds_missing", "creds_unsafe": return "NAS 자격 증명 확인 불가"
+        case "login_required", "reauth_required": return "NAS 쪽 다시 로그인 필요"
+        case "refresh_failed": return "NAS 갱신 실패"
+        case "forbidden": return "NAS 접근 거부"
+        case "rate_limited": return "NAS 요청 제한"
+        case "redirect_blocked", "tls_error", "network_error", "http_error": return "NAS 수집 네트워크 오류"
+        case "storage_unavailable": return "NAS 저장소 확인 불가"
+        case "internal", "adapter_unavailable": return "NAS 내부 오류"
+        default: return "NAS 오류(\(code))"
+        }
+    }
+}
+
+/// One sanitized `items[]` entry. Remaining capacity is kept as a 0...100
+/// percent: the newer `remaining_fraction` (0...1) is preferred, the legacy
+/// `remaining_percent` (0...100) is accepted, and anything else invalidates
+/// the item rather than being guessed.
+struct NASUsageItem: Equatable {
+    enum Window: String {
+        case session, weekly
+
+        var minutes: Int { self == .session ? 300 : 10080 }
+    }
+
+    let name: String
+    let window: Window
+    let remainingPercent: Double
+    let resetsAt: Date?
+    /// Codex-only `credits` object; `hasCredits` records that the object
+    /// was present at all (so "no balance" differs from "not reported").
+    let hasCredits: Bool
+    let creditBalance: Double?
+    let creditsUnlimited: Bool
+
+    var remainingFraction: Double { remainingPercent / 100 }
+
+    static func parse(_ value: Any?, allowsCredits: Bool) -> NASUsageItem? {
+        guard let object = value as? [String: Any] else { return nil }
+        guard let name = object["name"] as? String, !name.isEmpty, name.count <= 64 else { return nil }
+        guard let rawWindow = object["window"] as? String, let window = Window(rawValue: rawWindow) else { return nil }
+        if let minutes = object["window_minutes"], !(minutes is NSNull) {
+            guard NASJSON.integer(minutes) == window.minutes else { return nil }
+        }
+
+        let remainingPercent: Double
+        if let rawFraction = object["remaining_fraction"], !(rawFraction is NSNull) {
+            guard let fraction = NASJSON.number(rawFraction), (0...1).contains(fraction) else { return nil }
+            remainingPercent = fraction * 100
+        } else if let percent = NASJSON.number(object["remaining_percent"]), (0...100).contains(percent) {
+            remainingPercent = percent
+        } else {
+            return nil
+        }
+
+        var resetsAt: Date?
+        if !NASJSON.isAbsent(object["resets_at"]) {
+            guard let seconds = NASJSON.positiveTimestamp(object["resets_at"]) else { return nil }
+            resetsAt = Date(timeIntervalSince1970: seconds)
+        }
+
+        var hasCredits = false
+        var creditBalance: Double?
+        var creditsUnlimited = false
+        if !NASJSON.isAbsent(object["credits"]) {
+            guard allowsCredits, let credits = object["credits"] as? [String: Any] else { return nil }
+            hasCredits = true
+            if !NASJSON.isAbsent(credits["balance"]) {
+                guard let balance = NASJSON.number(credits["balance"]), balance >= 0 else { return nil }
+                creditBalance = balance
+            }
+            if !NASJSON.isAbsent(credits["unlimited"]) {
+                guard let unlimited = NASJSON.bool(credits["unlimited"]) else { return nil }
+                creditsUnlimited = unlimited
+            }
+        }
+
+        return NASUsageItem(
+            name: name,
+            window: window,
+            remainingPercent: remainingPercent,
+            resetsAt: resetsAt,
+            hasCredits: hasCredits,
+            creditBalance: creditBalance,
+            creditsUnlimited: creditsUnlimited
+        )
+    }
+
+    func jsonObject() -> [String: Any] {
+        var object: [String: Any] = [
+            "name": name,
+            "window": window.rawValue,
+            "window_minutes": window.minutes,
+            "remaining_percent": remainingPercent,
+            "resets_at": resetsAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+        ]
+        if hasCredits {
+            object["credits"] = [
+                "balance": creditBalance.map { $0 as Any } ?? NSNull(),
+                "unlimited": creditsUnlimited,
+            ]
+        }
+        return object
+    }
+}
+
+/// One entry of the NAS v2 snapshot's fixed four-service envelope. `ok`,
+/// `stale`, and `error` are carried through as-is — this layer never
+/// invents a successful read out of a failed one, and never zeroes out a
+/// missing value; `NASFourServiceState` keeps the last known good entry
+/// across failures.
+struct NASServiceEntry: Equatable {
+    static let maximumItems = 8
+
+    let id: NASServiceID
+    let ok: Bool
+    let fetchedAt: Date?
+    let stale: Bool
+    let items: [NASUsageItem]
+    let error: NASServiceError?
+
+    var service: String { id.rawValue }
+    var provider: String { id.provider }
+    var accountRef: String? { id.accountRef }
+
+    /// A service whose identity fields were valid but whose content broke
+    /// the contract: reported as its own schema error without touching the
+    /// other three services.
+    static func schemaInvalid(_ id: NASServiceID) -> NASServiceEntry {
+        NASServiceEntry(
+            id: id,
+            ok: false,
+            fetchedAt: nil,
+            stale: true,
+            items: [],
+            error: NASServiceError(code: NASServiceError.localSchemaCode, message: nil)
+        )
+    }
+
+    enum ParseOutcome: Equatable {
+        case entry(NASServiceEntry)
+        /// `service`/`provider`/`account_ref` did not match the fixed
+        /// identity: the whole envelope is untrustworthy.
+        case identityMismatch
+    }
+
+    static func parse(_ value: Any?, expected id: NASServiceID, now: Date = Date()) -> ParseOutcome {
+        guard let object = value as? [String: Any] else { return .identityMismatch }
+        guard object["service"] as? String == id.rawValue else { return .identityMismatch }
+        guard object["provider"] as? String == id.provider else { return .identityMismatch }
+        if let accountRef = id.accountRef {
+            guard object["account_ref"] as? String == accountRef else { return .identityMismatch }
+        } else {
+            guard object["account_ref"] == nil || NASJSON.isNull(object["account_ref"]) else { return .identityMismatch }
+        }
+
+        guard let ok = NASJSON.bool(object["ok"]), let stale = NASJSON.bool(object["stale"]) else {
+            return .entry(schemaInvalid(id))
+        }
+        var fetchedAt: Date?
+        if !NASJSON.isAbsent(object["fetched_at"]) {
+            guard let seconds = NASJSON.positiveTimestamp(object["fetched_at"]) else { return .entry(schemaInvalid(id)) }
+            if seconds > now.timeIntervalSince1970 + 60 {
+                return .entry(schemaInvalid(id))
+            }
+            fetchedAt = Date(timeIntervalSince1970: seconds)
+        }
+        guard let rawItems = object["items"] as? [Any], rawItems.count <= maximumItems else {
+            return .entry(schemaInvalid(id))
+        }
+        var items: [NASUsageItem] = []
+        for rawItem in rawItems {
+            guard let item = NASUsageItem.parse(rawItem, allowsCredits: id == .codex) else {
+                return .entry(schemaInvalid(id))
+            }
+            items.append(item)
+        }
+        var error: NASServiceError?
+        if !NASJSON.isAbsent(object["error"]) {
+            guard let parsed = NASServiceError.parse(object["error"]) else { return .entry(schemaInvalid(id)) }
+            error = parsed
+        }
+        // ok=true must carry values and no error; ok=false must say why.
+        if ok, items.isEmpty || error != nil { return .entry(schemaInvalid(id)) }
+        if !ok, error == nil { return .entry(schemaInvalid(id)) }
+
+        return .entry(NASServiceEntry(id: id, ok: ok, fetchedAt: fetchedAt, stale: stale, items: items, error: error))
+    }
+
+    func jsonObject() -> [String: Any] {
+        [
+            "service": service,
+            "provider": provider,
+            "account_ref": accountRef.map { $0 as Any } ?? NSNull(),
+            "ok": ok,
+            "fetched_at": fetchedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+            "stale": stale,
+            "items": items.map { $0.jsonObject() },
+            "error": error.map { error -> Any in
+                ["code": error.code, "message": error.message.map { $0 as Any } ?? NSNull()]
+            } ?? NSNull(),
+        ]
+    }
+}
+
+/// Which NAS collection pass produced the current entries, surfaced in the
+/// UI as a busy/idle indicator — never used to decide whether to retry
+/// locally.
+struct NASCollectionState: Equatable {
+    let state: String?
+    let jobID: String?
+    let retryAt: Date?
+}
+
+/// One sanitized `execution_hosts[]` object: which NAS-relayed execution
+/// host is running which fixed Gemini account, and whether it has confirmed
+/// returning. Only the whitelisted keys are read; anything else in the
+/// object (bindings, gates, emails, worker paths) is never touched.
+struct NASExecutionHost: Equatable {
+    static let maximumHosts = 8
+
+    let hostID: String
+    let runID: String?
+    /// The fixed Gemini card this host is attributed to (`account1` →
+    /// `.gemini`, `account2` → `.gemini2`); never inferred.
+    /// `nil` only for a non-running host that holds no account (e.g. idle).
+    let executionAccount: NASServiceID?
+    let phase: String?
+    let stateChangedAt: Date?
+    let lastHeartbeatAt: Date?
+    let returnState: String?
+
+    /// Host/run identifiers: letters, digits and `-_.:`, at most 64
+    /// characters, so no email (`@`), path (`/`) or whitespace can pass.
+    static func isSafeIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 64 && value.unicodeScalars.allSatisfy {
+            ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0)
+                || $0 == "-" || $0 == "_" || $0 == "." || $0 == ":"
+        }
+    }
+
+    /// `phase`/`return_state`: lowercase snake-case tokens, at most 32.
+    static func isSafeToken(_ value: String) -> Bool {
+        value.count <= 32 && NASServiceError.isSafeCode(value)
+    }
+
+    /// Canonical backend `return_state` values; anything else drops the host.
+    static func isCanonicalReturnState(_ value: String) -> Bool {
+        value == "pending" || value == "confirmed" || value == "not_required" || value == "failed"
+    }
+
+    /// Only these phases mean an account is actively executing.
+    static func isRunningPhase(_ phase: String?) -> Bool {
+        phase == "running" || phase == "active"
+    }
+
+    /// Whitelisted uppercase backend phase tokens normalized to lowercase.
+    private static let knownUppercasePhases: [String: String] = [
+        "RUNNING": "running",
+        "PREPARED": "prepared",
+        "READY": "ready",
+        "FINISHING": "finishing",
+        "COMMITTED": "committed",
+        "REJECTED": "rejected",
+        "ABORTED": "aborted",
+    ]
+
+    static func normalizePhase(_ value: String) -> String? {
+        if let lower = knownUppercasePhases[value] {
+            return lower
+        }
+        if isSafeToken(value) {
+            return value
+        }
+        return nil
+    }
+
+    /// Any malformed whitelisted field drops the whole host (`nil`); the
+    /// host is never partially trusted and never stringified.
+    static func parse(_ value: Any?) -> NASExecutionHost? {
+        guard let object = value as? [String: Any] else { return nil }
+        guard let hostID = object["host_id"] as? String, isSafeIdentifier(hostID) else { return nil }
+        let executionAccount: NASServiceID?
+        if NASJSON.isAbsent(object["execution_account"]) {
+            executionAccount = nil
+        } else {
+            switch object["execution_account"] as? String {
+            case "account1"?: executionAccount = .gemini
+            case "account2"?: executionAccount = .gemini2
+            default: return nil
+            }
+        }
+
+        func optionalString(_ key: String, _ isSafe: (String) -> Bool) -> String?? {
+            if NASJSON.isAbsent(object[key]) { return .some(nil) }
+            guard let text = object[key] as? String, isSafe(text) else { return nil }
+            return .some(text)
+        }
+        func optionalPhase(_ key: String) -> String?? {
+            if NASJSON.isAbsent(object[key]) { return .some(nil) }
+            guard let text = object[key] as? String, let normalized = normalizePhase(text) else { return nil }
+            return .some(normalized)
+        }
+        func optionalTimestamp(_ key: String) -> Date?? {
+            if NASJSON.isAbsent(object[key]) { return .some(nil) }
+            // Host metadata only: a timestamp more than 60 s in the future
+            // drops this host record (quota resets are unaffected).
+            guard let seconds = NASJSON.positiveTimestamp(object[key]),
+                  seconds <= Date().timeIntervalSince1970 + 60
+            else { return nil }
+            return .some(Date(timeIntervalSince1970: seconds))
+        }
+        guard let runID = optionalString("run_id", isSafeIdentifier),
+              let phase = optionalPhase("phase"),
+              let returnState = optionalString("return_state", isCanonicalReturnState),
+              let stateChangedAt = optionalTimestamp("state_changed_at"),
+              let lastHeartbeatAt = optionalTimestamp("last_heartbeat_at")
+        else { return nil }
+        // A running/active host must name a valid account.
+        if executionAccount == nil && isRunningPhase(phase) { return nil }
+
+        return NASExecutionHost(
+            hostID: hostID,
+            runID: runID,
+            executionAccount: executionAccount,
+            phase: phase,
+            stateChangedAt: stateChangedAt,
+            lastHeartbeatAt: lastHeartbeatAt,
+            returnState: returnState
+        )
+    }
+
+    func jsonObject() -> [String: Any] {
+        [
+            "host_id": hostID,
+            "run_id": runID.map { $0 as Any } ?? NSNull(),
+            "execution_account": (executionAccount?.accountRef).map { $0 as Any } ?? NSNull(),
+            "phase": phase.map { $0 as Any } ?? NSNull(),
+            "state_changed_at": stateChangedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+            "last_heartbeat_at": lastHeartbeatAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+            "return_state": returnState.map { $0 as Any } ?? NSNull(),
+        ]
+    }
+}
+
+/// Read-only execution-host metadata from the snapshot root. Entirely
+/// optional: a missing, malformed or partly malformed value only drops the
+/// affected hosts — it never rejects the envelope or touches the four
+/// services' own `fetched_at`/`stale`/`error`.
+struct NASHostStatus: Equatable {
+    let hosts: [NASExecutionHost]
+    /// Server's `auto_switch_enabled`; `nil` when absent or not a boolean
+    /// (legacy NAS), so the UI never claims automatic switching is on.
+    let autoSwitchEnabled: Bool?
+
+    static func parse(
+        executionHosts rawHosts: Any?,
+        autoSwitchEnabled rawAutoSwitch: Any?,
+        autoSwitchAvailable rawAvailable: Any? = nil
+    ) -> NASHostStatus {
+        var hosts: [NASExecutionHost] = []
+        var seenHostIDs = Set<String>()
+        if let array = rawHosts as? [Any] {
+            // The 256 KiB document cap already bounds the array; at most
+            // `maximumHosts` valid hosts are kept.
+            for raw in array where hosts.count < NASExecutionHost.maximumHosts {
+                // Invalid records drop alone; only the first valid record
+                // per host ID is kept, so duplicates never repeat UI lines.
+                guard let host = NASExecutionHost.parse(raw),
+                      seenHostIDs.insert(host.hostID).inserted
+                else { continue }
+                hosts.append(host)
+            }
+        }
+        // `auto_switch_available: false` means the state is unknown, even
+        // when `auto_switch_enabled` is false; only a known false is "off".
+        let autoSwitchEnabled: Bool? = NASJSON.bool(rawAvailable) == false ? nil : NASJSON.bool(rawAutoSwitch)
+        return NASHostStatus(hosts: hosts, autoSwitchEnabled: autoSwitchEnabled)
+    }
+
+    func hosts(for id: NASServiceID) -> [NASExecutionHost] {
+        hosts.filter { $0.executionAccount == id }
+    }
+
+    /// Hosts holding no account (idle); shown on both Gemini cards.
+    var commonHosts: [NASExecutionHost] {
+        hosts.filter { $0.executionAccount == nil }
+    }
+
+    func jsonObject() -> [String: Any] {
+        [
+            "execution_hosts": hosts.map { $0.jsonObject() },
+            "auto_switch_enabled": autoSwitchEnabled.map { $0 as Any } ?? NSNull(),
+        ]
+    }
+}
+
+struct NASSnapshotV2: Equatable {
+    let generatedAt: Date?
+    let collection: NASCollectionState?
+    /// Entries in the fixed `codex, claude, gemini, gemini2` order.
+    let entries: [NASServiceEntry]
+    var hostStatus = NASHostStatus(hosts: [], autoSwitchEnabled: nil)
+
+    func entry(_ id: NASServiceID) -> NASServiceEntry {
+        entries.first { $0.id == id } ?? NASServiceEntry.schemaInvalid(id)
+    }
+
+    var codex: NASServiceEntry { entry(.codex) }
+    var claude: NASServiceEntry { entry(.claude) }
+    var gemini: NASServiceEntry { entry(.gemini) }
+    var gemini2: NASServiceEntry { entry(.gemini2) }
+}
+
+/// Strict reader/validator for the NAS's four-service v2 envelope
+/// (`schema_version` exactly the integer 2, `quota_origin == "nas"`, and
+/// `services` exactly `codex, claude, gemini, gemini2` in that order, each
+/// with its fixed `provider`/`account_ref`). Root-level deviations — an
+/// unknown schema, a missing/extra/duplicate/reordered service, or a wrong
+/// identity pairing — reject the whole envelope with `nil`. A single
+/// service whose *content* breaks the contract becomes that service's own
+/// `schema_changed` error so the other three keep their values. This parser
+/// never falls back to the legacy shape or to a local collector.
+enum NASSnapshotV2Core {
+    static func parse(_ data: Data, now: Date = Date()) -> NASSnapshotV2? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard NASJSON.integer(object["schema_version"]) == 2 else { return nil }
+        guard (object["quota_origin"] as? String) == "nas" else { return nil }
+        guard let rawServices = object["services"] as? [Any], rawServices.count == NASServiceID.allCases.count else { return nil }
+
+        var entries: [NASServiceEntry] = []
+        for (raw, id) in zip(rawServices, NASServiceID.allCases) {
+            switch NASServiceEntry.parse(raw, expected: id, now: now) {
+            case .identityMismatch: return nil
+            case .entry(let entry): entries.append(entry)
+            }
+        }
+
+        var generatedAt: Date?
+        if !NASJSON.isAbsent(object["generated_at"]) {
+            guard let seconds = NASJSON.positiveTimestamp(object["generated_at"]) else { return nil }
+            if seconds > now.timeIntervalSince1970 + 60 {
+                return nil
+            }
+            generatedAt = Date(timeIntervalSince1970: seconds)
+        }
+        let hostStatus = NASHostStatus.parse(
+            executionHosts: object["execution_hosts"],
+            autoSwitchEnabled: object["auto_switch_enabled"],
+            autoSwitchAvailable: object["auto_switch_available"]
+        )
+        let collection: NASCollectionState? = (object["collection"] as? [String: Any]).map { raw in
+            NASCollectionState(
+                state: raw["state"] as? String,
+                jobID: raw["job_id"] as? String,
+                retryAt: NASJSON.positiveTimestamp(raw["retry_at"]).map { Date(timeIntervalSince1970: $0) }
+            )
+        }
+        return NASSnapshotV2(generatedAt: generatedAt, collection: collection, entries: entries, hostStatus: hostStatus)
+    }
+}
+
+/// Converts one NAS service entry's sanitized `items` into the
+/// provider-specific snapshot types the panel already renders. Every item
+/// is selected by its exact name and window; a missing or duplicated
+/// selection is "unknown", never the first match or a borrowed value.
+enum NASItemMappingCore {
+    private static func unique(_ items: [NASUsageItem], window: NASUsageItem.Window, matching: (String) -> Bool) -> NASUsageItem? {
+        let matches = items.filter { $0.window == window && matching($0.name) }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    /// Only the "Gemini Models" quota group. The separate "Claude and GPT
+    /// models" pool is never read into a Gemini card.
+    static func isGeminiModelsItem(_ name: String) -> Bool {
+        name.hasPrefix("Gemini Models")
+    }
+
+    static func geminiSnapshot(from entry: NASServiceEntry) -> GeminiUsageSnapshot? {
+        guard entry.ok, entry.id == .gemini || entry.id == .gemini2, let fetchedAt = entry.fetchedAt else { return nil }
+        let session = unique(entry.items, window: .session, matching: isGeminiModelsItem)
+        let weekly = unique(entry.items, window: .weekly, matching: isGeminiModelsItem)
+        guard session != nil || weekly != nil else { return nil }
+        return GeminiUsageSnapshot(
+            weeklyRemainingFraction: weekly?.remainingFraction,
+            weeklyResetsAt: weekly?.resetsAt,
+            fiveHourRemainingFraction: session?.remainingFraction,
+            fiveHourResetsAt: session?.resetsAt,
+            publishedAt: fetchedAt
+        )
+    }
+
+    /// Codex's item named `codex` with the weekly window is the existing
+    /// primary (weekly) quota — `usedPercent`, a 10080-minute window, and its
+    /// reset — and its `credits` object fills the existing credit fields.
+    /// Codex has no NAS-side account identity, so `accountID` stays nil
+    /// rather than borrowing the local Mac's.
+    static func codexSnapshot(from entry: NASServiceEntry) -> RateLimitSnapshot? {
+        guard entry.ok, entry.id == .codex, let fetchedAt = entry.fetchedAt else { return nil }
+        guard let weekly = unique(entry.items, window: .weekly, matching: { $0 == "codex" }) else { return nil }
+        return RateLimitSnapshot(
+            accountID: nil,
+            planType: nil,
+            usedPercent: 100 - weekly.remainingPercent,
+            windowDurationMinutes: NASUsageItem.Window.weekly.minutes,
+            resetsAt: weekly.resetsAt,
+            resetCredits: nil,
+            creditBalance: weekly.creditBalance,
+            sparkUsedPercent: nil,
+            sparkWindowDurationMinutes: nil,
+            sparkResetsAt: nil,
+            detailedCreditsReturned: weekly.hasCredits,
+            updatedAt: fetchedAt,
+            creditsUnlimited: weekly.creditsUnlimited
+        )
+    }
+
+    /// Claude's overall meters are the items named `전체`; Fable (any case)
+    /// and any other named weekly model limit go to `modelWeeklyLimits`.
+    static func claudeSnapshot(from entry: NASServiceEntry) -> ClaudeUsageSnapshot? {
+        guard entry.ok, entry.id == .claude, let fetchedAt = entry.fetchedAt else { return nil }
+        let overallName = "전체"
+        let session = unique(entry.items, window: .session, matching: { $0 == overallName })
+        let weekly = unique(entry.items, window: .weekly, matching: { $0 == overallName })
+
+        var modelLimits: [ClaudeModelWeeklyLimit] = []
+        let modelNames = entry.items
+            .filter { $0.window == .weekly && $0.name != overallName }
+            .map(\.name)
+        var seen = Set<String>()
+        for name in modelNames where seen.insert(name.lowercased()).inserted {
+            guard let item = unique(entry.items, window: .weekly, matching: { $0.lowercased() == name.lowercased() }) else { continue }
+            let displayName = name.lowercased() == "fable" ? "Fable" : name
+            modelLimits.append(ClaudeModelWeeklyLimit(
+                modelName: displayName,
+                usedPercent: 100 - item.remainingPercent,
+                resetsAt: item.resetsAt
+            ))
+        }
+
+        guard session != nil || weekly != nil || !modelLimits.isEmpty else { return nil }
+        return ClaudeUsageSnapshot(
+            quotaSource: "nas",
+            weeklyUsedPercent: weekly.map { 100 - $0.remainingPercent },
+            weeklyResetsAt: weekly?.resetsAt,
+            fiveHourUsedPercent: session.map { 100 - $0.remainingPercent },
+            fiveHourResetsAt: session?.resetsAt,
+            publishedAt: fetchedAt,
+            modelWeeklyLimits: modelLimits
+        )
+    }
+
+    static func isUsable(_ entry: NASServiceEntry) -> Bool {
+        switch entry.id {
+        case .codex: return codexSnapshot(from: entry) != nil
+        case .claude: return claudeSnapshot(from: entry) != nil
+        case .gemini, .gemini2: return geminiSnapshot(from: entry) != nil
+        }
+    }
+}
+
+/// Per-card NAS state: the last entry that actually mapped to values, plus
+/// why the most recent read (if any) did not replace it.
+struct NASServiceSlot: Equatable {
+    var lastGood: NASServiceEntry?
+    /// True when the values on screen are not the latest successful read:
+    /// the NAS marked them stale, a later read failed, or they were
+    /// restored from disk at launch.
+    var isStale: Bool = true
+    /// Fixed label for the latest failure (service error, schema problem, or
+    /// transport failure). `nil` once a fresh usable entry arrives.
+    var issue: String?
+}
+
+/// The NAS side of the four cards, kept entirely separate from the local
+/// Mac collectors' state. A failure — of one service, of the whole
+/// envelope, or of the SSH transport — only records an issue label; it
+/// never erases a card's last known values and never borrows another
+/// card's, so Gemini account1/account2 can never swap or blank each other.
+struct NASFourServiceState: Equatable {
+    static let cacheVersion = 1
+
+    private(set) var slots: [NASServiceID: NASServiceSlot] = Dictionary(
+        uniqueKeysWithValues: NASServiceID.allCases.map { ($0, NASServiceSlot()) }
+    )
+
+    /// Last execution-host metadata the NAS sent; `nil` until the first
+    /// NAS read (or cache restore). Replaced wholesale on every readable
+    /// envelope, independent of the per-service slots.
+    private(set) var hostStatus: NASHostStatus?
+    /// True when `hostStatus` came from the cache or a later read failed.
+    private(set) var hostStatusIsStale = true
+
+    func slot(_ id: NASServiceID) -> NASServiceSlot {
+        slots[id] ?? NASServiceSlot()
+    }
+
+    mutating func apply(_ snapshot: NASSnapshotV2) {
+        hostStatus = snapshot.hostStatus
+        hostStatusIsStale = false
+        for id in NASServiceID.allCases {
+            let entry = snapshot.entry(id)
+            var slot = self.slot(id)
+            if NASItemMappingCore.isUsable(entry) {
+                slot.lastGood = entry
+                slot.isStale = entry.stale
+                slot.issue = nil
+            } else {
+                slot.isStale = true
+                slot.issue = entry.error?.label ?? "NAS 값 형식 확인 필요"
+            }
+            slots[id] = slot
+        }
+    }
+
+    /// Transport failure or an unreadable envelope: every card keeps its
+    /// values and shows the same failure label.
+    mutating func applyFailure(label: String) {
+        hostStatusIsStale = true
+        for id in NASServiceID.allCases {
+            var slot = self.slot(id)
+            slot.isStale = true
+            slot.issue = label
+            slots[id] = slot
+        }
+    }
+
+    var codexSnapshot: RateLimitSnapshot? { slot(.codex).lastGood.flatMap(NASItemMappingCore.codexSnapshot(from:)) }
+    var claudeSnapshot: ClaudeUsageSnapshot? { slot(.claude).lastGood.flatMap(NASItemMappingCore.claudeSnapshot(from:)) }
+    var geminiSnapshot: GeminiUsageSnapshot? { slot(.gemini).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
+    var gemini2Snapshot: GeminiUsageSnapshot? { slot(.gemini2).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
+
+    /// Persists only the last good entries, in the same sanitized shape the
+    /// NAS sent, under their fixed service IDs.
+    func encodedCache() -> Data? {
+        var services: [String: Any] = [:]
+        for id in NASServiceID.allCases {
+            if let entry = slot(id).lastGood { services[id.rawValue] = entry.jsonObject() }
+        }
+        var root: [String: Any] = ["version": Self.cacheVersion, "source": "nas", "services": services]
+        if let hostStatus { root["host_status"] = hostStatus.jsonObject() }
+        return try? JSONSerialization.data(withJSONObject: root)
+    }
+
+    /// Restores cached entries through the same strict per-service parser.
+    /// Restored values are always shown as stale until a new NAS read lands.
+    static func decodeCache(_ data: Data) -> NASFourServiceState? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              NASJSON.integer(root["version"]) == cacheVersion,
+              root["source"] as? String == "nas",
+              let services = root["services"] as? [String: Any]
+        else { return nil }
+        var state = NASFourServiceState()
+        for id in NASServiceID.allCases {
+            guard let raw = services[id.rawValue],
+                  case .entry(let entry) = NASServiceEntry.parse(raw, expected: id),
+                  NASItemMappingCore.isUsable(entry)
+            else { continue }
+            state.slots[id] = NASServiceSlot(lastGood: entry, isStale: true, issue: nil)
+        }
+        // Optional, additive key: caches written before it existed simply
+        // restore without host status.
+        if let rawHostStatus = root["host_status"] as? [String: Any] {
+            state.hostStatus = NASHostStatus.parse(
+                executionHosts: rawHostStatus["execution_hosts"],
+                autoSwitchEnabled: rawHostStatus["auto_switch_enabled"]
+            )
+        }
+        return state
+    }
+}
+
+/// Footer lines for a fixed Gemini card describing the NAS execution host
+/// running that card's account and its return confirmation. Read-only
+/// status: nothing here triggers or offers an account switch. Only the
+/// sanitized known fields are rendered, and an explicit local-Mac source
+/// shows no NAS host state at all.
+enum NASHostStatusPresentation {
+    static let maximumHostLines = 2
+
+    static func footerLines(
+        for id: NASServiceID,
+        state: NASFourServiceState,
+        source: DataCollectionSource,
+        now: Date
+    ) -> [String] {
+        guard source == .nas, id == .gemini || id == .gemini2, let status = state.hostStatus else { return [] }
+        var lines: [String] = []
+        let hosts = status.hosts(for: id)
+        let displayHosts = hosts + status.commonHosts
+        if hosts.isEmpty {
+            let otherID: NASServiceID = id == .gemini ? .gemini2 : .gemini
+            let otherHosts = status.hosts(for: otherID)
+            let otherName = otherID == .gemini ? "본계정" : "부계정"
+            // Only a running/active phase means the other account is executing.
+            if otherHosts.contains(where: { NASExecutionHost.isRunningPhase($0.phase) }) {
+                lines.append("실행 중: \(otherName)")
+            } else if !otherHosts.isEmpty {
+                lines.append("최근 사용: \(otherName)")
+            } else if displayHosts.isEmpty {
+                lines.append("실행 호스트 없음")
+            }
+        }
+        // Short lines: the card footer is a narrow fixed-width column.
+        for host in displayHosts.prefix(maximumHostLines) {
+            lines.append(host.executionAccount == nil
+                ? "공용 호스트 \(displayIdentifier(host.hostID))"
+                : "호스트 \(displayIdentifier(host.hostID))")
+            var parts = [phaseLabel(host.phase)]
+            if let heartbeat = host.lastHeartbeatAt {
+                parts.append("신호 \(ageLabel(from: heartbeat, now: now))")
+            } else if let changedAt = host.stateChangedAt {
+                parts.append("변경 \(ageLabel(from: changedAt, now: now))")
+            }
+            lines.append(parts.joined(separator: " · "))
+            if let returnState = host.returnState {
+                lines.append(returnLabel(returnState))
+            }
+        }
+        if displayHosts.count > maximumHostLines {
+            lines.append("외 \(displayHosts.count - maximumHostLines)개 호스트")
+        }
+        lines.append(autoSwitchLabel(status.autoSwitchEnabled))
+        if state.hostStatusIsStale {
+            lines.append("호스트 상태 오래됨")
+        }
+        return lines
+    }
+
+    static func displayIdentifier(_ identifier: String) -> String {
+        identifier.count <= 20 ? identifier : String(identifier.prefix(19)) + "…"
+    }
+
+    static func autoSwitchLabel(_ enabled: Bool?) -> String {
+        switch enabled {
+        case true?: return "자동 전환 켜짐"
+        case false?: return "자동 전환 꺼짐"
+        case nil: return "자동 전환 정보 없음"
+        }
+    }
+
+    static func phaseLabel(_ phase: String?) -> String {
+        switch phase {
+        case nil: return "단계 정보 없음"
+        case "running"?, "active"?: return "실행 중"
+        case "idle"?: return "대기"
+        case "ready"?: return "준비 완료"
+        case "prepared"?, "starting"?: return "시작 중"
+        case "switching"?: return "전환 중"
+        case "finishing"?: return "마무리 중"
+        case "returning"?: return "복귀 중"
+        case "returned"?, "done"?, "completed"?, "committed"?: return "완료"
+        case "failed"?, "error"?, "rejected"?, "aborted"?: return "실패"
+        case let phase?: return phase
+        }
+    }
+
+    static func returnLabel(_ returnState: String) -> String {
+        switch returnState {
+        case "confirmed", "returned": return "복귀 확인됨"
+        case "pending", "waiting": return "복귀 확인 대기"
+        case "not_required", "none": return "복귀 불필요"
+        case "failed", "error": return "복귀 확인 실패"
+        default: return "복귀 \(returnState)"
+        }
+    }
+
+    static func ageLabel(from date: Date, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "방금" }
+        if seconds < 3600 { return "\(Int(seconds / 60))분 전" }
+        if seconds < 86400 { return "\(Int(seconds / 3600))시간 전" }
+        return "\(Int(seconds / 86400))일 전"
+    }
+}
+
+enum NASHistoryUnit: String, Equatable {
+    case percent, credits
+}
+
+/// One point of a NAS v2 history series: a consumption amount inside one
+/// baseline segment. Points are never re-diffed or summed across segments.
+struct NASHistoryPoint: Equatable {
+    let at: Date
+    let consumed: Double
+    let unit: NASHistoryUnit
+    let segmentId: String
+}
+
+struct NASHistorySeries: Equatable {
+    let identityGeneration: String?
+    let points: [NASHistoryPoint]
+}
+
+/// The NAS's consumption-history v2 envelope: `schemaVersion == 2`,
+/// `source == "nas"`, and exactly the six fixed series keys below — one
+/// series per metric bucket, with Gemini's second account kept fully
+/// independent rather than folded into the first.
+struct NASHistoryV2: Equatable {
+    static let seriesKeys = ["codex", "codexCredits", "claude", "claudeFable", "gemini", "gemini2"]
+
+    /// Each series has exactly one unit: credits only for `codexCredits`.
+    static func unit(for key: String) -> NASHistoryUnit {
+        key == "codexCredits" ? .credits : .percent
+    }
+
+    let generatedAt: Date
+    let series: [String: NASHistorySeries]
+}
+
+/// What the `--history-json` helper produced.
+enum NASHistoryReadResult: Equatable {
+    case history(NASHistoryV2)
+    /// The helper's own `{ok:false,error:{code,message}}` (e.g.
+    /// `not_collected`, `schema_changed`, `storage_unavailable`). Never an
+    /// empty history.
+    case helperError(NASServiceError)
+    case invalid
+}
+
+/// Strict reader for the NAS consumption-history v2 output. Any deviation —
+/// a non-integer or unknown `schemaVersion`, a missing/extra root or series
+/// key, more than 40 points, a non-positive or non-finite time, a negative,
+/// boolean or non-finite `consumed`, a unit that differs from the series'
+/// fixed unit, or an empty/oversized/odd `segmentId` — rejects the whole
+/// envelope rather than partially accepting it.
+enum NASHistoryV2Core {
+    static let maximumPointsPerSeries = 40
+    static let maximumSegmentIDLength = 64
+    static let maximumIdentityGenerationLength = 128
+    private static let rootKeys: Set<String> = ["schemaVersion", "generatedAt", "source", "series"]
+    private static let seriesObjectKeys: Set<String> = ["identityGeneration", "points"]
+    private static let pointKeys: Set<String> = ["at", "consumed", "unit", "segmentId"]
+
+    static func parse(_ data: Data, now: Date = Date()) -> NASHistoryV2? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return parse(object: object, now: now)
+    }
+
+    static func parse(object: [String: Any], now: Date = Date()) -> NASHistoryV2? {
+        // The SSH helper adds `ok: true` to a successful read; nothing else
+        // may appear beside the four fixed root keys.
+        var keys = Set(object.keys)
+        if keys.contains("ok") {
+            guard NASJSON.bool(object["ok"]) == true else { return nil }
+            keys.remove("ok")
+        }
+        guard keys == rootKeys else { return nil }
+        guard NASJSON.integer(object["schemaVersion"]) == 2 else { return nil }
+        guard (object["source"] as? String) == "nas" else { return nil }
+        guard let generatedAtMillis = NASJSON.positiveTimestamp(object["generatedAt"]) else { return nil }
+        let generatedAtSeconds = generatedAtMillis / 1000
+        if generatedAtSeconds > now.timeIntervalSince1970 + 300 {
+            return nil
+        }
+        guard let rawSeries = object["series"] as? [String: Any] else { return nil }
+        guard Set(rawSeries.keys) == Set(NASHistoryV2.seriesKeys) else { return nil }
+
+        var series: [String: NASHistorySeries] = [:]
+        for key in NASHistoryV2.seriesKeys {
+            guard let parsed = parseSeries(rawSeries[key], unit: NASHistoryV2.unit(for: key), now: now) else { return nil }
+            series[key] = parsed
+        }
+        return NASHistoryV2(generatedAt: Date(timeIntervalSince1970: generatedAtSeconds), series: series)
+    }
+
+    /// Classifies the helper's stdout together with its exit status. A
+    /// structured failure body is reported as that failure; a success body
+    /// is only accepted from a zero exit.
+    static func interpret(stdout: Data, exitStatus: Int32, now: Date = Date()) -> NASHistoryReadResult {
+        guard let object = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any] else { return .invalid }
+        if NASJSON.bool(object["ok"]) == false {
+            guard Set(object.keys) == ["ok", "error"], let error = NASServiceError.parse(object["error"]) else { return .invalid }
+            return .helperError(error)
+        }
+        guard exitStatus == 0, let history = parse(object: object, now: now) else { return .invalid }
+        return .history(history)
+    }
+
+    /// Re-serializes a parsed history in the exact v2 shape (without the
+    /// helper's `ok` flag) for the NAS-only on-disk cache, so a relaunch can
+    /// restore it through the same strict `parse`.
+    static func encode(_ history: NASHistoryV2) -> Data? {
+        var series: [String: Any] = [:]
+        for key in NASHistoryV2.seriesKeys {
+            guard let value = history.series[key] else { return nil }
+            series[key] = [
+                "identityGeneration": value.identityGeneration.map { $0 as Any } ?? NSNull(),
+                "points": value.points.map { point -> [String: Any] in
+                    [
+                        "at": (point.at.timeIntervalSince1970 * 1000).rounded(),
+                        "consumed": point.consumed,
+                        "unit": point.unit.rawValue,
+                        "segmentId": point.segmentId,
+                    ]
+                },
+            ]
+        }
+        let root: [String: Any] = [
+            "schemaVersion": 2,
+            "generatedAt": (history.generatedAt.timeIntervalSince1970 * 1000).rounded(),
+            "source": "nas",
+            "series": series,
+        ]
+        return try? JSONSerialization.data(withJSONObject: root)
+    }
+
+    static func isValidSegmentID(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= maximumSegmentIDLength && value.unicodeScalars.allSatisfy {
+            ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "-" || $0 == "_"
+        }
+    }
+
+    private static func parseSeries(_ value: Any?, unit: NASHistoryUnit, now: Date = Date()) -> NASHistorySeries? {
+        guard let raw = value as? [String: Any], Set(raw.keys) == seriesObjectKeys else { return nil }
+        // The key is required (checked above) and must be a string or null.
+        let identityGeneration: String?
+        if NASJSON.isNull(raw["identityGeneration"]) {
+            identityGeneration = nil
+        } else if let value = raw["identityGeneration"] as? String,
+                  !value.isEmpty, value.count <= maximumIdentityGenerationLength {
+            identityGeneration = value
+        } else {
+            return nil
+        }
+        guard let rawPoints = raw["points"] as? [Any], rawPoints.count <= maximumPointsPerSeries else { return nil }
+
+        var points: [NASHistoryPoint] = []
+        points.reserveCapacity(rawPoints.count)
+        var lastAtMillis: Double?
+        for rawPoint in rawPoints {
+            guard let point = rawPoint as? [String: Any], Set(point.keys) == pointKeys else { return nil }
+            guard let atMillis = NASJSON.positiveTimestamp(point["at"]) else { return nil }
+            if (atMillis / 1000) > now.timeIntervalSince1970 + 300 {
+                return nil
+            }
+            if let last = lastAtMillis, atMillis <= last {
+                return nil
+            }
+            lastAtMillis = atMillis
+            guard let consumed = NASJSON.number(point["consumed"]), consumed >= 0 else { return nil }
+            guard (point["unit"] as? String) == unit.rawValue else { return nil }
+            guard let segmentId = point["segmentId"] as? String, isValidSegmentID(segmentId) else { return nil }
+            points.append(NASHistoryPoint(
+                at: Date(timeIntervalSince1970: atMillis / 1000),
+                consumed: consumed,
+                unit: unit,
+                segmentId: segmentId
+            ))
+        }
+        return NASHistorySeries(identityGeneration: identityGeneration, points: points)
+    }
+}
+
+/// Keeps the last known-good parsed history across a NAS fetch/parse
+/// failure, so an unknown schema, a helper error, or a transport failure
+/// never blanks out a chart that still has a good earlier reading — and
+/// never substitutes local history for it.
+enum NASHistoryV2Cache {
+    static func apply(_ result: NASHistoryReadResult, previous: NASHistoryV2?) -> (history: NASHistoryV2?, failureLabel: String?) {
+        switch result {
+        case .history(let history): return (history, nil)
+        case .helperError(let error): return (previous, "이력 \(error.label)")
+        case .invalid: return (previous, "NAS 이력 형식 확인 불가")
+        }
+    }
+}
+
+/// Chart projection of one NAS history series. Each point is already a
+/// per-refresh consumption amount inside its own segment, so points are
+/// only ordered by time — never re-diffed, and never added across segments,
+/// units or accounts. A point whose unit differs from the strip's unit is
+/// dropped rather than drawn on the wrong scale.
+enum NASHistoryChartCore {
+    static func samples(_ series: NASHistorySeries?, unit: NASHistoryUnit) -> [UsageConsumptionSample] {
+        guard let series else { return [] }
+        return series.points
+            .filter { $0.unit == unit }
+            .sorted { $0.at < $1.at }
+            .map { UsageConsumptionSample(at: $0.at, amount: $0.consumed) }
+    }
+
+    static func segmentCount(_ series: NASHistorySeries?) -> Int {
+        Set(series?.points.map(\.segmentId) ?? []).count
+    }
+}
+
+/// Global collection-source gating. Local collectors (Codex app-server,
+/// Claude OAuth, Gemini `agy`/account metadata, Gemini web) only run in the
+/// explicit local mode, and a result is only accepted if it was requested
+/// under the source and switch generation that are still current — so an
+/// in-flight local read finishing after a switch to NAS (or vice versa) is
+/// dropped instead of overwriting the other source's values.
+enum DataSourceGate {
+    static func allowsLocalCollection(_ source: DataCollectionSource) -> Bool {
+        source == .localMac
+    }
+
+    static func accepts(
+        resultFrom origin: DataCollectionSource,
+        generation: Int,
+        current: DataCollectionSource,
+        currentGeneration: Int
+    ) -> Bool {
+        origin == current && generation == currentGeneration
+    }
 }
 
 /// Snapshot parsed from the visible text of `https://gemini.google.com/usage`
