@@ -3,6 +3,26 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.1.2</title>
+            <pubDate>Fri, 16 Oct 2026 13:10:51 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.1.2</link>
+            <sparkle:version>202610161301</sparkle:version>
+            <sparkle:shortVersionString>2.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.1.2
+
+- Codex·Claude·Gemini 세 카드의 기존 정보 밀도를 복원하고 Gemini 카드에 쌓이던 호스트 진단 문구를 정리했습니다.
+- NAS 모드에서는 선택된 Gemini 계정 하나만 표시하며, 대기 중에도 마지막 선택을 유지합니다.
+- 계정이 바뀌거나 조회가 실패했을 때 다른 계정의 과거 사용량·초기화 시각·그래프가 섞이지 않도록 했습니다.
+- 기존 Codex 요금제·초기화 가능 횟수·크레딧과 Claude 요금제·추가 사용량 표시를 유지합니다. 제공되지 않는 값은 추정하지 않습니다.
+
+NAS 계정 전환은 서버에 준비된 인증 프로필과 컨트롤러를 사용합니다. 이 앱 설치만으로 서버의 계정 인증이나 자동 전환이 설정되는 것은 아닙니다.
+
+Build-Number: 202610161301
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.1.2/CCMB-2.1.2.zip" length="3104328" type="application/octet-stream" sparkle:edSignature="Rq662P+ldI2dWaK0fwwIca8o3d+q25s7sWMe9U/MnKNWQeHWDA68iC6umQnduRjcveK5jomK9MgYEsFrqdspCw=="/>
+        </item>
+        <item>
             <title>2.1.1</title>
             <pubDate>Fri, 16 Oct 2026 11:14:53 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.1.1</link>
