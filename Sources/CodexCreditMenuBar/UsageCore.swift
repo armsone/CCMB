@@ -19,6 +19,7 @@ struct RateLimitSnapshot {
     /// NAS `credits.unlimited`. Defaulted so the local app-server path,
     /// which has no such flag, keeps constructing snapshots unchanged.
     var creditsUnlimited: Bool = false
+    var resetCreditExpirations: [Date] = []
 }
 
 /// Provider-independent adaptive cadence. Each visible provider owns one
@@ -1228,6 +1229,7 @@ struct NASUsageItem: Equatable {
     let claudePlanType: String?
     let claudeExtraUsage: NASClaudeExtraUsage?
     var claudeLimitResets: ClaudeLimitResets? = nil
+    var codexResetCreditExpirations: [Date] = []
 
     var remainingFraction: Double { remainingPercent / 100 }
 
@@ -1278,6 +1280,7 @@ struct NASUsageItem: Equatable {
         var hasCodexDetails = false
         var codexPlanType: String?
         var codexResetCreditsAvailable: Int?
+        var codexResetCreditExpirations: [Date] = []
         if allowsCredits, !NASJSON.isAbsent(object["codex_details"]), let details = object["codex_details"] as? [String: Any] {
             hasCodexDetails = true
             if let planType = details["plan_type"] as? String, CodexPlanCore.allowlist.contains(planType.lowercased()) {
@@ -1285,6 +1288,11 @@ struct NASUsageItem: Equatable {
             }
             if let resetCredits = NASJSON.integer(details["reset_credits_available"]), resetCredits >= 0 {
                 codexResetCreditsAvailable = resetCredits
+            }
+            if let values = details["reset_credit_expirations"] as? [Any] {
+                codexResetCreditExpirations = values.prefix(64).compactMap { value in
+                    NASJSON.positiveTimestamp(value).map { Date(timeIntervalSince1970: $0) }
+                }.sorted()
             }
         }
 
@@ -1319,7 +1327,8 @@ struct NASUsageItem: Equatable {
             hasClaudeDetails: hasClaudeDetails,
             claudePlanType: claudePlanType,
             claudeExtraUsage: claudeExtraUsage,
-            claudeLimitResets: claudeLimitResets
+            claudeLimitResets: claudeLimitResets,
+            codexResetCreditExpirations: codexResetCreditExpirations
         )
     }
 
@@ -1341,6 +1350,7 @@ struct NASUsageItem: Equatable {
             object["codex_details"] = [
                 "plan_type": codexPlanType.map { $0 as Any } ?? NSNull(),
                 "reset_credits_available": codexResetCreditsAvailable.map { $0 as Any } ?? NSNull(),
+                "reset_credit_expirations": codexResetCreditExpirations.map { $0.timeIntervalSince1970 },
             ]
         }
         if hasClaudeDetails {
@@ -2046,7 +2056,8 @@ enum NASItemMappingCore {
             sparkResetsAt: nil,
             detailedCreditsReturned: weekly.hasCredits,
             updatedAt: fetchedAt,
-            creditsUnlimited: weekly.creditsUnlimited
+            creditsUnlimited: weekly.creditsUnlimited,
+            resetCreditExpirations: weekly.codexResetCreditExpirations
         )
     }
 

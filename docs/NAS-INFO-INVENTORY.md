@@ -65,3 +65,7 @@ Claude NAS 오류가 RetryAfter를 포함하면 실제 다음 조회 시각을 �
 ### 2.1.11 Claude 초기화권 표시 복원
 
 추가 직접 요청에 따라 Claude 카드에 초기화권 개수·사용 가능 상태와 만료일을 다시 표시한다. `ClaudeUsageSnapshot.limitResets`는 NAS `claude_details.limit_resets`를 그대로 사용한다. 2026-10-16 19:32 KST 저장 원본은 `remaining_count=1`, `usable_now=true`, `expires_at=1792684800`이었다. 초기화 실행 버튼이나 소비 API는 추가하지 않는다. Claude 추가 사용량 영역을 숨기는 기존 요청은 유지한다.
+
+### 2.1.12 초기화권 문구·만료시간
+
+Claude 초기화권 행은 개수만 표시하고 만료시간 상세는 유지한다. Codex는 NAS `codex_details.reset_credit_expirations`의 실제 사용 가능한 권별 만료시간을 정렬해 개수 아래 각각 표시한다. 만료 자료가 전혀 없으면 개수를 지우지 않고 만료 정보 없음을 표시한다. 원본 신원·로그인·초기화권 소비 동작은 변경하지 않는다. 테스트·별도 화면 검증은 수행하지 않는다.

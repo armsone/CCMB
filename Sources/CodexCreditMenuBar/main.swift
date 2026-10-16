@@ -3719,6 +3719,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         if let resetCredits = snapshot.resetCredits {
             creditRows.append(UsagePanelRow(label: "초기화 가능", value: "\(resetCredits)개"))
+            for (index, expiry) in snapshot.resetCreditExpirations.enumerated() {
+                creditRows.append(UsagePanelRow(label: "\(index + 1)번 만료", value: Self.resetDateTimeTitle(expiry)))
+            }
+            if nasSlot != nil, resetCredits > 0, snapshot.resetCreditExpirations.isEmpty {
+                creditRows.append(UsagePanelRow(label: "만료", value: "정보 없음"))
+            }
         } else if nasSlot != nil {
             creditRows.append(UsagePanelRow(label: "초기화 가능", value: "NAS 미수집"))
         }
@@ -3867,7 +3873,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         resetRows.append(UsagePanelRow(
             label: "초기화권",
-            value: ClaudeUsageCore.limitResetsTitle(snapshot.limitResets),
+            value: snapshot.limitResets.map { "\($0.remainingCount)개" } ?? "확인 불가",
             detail: snapshot.limitResets?.expiresAt.map { "만료 \(Self.resetDateTimeTitle($0))" }
         ))
         // The Fable weekly limit is promoted to its own top ring (session,
