@@ -1619,54 +1619,49 @@ final class NASHostStatusTests: XCTestCase {
         let restored = try XCTUnwrap(NASFourServiceState.decodeCache(JSONSerialization.data(withJSONObject: root)))
         XCTAssertNil(restored.hostStatus)
         XCTAssertNotNil(restored.geminiSnapshot)
-        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: restored, source: .nas, now: now), [])
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: restored, source: .nas), [])
     }
 
+    /// Only a running host on the *other* fixed account is decision-relevant
+    /// enough to surface on a card; everything else (phase, heartbeat,
+    /// return confirmation, auto-switch, staleness) is diagnostics-only and
+    /// must not appear in this compact, single-line footer.
     func testFooterLinesForBothFixedGeminiCards() throws {
         var state = NASFourServiceState()
         state.apply(try XCTUnwrap(F.parse(F.withHosts)))
+        // `twoHosts` runs the account1 host; the account1 card never
+        // reports on itself, but the idle account2 card names it.
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas), [])
         XCTAssertEqual(
-            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now),
-            ["호스트 tm-mini", "실행 중 · 신호 방금", "자동 전환 켜짐"]
+            NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas),
+            []
         )
-        XCTAssertEqual(
-            NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas, now: now),
-            ["호스트 api-worker", "복귀 중", "복귀 확인됨", "자동 전환 켜짐"]
-        )
-        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .codex, state: state, source: .nas, now: now), [])
-        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .claude, state: state, source: .nas, now: now), [])
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .codex, state: state, source: .nas), [])
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .claude, state: state, source: .nas), [])
     }
 
-    func testFooterNeverClaimsAutoSwitchUnlessServerTrue() throws {
+    func testFooterDoesNotShowOtherAccountEvenWhileRunning() throws {
         let services = [F.codex(), F.claude(), F.gemini(), F.gemini2()]
         var state = NASFourServiceState()
         state.apply(try XCTUnwrap(F.parse(F.envelope(services: services, executionHosts: nil, autoSwitch: nil))))
-        XCTAssertEqual(
-            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now),
-            ["실행 호스트 없음", "자동 전환 정보 없음"]
-        )
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas), [])
         state.apply(try XCTUnwrap(F.parse(F.envelope(services: services, executionHosts: "[" + F.host(account: "\"account2\"") + "]"))))
         XCTAssertEqual(
-            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now),
-            ["실행 중: 부계정", "자동 전환 꺼짐"]
+            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas),
+            []
         )
-        state.applyFailure(label: NASFetchError.timeout.label)
-        XCTAssertEqual(
-            NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas, now: now).last,
-            "호스트 상태 오래됨"
-        )
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas), [])
     }
 
     func testLocalMacSourceShowsNoNASHostState() throws {
         var state = NASFourServiceState()
         state.apply(try XCTUnwrap(F.parse(F.withHosts)))
-        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .localMac, now: now), [])
-        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .localMac, now: now), [])
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .localMac), [])
+        XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .localMac), [])
     }
 
-    /// A shared idle host (no `execution_account`) with a non-meaningful
-    /// `not_required` return must not pad both cards' footers with the same
-    /// stale heartbeat age and the same no-op return line.
+    /// A shared idle host (no `execution_account`) never names a running
+    /// account, so it must never produce a footer line on either card.
     func testIdleCommonHostDoesNotDuplicateStaleHeartbeatOrNonMeaningfulReturn() throws {
         let idleCommonHosts = "[" + F.host(
             id: "shared-idle-1", run: "null", account: "null", phase: "\"idle\"",
@@ -1682,16 +1677,16 @@ final class NASHostStatusTests: XCTestCase {
             autoSwitch: "true"
         ))))
         for id: NASServiceID in [.gemini, .gemini2] {
-            let lines = NASHostStatusPresentation.footerLines(for: id, state: state, source: .nas, now: now)
-            XCTAssertFalse(lines.contains(where: { $0.contains("신호") }), "idle shared host heartbeat is not this card's liveness")
-            XCTAssertFalse(lines.contains(where: { $0.contains("복귀") }), "not_required carries no decision-relevant information")
-            XCTAssertLessThanOrEqual(lines.count, 5)
+            XCTAssertEqual(NASHostStatusPresentation.footerLines(for: id, state: state, source: .nas), [])
         }
     }
 
+    /// The compact footer never repeats a host identifier, so it can never
+    /// leak a sanitized-away field either.
     func testFooterRendersOnlySanitizedFields() throws {
         let hosts = "[" + F.host(
             id: "a-very-long-host-identifier-name",
+            account: "\"account2\"",
             extra: #", "binding": {"email": "secret@example.com"}, "worker_path": "/volume1/secret""#
         ) + "]"
         var state = NASFourServiceState()
@@ -1700,8 +1695,8 @@ final class NASHostStatusTests: XCTestCase {
             executionHosts: hosts,
             autoSwitch: "true"
         ))))
-        let lines = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: now)
-        XCTAssertEqual(lines.first, "호스트 a-very-long-host-id…")
+        let lines = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas)
+        XCTAssertEqual(lines, [])
         let joined = lines.joined(separator: "\n")
         XCTAssertFalse(joined.contains("@"))
         XCTAssertFalse(joined.contains("/"))
@@ -3917,27 +3912,32 @@ final class NASBackendPhaseTests: XCTestCase {
 
         var state = NASFourServiceState()
         state.apply(snapshot)
+        // .gemini2 is itself the running account, so its own card shows no
+        // "other account is running" line; only the idle .gemini card would.
         let footer = NASHostStatusPresentation.footerLines(
             for: .gemini2,
             state: state,
-            source: .nas,
-            now: fixedNow
+            source: .nas
         )
-        XCTAssertEqual(footer, ["호스트 host-gemini2", "실행 중 · 신호 방금", "자동 전환 켜짐"])
+        XCTAssertEqual(footer, [])
+        XCTAssertEqual(
+            NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas),
+            []
+        )
     }
 
-    func testKnownUppercasePhasesNormalizedAndHumanReadableLabels() {
-        let cases: [(raw: String, expected: String, expectedLabel: String)] = [
-            ("RUNNING", "running", "실행 중"),
-            ("PREPARED", "prepared", "시작 중"),
-            ("READY", "ready", "준비 완료"),
-            ("FINISHING", "finishing", "마무리 중"),
-            ("COMMITTED", "committed", "완료"),
-            ("REJECTED", "rejected", "실패"),
-            ("ABORTED", "aborted", "실패")
+    func testKnownUppercasePhasesNormalizedToLowercase() {
+        let cases: [(raw: String, expected: String)] = [
+            ("RUNNING", "running"),
+            ("PREPARED", "prepared"),
+            ("READY", "ready"),
+            ("FINISHING", "finishing"),
+            ("COMMITTED", "committed"),
+            ("REJECTED", "rejected"),
+            ("ABORTED", "aborted")
         ]
 
-        for (raw, expected, expectedLabel) in cases {
+        for (raw, expected) in cases {
             let hostJSON: [String: Any] = [
                 "host_id": "host-test",
                 "execution_account": "account1",
@@ -3946,7 +3946,6 @@ final class NASBackendPhaseTests: XCTestCase {
             let host = NASExecutionHost.parse(hostJSON)
             XCTAssertNotNil(host, "Phase \(raw) should be parsed")
             XCTAssertEqual(host?.phase, expected)
-            XCTAssertEqual(NASHostStatusPresentation.phaseLabel(host?.phase), expectedLabel)
         }
     }
 
@@ -4055,14 +4054,12 @@ final class NASExecutionHostGuardTests: XCTestCase {
         XCTAssertEqual(restored.hostStatus?.hosts.first?.phase, "idle")
         XCTAssertEqual(restored.hostStatus?.hosts.first?.returnState, "confirmed")
 
-        let footerGemini = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas, now: fixedNow)
-        let footerGemini2 = NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas, now: fixedNow)
-        XCTAssertFalse(footerGemini.contains(where: { $0.contains("실행 중") }))
-        XCTAssertFalse(footerGemini2.contains(where: { $0.contains("실행 중") }))
-        XCTAssertTrue(footerGemini.contains(where: { $0.contains("대기") }))
-        XCTAssertTrue(footerGemini.contains(where: { $0.contains("복귀 확인됨") }))
-        XCTAssertTrue(footerGemini2.contains(where: { $0.contains("대기") }))
-        XCTAssertTrue(footerGemini2.contains(where: { $0.contains("복귀 확인됨") }))
+        // An idle, account-less host never names a running account, so
+        // neither card's compact footer shows anything for it.
+        let footerGemini = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas)
+        let footerGemini2 = NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .nas)
+        XCTAssertEqual(footerGemini, [])
+        XCTAssertEqual(footerGemini2, [])
     }
 
     func testRunningAccount2KeepsFixedSecondary() throws {

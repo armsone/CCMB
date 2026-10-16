@@ -1403,6 +1403,8 @@ struct NASServiceEntry: Equatable {
     let stale: Bool
     let items: [NASUsageItem]
     let error: NASServiceError?
+    var actualAccountRef: String? = nil
+    var historyIdentity: String? = nil
 
     var service: String { id.rawValue }
     var provider: String { id.provider }
@@ -1439,6 +1441,14 @@ struct NASServiceEntry: Equatable {
             guard object["account_ref"] == nil || NASJSON.isNull(object["account_ref"]) else { return .identityMismatch }
         }
 
+        let actualAccountRef = object["actual_account_ref"] as? String
+        if !NASJSON.isAbsent(object["actual_account_ref"]), actualAccountRef.map(NASExecutionHost.isSafeAccountID) != true {
+            return .entry(schemaInvalid(id))
+        }
+        let historyIdentity = object["history_identity"] as? String
+        if !NASJSON.isAbsent(object["history_identity"]), historyIdentity.map(NASExecutionHost.isSafeIdentifier) != true {
+            return .entry(schemaInvalid(id))
+        }
         guard let ok = NASJSON.bool(object["ok"]), let stale = NASJSON.bool(object["stale"]) else {
             return .entry(schemaInvalid(id))
         }
@@ -1469,7 +1479,7 @@ struct NASServiceEntry: Equatable {
         if ok, items.isEmpty || error != nil { return .entry(schemaInvalid(id)) }
         if !ok, error == nil { return .entry(schemaInvalid(id)) }
 
-        return .entry(NASServiceEntry(id: id, ok: ok, fetchedAt: fetchedAt, stale: stale, items: items, error: error))
+        return .entry(NASServiceEntry(id: id, ok: ok, fetchedAt: fetchedAt, stale: stale, items: items, error: error, actualAccountRef: actualAccountRef, historyIdentity: historyIdentity))
     }
 
     func jsonObject() -> [String: Any] {
@@ -1477,6 +1487,8 @@ struct NASServiceEntry: Equatable {
             "service": service,
             "provider": provider,
             "account_ref": accountRef.map { $0 as Any } ?? NSNull(),
+            "actual_account_ref": actualAccountRef.map { $0 as Any } ?? NSNull(),
+            "history_identity": historyIdentity.map { $0 as Any } ?? NSNull(),
             "ok": ok,
             "fetched_at": fetchedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
             "stale": stale,
@@ -1514,6 +1526,17 @@ struct NASExecutionHost: Equatable {
     let stateChangedAt: Date?
     let lastHeartbeatAt: Date?
     let returnState: String?
+    var selectedAccountID: String? = nil
+    var selectedService: NASServiceID? = nil
+    var selectedRole: String? = nil
+    var selectionGeneration: String? = nil
+    var observedAt: Date? = nil
+
+    static func isSafeAccountID(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 64 && value.unicodeScalars.allSatisfy {
+            ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "_" || $0 == "-"
+        } && value.first != "_" && value.first != "-"
+    }
 
     /// Host/run identifiers: letters, digits and `-_.:`, at most 64
     /// characters, so no email (`@`), path (`/`) or whitespace can pass.
@@ -1565,6 +1588,14 @@ struct NASExecutionHost: Equatable {
     static func parse(_ value: Any?) -> NASExecutionHost? {
         guard let object = value as? [String: Any] else { return nil }
         guard let hostID = object["host_id"] as? String, isSafeIdentifier(hostID) else { return nil }
+        let selectedAccountID = object["selected_account_id"] as? String
+        let selectedService = (object["selected_service"] as? String).flatMap(NASServiceID.init(rawValue:))
+        let selectedRole = object["role"] as? String
+        if !NASJSON.isAbsent(object["selected_account_id"]) {
+            guard let selectedAccountID, isSafeAccountID(selectedAccountID),
+                  (selectedService == .gemini && selectedRole == "primary") || (selectedService == .gemini2 && selectedRole == "secondary")
+            else { return nil }
+        }
         let executionAccount: NASServiceID?
         if NASJSON.isAbsent(object["execution_account"]) {
             executionAccount = nil
@@ -1572,6 +1603,8 @@ struct NASExecutionHost: Equatable {
             switch object["execution_account"] as? String {
             case "account1"?: executionAccount = .gemini
             case "account2"?: executionAccount = .gemini2
+            case let ref? where ref == selectedAccountID && selectedService != nil:
+                executionAccount = selectedService
             default: return nil
             }
         }
@@ -1602,7 +1635,14 @@ struct NASExecutionHost: Equatable {
               let lastHeartbeatAt = optionalTimestamp("last_heartbeat_at")
         else { return nil }
         // A running/active host must name a valid account.
-        if executionAccount == nil && isRunningPhase(phase) { return nil }
+        if executionAccount == nil && selectedAccountID == nil && isRunningPhase(phase) { return nil }
+        guard let observedAt = optionalTimestamp("observed_at") else { return nil }
+        var selectionGeneration: String?
+        if !NASJSON.isAbsent(object["selection_generation"]) {
+            if let n = NASJSON.integer(object["selection_generation"]), n >= 0 { selectionGeneration = String(n) }
+            else if let text = object["selection_generation"] as? String, isSafeIdentifier(text) { selectionGeneration = text }
+            else { return nil }
+        }
 
         return NASExecutionHost(
             hostID: hostID,
@@ -1611,7 +1651,12 @@ struct NASExecutionHost: Equatable {
             phase: phase,
             stateChangedAt: stateChangedAt,
             lastHeartbeatAt: lastHeartbeatAt,
-            returnState: returnState
+            returnState: returnState,
+            selectedAccountID: selectedAccountID,
+            selectedService: selectedService,
+            selectedRole: selectedRole,
+            selectionGeneration: selectionGeneration,
+            observedAt: observedAt
         )
     }
 
@@ -1624,6 +1669,11 @@ struct NASExecutionHost: Equatable {
             "state_changed_at": stateChangedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
             "last_heartbeat_at": lastHeartbeatAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
             "return_state": returnState.map { $0 as Any } ?? NSNull(),
+            "selected_account_id": selectedAccountID.map { $0 as Any } ?? NSNull(),
+            "selected_service": selectedService.map { $0.rawValue as Any } ?? NSNull(),
+            "role": selectedRole.map { $0 as Any } ?? NSNull(),
+            "selection_generation": selectionGeneration.map { $0 as Any } ?? NSNull(),
+            "observed_at": observedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
         ]
     }
 }
@@ -1918,6 +1968,9 @@ struct NASFourServiceState: Equatable {
         for id in NASServiceID.allCases {
             let entry = snapshot.entry(id)
             var slot = self.slot(id)
+            let previousAccount = slot.lastGood?.actualAccountRef ?? id.accountRef
+            let incomingAccount = entry.actualAccountRef ?? id.accountRef
+            if previousAccount != incomingAccount { slot.lastGood = nil }
             if NASItemMappingCore.isUsable(entry) {
                 slot.lastGood = entry
                 slot.isStale = entry.stale
@@ -1947,35 +2000,32 @@ struct NASFourServiceState: Equatable {
     var geminiSnapshot: GeminiUsageSnapshot? { slot(.gemini).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
     var gemini2Snapshot: GeminiUsageSnapshot? { slot(.gemini2).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
 
-    /// Which fixed Gemini slot the single Gemini card currently shows.
-    /// Never guessed from quota values, and never taken from an arbitrary
-    /// host: only the execution host whose `host_id` is literally `"nas"`
-    /// speaks for this card, because that is the one authoritative NAS
-    /// executor — any other host (e.g. a Mac) is read-only metadata for the
-    /// footer, not a selection signal. With switching disabled, or its
-    /// state unknown, this is always `.gemini` (account1/주계정). Only when
-    /// `auto_switch_enabled == true` *and* the `"nas"` host is itself
-    /// `running`/`active` on a named account does the card move to that
-    /// account; a `"nas"` host that is absent, idle, or returning falls
-    /// back to the primary, since the backend's `return_state` marks the
-    /// *primary*'s own confirmed return (see `gemini_accounts.py
-    /// ingest_event`), not a secondary selection, and idle events clear
-    /// `execution_account` entirely. There is currently no field for "the
-    /// account last selected while idle" — that needs a future explicit
-    /// `selected_account` field from the backend; until then this never
-    /// pretends to remember one.
+    /// NAS 실행 범위의 명시 선택을 idle에서도 유지한다. 다른 호스트는 이를 바꾸지 않는다.
     var selectedGeminiServiceID: NASServiceID {
         guard let hostStatus, hostStatus.autoSwitchEnabled == true,
-              let nasHost = hostStatus.hosts.first(where: { $0.hostID == "nas" }),
-              NASExecutionHost.isRunningPhase(nasHost.phase),
-              let account = nasHost.executionAccount
+              let host = hostStatus.hosts.first(where: { $0.hostID == "nas" })
         else { return .gemini }
-        return account
+        if host.selectedAccountID != nil, let service = host.selectedService { return service }
+        return NASExecutionHost.isRunningPhase(host.phase) ? (host.executionAccount ?? .gemini) : .gemini
     }
 
-    /// The snapshot for whichever fixed slot `selectedGeminiServiceID` names.
+    private var selectedNASAccountID: String? {
+        guard hostStatus?.autoSwitchEnabled == true else { return nil }
+        return hostStatus?.hosts.first(where: { $0.hostID == "nas" })?.selectedAccountID
+    }
+
     var selectedGeminiSnapshot: GeminiUsageSnapshot? {
-        selectedGeminiServiceID == .gemini2 ? gemini2Snapshot : geminiSnapshot
+        let id = selectedGeminiServiceID
+        if let selectedNASAccountID,
+           selectedNASAccountID != (slot(id).lastGood?.actualAccountRef ?? id.accountRef) { return nil }
+        return id == .gemini2 ? gemini2Snapshot : geminiSnapshot
+    }
+
+    func canShowHistory(_ series: NASHistorySeries?, for id: NASServiceID) -> Bool {
+        guard let entry = slot(id).lastGood else { return false }
+        if let selectedNASAccountID, selectedNASAccountID != (entry.actualAccountRef ?? id.accountRef) { return false }
+        if let expected = entry.historyIdentity { return series?.identityGeneration == expected }
+        return entry.actualAccountRef == nil || entry.actualAccountRef == id.accountRef
     }
 
     /// Persists only the last good entries, in the same sanitized shape the
@@ -2018,122 +2068,10 @@ struct NASFourServiceState: Equatable {
     }
 }
 
-/// Footer lines for a fixed Gemini card describing the NAS execution host
-/// running that card's account and its return confirmation. Read-only
-/// status: nothing here triggers or offers an account switch. Only the
-/// sanitized known fields are rendered, and an explicit local-Mac source
-/// shows no NAS host state at all.
+/// 실행·호스트 진단은 카드 밖에서 다룬다.
 enum NASHostStatusPresentation {
-    static let maximumHostLines = 2
-
-    static func footerLines(
-        for id: NASServiceID,
-        state: NASFourServiceState,
-        source: DataCollectionSource,
-        now: Date
-    ) -> [String] {
-        guard source == .nas, id == .gemini || id == .gemini2, let status = state.hostStatus else { return [] }
-        var lines: [String] = []
-        let hosts = status.hosts(for: id)
-        let displayHosts = hosts + status.commonHosts
-        if hosts.isEmpty {
-            let otherID: NASServiceID = id == .gemini ? .gemini2 : .gemini
-            let otherHosts = status.hosts(for: otherID)
-            let otherName = otherID == .gemini ? "본계정" : "부계정"
-            // Only a running/active phase means the other account is executing.
-            if otherHosts.contains(where: { NASExecutionHost.isRunningPhase($0.phase) }) {
-                lines.append("실행 중: \(otherName)")
-            } else if !otherHosts.isEmpty {
-                lines.append("최근 사용: \(otherName)")
-            } else if displayHosts.isEmpty {
-                lines.append("실행 호스트 없음")
-            }
-        }
-        // Short lines: the card footer is a narrow fixed-width column.
-        // A heartbeat age only means anything for a host that is actually
-        // running — an idle shared host's last heartbeat is not this card's
-        // liveness signal and would just repeat stale noise on every card.
-        for host in displayHosts.prefix(maximumHostLines) {
-            lines.append(host.executionAccount == nil
-                ? "공용 호스트 \(displayIdentifier(host.hostID))"
-                : "호스트 \(displayIdentifier(host.hostID))")
-            var parts = [phaseLabel(host.phase)]
-            if NASExecutionHost.isRunningPhase(host.phase), let heartbeat = host.lastHeartbeatAt {
-                parts.append("신호 \(ageLabel(from: heartbeat, now: now))")
-            } else if let changedAt = host.stateChangedAt {
-                parts.append("변경 \(ageLabel(from: changedAt, now: now))")
-            }
-            lines.append(parts.joined(separator: " · "))
-            // "not_required"/"none" is not a meaningful return condition —
-            // showing it on both cards only repeats non-information.
-            if let returnState = host.returnState, isNotableReturn(returnState) {
-                lines.append(returnLabel(returnState))
-            }
-        }
-        if displayHosts.count > maximumHostLines {
-            lines.append("외 \(displayHosts.count - maximumHostLines)개 호스트")
-        }
-        lines.append(autoSwitchLabel(status.autoSwitchEnabled))
-        if state.hostStatusIsStale {
-            lines.append("호스트 상태 오래됨")
-        }
-        return lines
-    }
-
-    static func displayIdentifier(_ identifier: String) -> String {
-        identifier.count <= 20 ? identifier : String(identifier.prefix(19)) + "…"
-    }
-
-    static func autoSwitchLabel(_ enabled: Bool?) -> String {
-        switch enabled {
-        case true?: return "자동 전환 켜짐"
-        case false?: return "자동 전환 꺼짐"
-        case nil: return "자동 전환 정보 없음"
-        }
-    }
-
-    static func phaseLabel(_ phase: String?) -> String {
-        switch phase {
-        case nil: return "단계 정보 없음"
-        case "running"?, "active"?: return "실행 중"
-        case "idle"?: return "대기"
-        case "ready"?: return "준비 완료"
-        case "prepared"?, "starting"?: return "시작 중"
-        case "switching"?: return "전환 중"
-        case "finishing"?: return "마무리 중"
-        case "returning"?: return "복귀 중"
-        case "returned"?, "done"?, "completed"?, "committed"?: return "완료"
-        case "failed"?, "error"?, "rejected"?, "aborted"?: return "실패"
-        case let phase?: return phase
-        }
-    }
-
-    /// `not_required`/`none` describe a host that was never waiting on a
-    /// return in the first place — worth filtering so the footer isn't
-    /// padded with a line that carries no decision-relevant information.
-    static func isNotableReturn(_ returnState: String) -> Bool {
-        switch returnState {
-        case "not_required", "none": return false
-        default: return true
-        }
-    }
-
-    static func returnLabel(_ returnState: String) -> String {
-        switch returnState {
-        case "confirmed", "returned": return "복귀 확인됨"
-        case "pending", "waiting": return "복귀 확인 대기"
-        case "not_required", "none": return "복귀 불필요"
-        case "failed", "error": return "복귀 확인 실패"
-        default: return "복귀 \(returnState)"
-        }
-    }
-
-    static func ageLabel(from date: Date, now: Date) -> String {
-        let seconds = max(0, now.timeIntervalSince(date))
-        if seconds < 60 { return "방금" }
-        if seconds < 3600 { return "\(Int(seconds / 60))분 전" }
-        if seconds < 86400 { return "\(Int(seconds / 3600))시간 전" }
-        return "\(Int(seconds / 86400))일 전"
+    static func footerLines(for _: NASServiceID, state _: NASFourServiceState, source _: DataCollectionSource) -> [String] {
+        [] // 호스트·전환 진단은 카드에 표시하지 않는다.
     }
 }
 

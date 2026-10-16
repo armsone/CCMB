@@ -140,4 +140,132 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try png.write(to: outputURL)
     }
+
+    /// Renders a model into a PNG at `path` (skipped when unset) and
+    /// returns the real `SplitUsagePanelView`'s laid-out content height, so
+    /// the before/after comparison is backed by the same production
+    /// layout math `apply(_:)` uses, not an estimate.
+    private func renderAndMeasure(_ model: UsagePanelModel, path: String?) throws -> CGFloat {
+        let view = SplitUsagePanelView()
+        view.apply(model)
+        if let path {
+            let outputURL = URL(fileURLWithPath: path)
+            try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                XCTFail("could not allocate offscreen bitmap")
+                return view.frame.height
+            }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                XCTFail("could not encode PNG")
+                return view.frame.height
+            }
+            try png.write(to: outputURL)
+        }
+        return view.frame.height
+    }
+
+    /// Builds the real `NASFourServiceState` (via `apply(_:)`, the same
+    /// mutator the live NAS read path uses) carrying a two-host status —
+    /// the shape that used to produce the removed per-host phase/heartbeat/
+    /// return/auto-switch lines.
+    private func twoHostState() -> NASFourServiceState {
+        var state = NASFourServiceState()
+        let runningHost = NASExecutionHost(
+            hostID: "worker-1",
+            runID: "run-42",
+            executionAccount: .gemini2,
+            phase: "running",
+            stateChangedAt: Date().addingTimeInterval(-600),
+            lastHeartbeatAt: Date().addingTimeInterval(-5),
+            returnState: "pending"
+        )
+        let idleHost = NASExecutionHost(
+            hostID: "worker-2",
+            runID: nil,
+            executionAccount: nil,
+            phase: "idle",
+            stateChangedAt: Date().addingTimeInterval(-7200),
+            lastHeartbeatAt: nil,
+            returnState: "not_required"
+        )
+        let snapshot = NASSnapshotV2(
+            generatedAt: Date(),
+            collection: nil,
+            entries: [],
+            hostStatus: NASHostStatus(hosts: [runningHost, idleHost], autoSwitchEnabled: true)
+        )
+        state.apply(snapshot)
+        return state
+    }
+
+    /// Reproduces exactly the per-host phase/heartbeat/return/auto-switch
+    /// footer lines the old (pre-restoration) `NASHostStatusPresentation`
+    /// used to emit for the idle `.gemini` card while `.gemini2` runs —
+    /// kept only in this test as the "before" fixture for the visual proof,
+    /// since the production code no longer renders this chatter.
+    private func oldStyleHostFooterLines(state: NASFourServiceState, now: Date) -> [String] {
+        guard let status = state.hostStatus else { return [] }
+        var lines: [String] = ["실행 중: 부계정"]
+        for host in status.hosts(for: .gemini) + status.commonHosts {
+            lines.append(host.executionAccount == nil ? "공용 호스트 \(host.hostID)" : "호스트 \(host.hostID)")
+            lines.append(host.phase == "idle" ? "대기" : (host.phase ?? "단계 정보 없음"))
+            if host.returnState == "pending" { lines.append("복귀 확인 대기") }
+        }
+        lines.append(status.autoSwitchEnabled == true ? "자동 전환 켜짐" : "자동 전환 꺼짐")
+        if state.hostStatusIsStale { lines.append("호스트 상태 오래됨") }
+        return lines
+    }
+
+    /// Proves the restoration: the real production
+    /// `NASHostStatusPresentation.footerLines` now returns at most one
+    /// compact line for the same two-host NAS state that used to produce a
+    /// multi-line chatter block, and the real `SplitUsagePanelView` layout
+    /// height (shared across all three columns, see `apply(_:)`) shrinks
+    /// accordingly.
+    func testGeminiHostFooterShrinksFromChatterToOneLine() throws {
+        let state = twoHostState()
+        let now = Date()
+
+        let oldLines = oldStyleHostFooterLines(state: state, now: now)
+        XCTAssertGreaterThanOrEqual(oldLines.count, 4, "fixture must reproduce the old multi-line chatter")
+
+        let newLines = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas)
+        XCTAssertLessThanOrEqual(newLines.count, 1, "restored footer must be at most one compact line")
+        XCTAssertEqual(newLines, [])
+
+        func model(extraGeminiLines: [String]) -> UsagePanelModel {
+            var gemini = sanitizedGeminiColumn(selected: .gemini)
+            gemini = UsagePanelColumn(
+                title: gemini.title,
+                accentColor: gemini.accentColor,
+                quota: gemini.quota,
+                secondaryQuota: gemini.secondaryQuota,
+                tertiaryQuota: gemini.tertiaryQuota,
+                rowGroups: gemini.rowGroups,
+                accountLines: gemini.accountLines + extraGeminiLines,
+                refreshLine: gemini.refreshLine,
+                statusLines: gemini.statusLines,
+                statusColor: gemini.statusColor
+            )
+            return UsagePanelModel(
+                codex: sanitizedCodexColumn(),
+                claude: sanitizedClaudeColumn(),
+                gemini: gemini,
+                grok: sanitizedGrokColumn()
+            )
+        }
+
+        let outputDir = ProcessInfo.processInfo.environment["CCMB_VISUAL_PROOF_DIR"]
+        let oldHeight = try renderAndMeasure(
+            model(extraGeminiLines: oldLines),
+            path: outputDir.map { "\($0)/gemini-host-footer-old.png" }
+        )
+        let newHeight = try renderAndMeasure(
+            model(extraGeminiLines: newLines),
+            path: outputDir.map { "\($0)/gemini-host-footer-new.png" }
+        )
+
+        XCTAssertLessThan(newHeight, oldHeight, "restored layout must be shorter than the chatter-filled layout")
+    }
 }

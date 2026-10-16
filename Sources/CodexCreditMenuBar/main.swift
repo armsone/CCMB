@@ -3262,7 +3262,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// (the NAS's 5-hour-session consumption per account); neither ever
     /// borrows the other's points.
     private func nasGeminiHistoryStrip(key: String, accountLabel: String, color: NSColor) -> UsageHistoryStrip? {
-        guard let history = lastNASHistory else { return nil }
+        guard let history = lastNASHistory,
+              let id = NASServiceID(rawValue: key),
+              nasState.canShowHistory(history.series[key], for: id)
+        else { return nil }
         let samples = NASHistoryChartCore.samples(history.series[key], unit: .percent)
         let latest = samples.last.map { UsageConsumptionCore.amountTitle($0.amount, unit: "%") } ?? "기록 없음"
         let failure = lastNASHistoryFetchFailureLabel.map { " · \($0)" } ?? ""
@@ -3559,8 +3562,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let hostLines = NASHostStatusPresentation.footerLines(
             for: id,
             state: nasState,
-            source: dataCollectionSourcePreference,
-            now: Date()
+            source: dataCollectionSourcePreference
         )
         guard let snapshot else {
             return Self.unavailableColumn(
