@@ -1011,6 +1011,76 @@ final class NASSnapshotV2CoreTests: XCTestCase {
         XCTAssertNil(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
     }
 
+    func testCodexDetailsMapToPlanTypeAndResetCredits() throws {
+        let items = """
+        [{"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": 1792400000,
+          "credits": {"balance": 12.5, "unlimited": false},
+          "codex_details": {"plan_type": "plus", "reset_credits_available": 3}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+        let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertEqual(codex.planType, "plus")
+        XCTAssertEqual(codex.resetCredits, 3)
+    }
+
+    /// Zero remaining reset vouchers is a real, distinct quantity from "not
+    /// reported": it must round-trip as 0, not nil.
+    func testCodexDetailsZeroResetCreditsStaysZeroNotNil() throws {
+        let items = """
+        [{"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": 1792400000,
+          "credits": {"balance": 12.5, "unlimited": false},
+          "codex_details": {"plan_type": "pro", "reset_credits_available": 0}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+        let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertEqual(codex.resetCredits, 0)
+    }
+
+    /// An unrecognized future `plan_type` is hidden rather than guessed, and
+    /// a non-integer `reset_credits_available` is dropped — but neither
+    /// malformed field may erase the already-healthy weekly quota/credits.
+    func testCodexDetailsUnknownPlanAndNonIntegerResetCreditsAreHiddenWithoutErasingQuota() throws {
+        let items = """
+        [{"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": 1792400000,
+          "credits": {"balance": 12.5, "unlimited": false},
+          "codex_details": {"plan_type": "some_future_plan", "reset_credits_available": 2.5}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+        let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertNil(codex.planType)
+        XCTAssertNil(codex.resetCredits)
+        XCTAssertEqual(codex.usedPercent ?? -1, 30, accuracy: 0.0001)
+        XCTAssertEqual(codex.creditBalance, 12.5)
+    }
+
+    /// A boolean or string `reset_credits_available` is neither a valid
+    /// count nor silently coerced — it is dropped, and the surrounding
+    /// weekly quota/credits remain untouched.
+    func testCodexDetailsBoolOrStringResetCreditsDroppedWithoutErasingQuota() throws {
+        for malformed in ["true", "\"3\""] {
+            let items = """
+            [{"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": 1792400000,
+              "credits": {"balance": 12.5, "unlimited": false},
+              "codex_details": {"plan_type": "plus", "reset_credits_available": \(malformed)}}]
+            """
+            let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+            let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+            XCTAssertEqual(codex.planType, "plus")
+            XCTAssertNil(codex.resetCredits)
+            XCTAssertEqual(codex.usedPercent ?? -1, 30, accuracy: 0.0001)
+            XCTAssertEqual(codex.creditBalance, 12.5)
+        }
+    }
+
+    /// Missing `codex_details` (old NAS payload, pre-regression-fix) keeps
+    /// mapping succeeding with both fields nil, never dropping the item.
+    func testCodexWithoutDetailsFieldKeepsPlanAndResetCreditsNil() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.valid))
+        let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertNil(codex.planType)
+        XCTAssertNil(codex.resetCredits)
+    }
+
     func testClaudeOverallAndFableMapSeparately() throws {
         let snapshot = try XCTUnwrap(F.parse(F.valid))
         let claude = try XCTUnwrap(NASItemMappingCore.claudeSnapshot(from: snapshot.claude))
@@ -1020,6 +1090,128 @@ final class NASSnapshotV2CoreTests: XCTestCase {
         XCTAssertEqual(fable.usedPercent ?? -1, 55, accuracy: 0.0001)
         XCTAssertEqual(fable.resetsAt, Date(timeIntervalSince1970: 1792400500))
         XCTAssertEqual(claude.quotaSource, "nas")
+    }
+
+    func testClaudeDetailsMapKnownPlanAndExtraUsage() throws {
+        let items = """
+        [{"name": "전체", "window": "session", "window_minutes": 300, "remaining_percent": 60, "resets_at": null},
+         {"name": "전체", "window": "weekly", "window_minutes": 10080, "remaining_percent": 80, "resets_at": null,
+          "claude_details": {"plan_type": "max_20x",
+            "extra_usage": {"is_enabled": true, "monthly_limit_minor": 5000, "used_minor": 1250,
+                             "utilization": 25, "currency": "USD", "decimal_places": 2}}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(items: items), F.gemini(), F.gemini2()])))
+        let claude = try XCTUnwrap(NASItemMappingCore.claudeSnapshot(from: snapshot.claude))
+        XCTAssertEqual(claude.planTitle, "Claude Max 20×")
+        let extraUsage = try XCTUnwrap(claude.extraUsage)
+        XCTAssertEqual(extraUsage.isEnabled, true)
+        XCTAssertEqual(extraUsage.limitCents, 5000)
+        XCTAssertEqual(extraUsage.usedCents, 1250)
+        XCTAssertEqual(extraUsage.currency, "USD")
+    }
+
+    /// `is_enabled: false` is a distinct, known "disabled" state: it must
+    /// round-trip as `false`, not `nil`, and never carries fake monetary
+    /// values.
+    func testClaudeExtraUsageDisabledStaysFalseWithNilMonetary() throws {
+        let items = """
+        [{"name": "전체", "window": "weekly", "window_minutes": 10080, "remaining_percent": 80, "resets_at": null,
+          "claude_details": {"plan_type": "pro",
+            "extra_usage": {"is_enabled": false, "monthly_limit_minor": null, "used_minor": null,
+                             "utilization": null, "currency": null, "decimal_places": null}}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(items: items), F.gemini(), F.gemini2()])))
+        let claude = try XCTUnwrap(NASItemMappingCore.claudeSnapshot(from: snapshot.claude))
+        let extraUsage = try XCTUnwrap(claude.extraUsage)
+        XCTAssertEqual(extraUsage.isEnabled, false)
+        XCTAssertNil(extraUsage.limitCents)
+        XCTAssertNil(extraUsage.usedCents)
+    }
+
+    /// Unknown units must never be divided by 100 and labeled as dollars.
+    func testClaudeExtraUsageForeignCurrencyOrExponentNeverPretendsUSD() throws {
+        for details in [
+            #"{"is_enabled": true, "monthly_limit_minor": 5000, "used_minor": 1250, "currency": "EUR", "decimal_places": 2}"#,
+            #"{"is_enabled": true, "monthly_limit_minor": 5000, "used_minor": 1250, "currency": "USD", "decimal_places": null}"#,
+            #"{"is_enabled": true, "monthly_limit_minor": 5000, "used_minor": 1250}"#,
+        ] {
+            let items = """
+            [{"name": "전체", "window": "weekly", "window_minutes": 10080, "remaining_percent": 80, "resets_at": null,
+              "claude_details": {"plan_type": "pro", "extra_usage": \(details)}}]
+            """
+            let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(items: items), F.gemini(), F.gemini2()])), details)
+            let claude = try XCTUnwrap(NASItemMappingCore.claudeSnapshot(from: snapshot.claude), details)
+            let extraUsage = try XCTUnwrap(claude.extraUsage, details)
+            XCTAssertNil(extraUsage.limitCents, details)
+            XCTAssertNil(extraUsage.usedCents, details)
+            XCTAssertEqual(extraUsage.isEnabled, true, details)
+        }
+    }
+
+    func testClaudeExtraUsageKnownExponentsConvertToCents() throws {
+        for (places, expected) in [(0, 125000.0), (3, 125.0), (6, 0.125)] {
+            let extra = NASClaudeExtraUsage(isEnabled: true, monthlyLimitMinor: nil, usedMinor: 1250,
+                utilization: nil, currency: "USD", decimalPlaces: places)
+            let result = try XCTUnwrap(NASItemMappingCore.claudeExtraUsage(from: extra))
+            XCTAssertEqual(try XCTUnwrap(result.usedCents), expected, accuracy: 0.000001)
+        }
+    }
+
+    /// An unrecognized future `plan_type` is hidden rather than guessed, and
+    /// a malformed `extra_usage` sub-field is simply dropped — neither may
+    /// erase the already-healthy weekly quota carried by the rest of the
+    /// item (mirrors the existing `codex_details` contract).
+    func testClaudeDetailsUnknownPlanAndMalformedExtraUsageAreHiddenWithoutErasingQuota() throws {
+        let items = """
+        [{"name": "전체", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": null,
+          "claude_details": {"plan_type": "some_future_plan",
+            "extra_usage": {"is_enabled": "yes", "monthly_limit_minor": -5, "used_minor": "1250",
+                             "utilization": 150, "currency": "US Dollar", "decimal_places": 9}}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(), F.claude(items: items), F.gemini(), F.gemini2()])))
+        let claude = try XCTUnwrap(NASItemMappingCore.claudeSnapshot(from: snapshot.claude))
+        XCTAssertNil(claude.planTitle)
+        XCTAssertNil(claude.extraUsage)
+        XCTAssertEqual(claude.weeklyUsedPercent ?? -1, 30, accuracy: 0.0001)
+    }
+
+    /// Missing `claude_details` (old NAS payload) keeps mapping succeeding
+    /// with both fields nil, never dropping the item.
+    func testClaudeWithoutDetailsFieldKeepsPlanTitleAndExtraUsageNil() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.valid))
+        let claude = try XCTUnwrap(NASItemMappingCore.claudeSnapshot(from: snapshot.claude))
+        XCTAssertNil(claude.planTitle)
+        XCTAssertNil(claude.extraUsage)
+    }
+
+    /// A `claude_details`/`extra_usage` object on a *non*-Claude service
+    /// (e.g. Codex) is never read — `allowsClaudeDetails` is Claude-only.
+    func testClaudeDetailsAreIgnoredOnNonClaudeServices() throws {
+        let items = """
+        [{"name": "codex", "window": "weekly", "window_minutes": 10080, "remaining_percent": 70, "resets_at": null,
+          "claude_details": {"plan_type": "max_20x", "extra_usage": {"is_enabled": true}}}]
+        """
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [F.codex(items: items), F.claude(), F.gemini(), F.gemini2()])))
+        let codex = try XCTUnwrap(NASItemMappingCore.codexSnapshot(from: snapshot.codex))
+        XCTAssertEqual(codex.usedPercent ?? -1, 30, accuracy: 0.0001)
+    }
+
+    /// `ClaudeUsageSnapshot.sharedPayload`/`snapshot(fromSharedPayload:)`
+    /// round-trip `planTitle` and `extraUsage.isEnabled` without altering
+    /// any other field.
+    func testClaudePlanTitleAndExtraUsageIsEnabledSurviveSharedPayloadRoundTrip() throws {
+        let snapshot = ClaudeUsageSnapshot(
+            quotaSource: "nas",
+            weeklyUsedPercent: 20,
+            publishedAt: Date(timeIntervalSince1970: 1_792_400_000),
+            extraUsage: ClaudeExtraUsage(limitCents: 5000, usedCents: 1250, currency: "USD", isEnabled: true),
+            planTitle: "Claude Max 20×"
+        )
+        let payload = ClaudeUsageCore.sharedPayload(from: snapshot)
+        let restored = try XCTUnwrap(ClaudeUsageCore.snapshot(fromSharedPayload: payload))
+        XCTAssertEqual(restored.planTitle, "Claude Max 20×")
+        XCTAssertEqual(restored.extraUsage?.isEnabled, true)
+        XCTAssertEqual(restored.extraUsage?.limitCents, 5000)
     }
 
     func testGeminiReadsOnlyGeminiModelsAndAccountsStayFixed() throws {
@@ -1234,6 +1426,81 @@ final class NASFourServiceStateTests: XCTestCase {
         XCTAssertNil(NASFourServiceState.decodeCache(Data(#"{"version": 1, "source": "local", "services": {}}"#.utf8)))
         XCTAssertNil(NASFourServiceState.decodeCache(Data("garbage".utf8)))
     }
+
+    /// The single visible Gemini card always picks account1 unless the
+    /// `"nas"` execution host itself is reported as actually running on
+    /// account2 with switching enabled — it is never guessed from quota
+    /// values, from a non-`"nas"` host (e.g. a Mac), or from a `return_state`
+    /// (which marks the primary's own confirmed return, not a secondary
+    /// selection).
+    func testSelectedGeminiServiceIDNeverGuessedFromQuota() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        XCTAssertEqual(state.selectedGeminiServiceID, .gemini)
+        XCTAssertEqual(state.selectedGeminiSnapshot?.fiveHourRemainingFraction, state.geminiSnapshot?.fiveHourRemainingFraction)
+
+        // Switching disabled: always account1, even with hosts present.
+        let disabledButHosted = F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: F.twoHosts,
+            autoSwitch: "false"
+        )
+        var disabledState = NASFourServiceState()
+        disabledState.apply(try XCTUnwrap(F.parse(disabledButHosted)))
+        XCTAssertEqual(disabledState.selectedGeminiServiceID, .gemini)
+
+        // Switching enabled and a non-"nas" host (e.g. a Mac) is running on
+        // account2: that host carries no selection weight, so the card
+        // stays on the primary.
+        let macRunningAccount2 = F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: "[" + F.host(id: "tm-mini", account: "\"account2\"", phase: "\"running\"") + "]",
+            autoSwitch: "true"
+        )
+        var macRunningState = NASFourServiceState()
+        macRunningState.apply(try XCTUnwrap(F.parse(macRunningAccount2)))
+        XCTAssertEqual(macRunningState.selectedGeminiServiceID, .gemini)
+
+        // Switching enabled and the "nas" host itself is actually running
+        // on account2.
+        let nasRunningAccount2 = F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: "[" + F.host(id: "nas", account: "\"account2\"", phase: "\"running\"") + "]",
+            autoSwitch: "true"
+        )
+        var runningState = NASFourServiceState()
+        runningState.apply(try XCTUnwrap(F.parse(nasRunningAccount2)))
+        XCTAssertEqual(runningState.selectedGeminiServiceID, .gemini2)
+        XCTAssertEqual(runningState.selectedGeminiSnapshot?.fiveHourRemainingFraction, runningState.gemini2Snapshot?.fiveHourRemainingFraction)
+
+        // Switching enabled, the "nas" host is not running (merely
+        // returning) but reports a confirmed return: that field marks the
+        // primary's own confirmed return, never a remembered secondary
+        // selection, so the card falls back to the primary.
+        let nasReturningAccount2 = F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: "[" + F.host(
+                id: "nas",
+                account: "\"account2\"",
+                phase: "\"returning\"",
+                returnState: "\"confirmed\""
+            ) + "]",
+            autoSwitch: "true"
+        )
+        var confirmedState = NASFourServiceState()
+        confirmedState.apply(try XCTUnwrap(F.parse(nasReturningAccount2)))
+        XCTAssertEqual(confirmedState.selectedGeminiServiceID, .gemini)
+
+        // Switching enabled, no hosts at all: falls back to the primary.
+        let idleEnabled = F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: "[]",
+            autoSwitch: "true"
+        )
+        var idleState = NASFourServiceState()
+        idleState.apply(try XCTUnwrap(F.parse(idleEnabled)))
+        XCTAssertEqual(idleState.selectedGeminiServiceID, .gemini)
+    }
 }
 
 final class NASHostStatusTests: XCTestCase {
@@ -1395,6 +1662,31 @@ final class NASHostStatusTests: XCTestCase {
         state.apply(try XCTUnwrap(F.parse(F.withHosts)))
         XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .localMac, now: now), [])
         XCTAssertEqual(NASHostStatusPresentation.footerLines(for: .gemini2, state: state, source: .localMac, now: now), [])
+    }
+
+    /// A shared idle host (no `execution_account`) with a non-meaningful
+    /// `not_required` return must not pad both cards' footers with the same
+    /// stale heartbeat age and the same no-op return line.
+    func testIdleCommonHostDoesNotDuplicateStaleHeartbeatOrNonMeaningfulReturn() throws {
+        let idleCommonHosts = "[" + F.host(
+            id: "shared-idle-1", run: "null", account: "null", phase: "\"idle\"",
+            changedAt: "1792050000", heartbeatAt: "1792050240", returnState: "\"not_required\""
+        ) + "," + F.host(
+            id: "shared-idle-2", run: "null", account: "null", phase: "\"idle\"",
+            changedAt: "1792050000", heartbeatAt: "1792050240", returnState: "\"not_required\""
+        ) + "]"
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: idleCommonHosts,
+            autoSwitch: "true"
+        ))))
+        for id: NASServiceID in [.gemini, .gemini2] {
+            let lines = NASHostStatusPresentation.footerLines(for: id, state: state, source: .nas, now: now)
+            XCTAssertFalse(lines.contains(where: { $0.contains("신호") }), "idle shared host heartbeat is not this card's liveness")
+            XCTAssertFalse(lines.contains(where: { $0.contains("복귀") }), "not_required carries no decision-relevant information")
+            XCTAssertLessThanOrEqual(lines.count, 5)
+        }
     }
 
     func testFooterRendersOnlySanitizedFields() throws {
@@ -1763,7 +2055,7 @@ final class NASTransportTests: XCTestCase {
 }
 
 @MainActor
-final class FourServiceCardLayoutTests: XCTestCase {
+final class ThreeServiceCardLayoutTests: XCTestCase {
     private func column(_ title: String, percent: Double? = nil) -> UsagePanelColumn {
         UsagePanelColumn(
             title: title,
@@ -1784,75 +2076,50 @@ final class FourServiceCardLayoutTests: XCTestCase {
         UsagePanelModel(
             codex: column("Codex", percent: 70),
             claude: column("Claude", percent: 60),
-            gemini: column("Gemini 본계정", percent: 80),
-            gemini2: column("Gemini 부계정"),
+            gemini: column("Gemini · 주", percent: 80),
             grok: column("Grok")
         )
     }
 
-    func testModelExposesExactlyFourCardsInFixedOrder() {
-        XCTAssertEqual(model().cards.map(\.title), ["Codex", "Claude", "Gemini 본계정", "Gemini 부계정"])
-        XCTAssertFalse(model().cards.map(\.title).contains("Grok"))
+    func testModelExposesExactlyThreeCardsInFixedOrder() {
+        let m = model()
+        XCTAssertEqual([m.codex, m.claude, m.gemini].map(\.title), ["Codex", "Claude", "Gemini · 주"])
     }
 
-    func testCardGridHasFourColumnsAndControlGridSpansSameWidth() {
-        XCTAssertEqual(UsagePanelLayout.cardColumnCount, 4)
-        XCTAssertEqual(UsagePanelLayout.cardColumnX.count, 4)
-        let lastCardEdge = UsagePanelLayout.cardColumnX[3] + UsagePanelLayout.cardColumnWidth + UsagePanelLayout.sidePadding
+    func testCardGridHasThreeColumnsSpanningFullWidth() {
+        XCTAssertEqual(UsagePanelLayout.columnCount, 3)
+        XCTAssertEqual(UsagePanelLayout.columnX.count, 3)
+        let lastCardEdge = UsagePanelLayout.columnX[2] + UsagePanelLayout.columnWidth + UsagePanelLayout.sidePadding
         XCTAssertEqual(lastCardEdge, UsagePanelLayout.viewWidth, accuracy: 0.001)
-        let lastControlEdge = UsagePanelLayout.columnX[2] + UsagePanelLayout.columnWidth + UsagePanelLayout.sidePadding
-        XCTAssertEqual(lastControlEdge, UsagePanelLayout.viewWidth, accuracy: 0.001)
-        for index in 0..<3 {
-            XCTAssertGreaterThan(UsagePanelLayout.cardDividerX(after: index), UsagePanelLayout.cardColumnX[index] + UsagePanelLayout.cardColumnWidth)
-            XCTAssertLessThan(UsagePanelLayout.cardDividerX(after: index), UsagePanelLayout.cardColumnX[index + 1])
+        for index in 0..<2 {
+            XCTAssertGreaterThan(UsagePanelLayout.dividerX(after: index), UsagePanelLayout.columnX[index] + UsagePanelLayout.columnWidth)
+            XCTAssertLessThan(UsagePanelLayout.dividerX(after: index), UsagePanelLayout.columnX[index + 1])
         }
     }
 
-    func testSplitPanelRendersFourCardsAtFullWidth() {
+    func testSplitPanelRendersExactlyThreeCardsAtFullWidth() {
         let view = SplitUsagePanelView()
         view.apply(model())
         XCTAssertEqual(view.frame.width, UsagePanelLayout.viewWidth, accuracy: 0.001)
         let value = view.accessibilityValue() as? String ?? ""
-        XCTAssertTrue(value.contains("Gemini 본계정"))
-        XCTAssertTrue(value.contains("Gemini 부계정 정보 없음"))
+        XCTAssertTrue(value.contains("80%"))
+        XCTAssertFalse(value.contains("Gemini 부계정"))
         let cardFrames = view.subviews
-            .filter { $0.frame.width == UsagePanelLayout.cardColumnWidth }
+            .filter { $0.frame.width == UsagePanelLayout.columnWidth }
             .map(\.frame.minX)
             .sorted()
-        XCTAssertEqual(cardFrames, UsagePanelLayout.cardColumnX)
+        XCTAssertEqual(cardFrames, UsagePanelLayout.columnX)
     }
 
-    func testHistoryChartShowsAccountTwoStripUnderItsOwnCard() throws {
-        let view = UsageHistoryChartView()
-        let strip = UsageHistoryStrip(
-            caption: "갱신당 세션 4%",
-            samples: [UsageConsumptionSample(at: Date(timeIntervalSince1970: 1), amount: 4)],
-            slotCount: 3,
-            unitSuffix: "%",
-            color: .systemGreen,
-            accessibilityValue: "부계정"
-        )
-        XCTAssertTrue(view.apply(codex: nil, claude: nil, gemini: nil, gemini2: strip, grok: nil))
-        let caption = try XCTUnwrap(view.subviews.compactMap { $0 as? NSTextField }.first { !$0.isHidden })
-        XCTAssertEqual(caption.stringValue, "갱신당 세션 4%")
-        XCTAssertGreaterThanOrEqual(caption.frame.minX, UsagePanelLayout.cardColumnX[3])
-        // No strips at all hides the row rather than drawing zero bars.
-        XCTAssertFalse(view.apply(codex: nil, claude: nil, gemini: nil, gemini2: nil, grok: nil))
-    }
-
-    func testAppWiresFourCardsAndNASOnlyHistoryThroughEveryPanel() throws {
+    func testAppNeverWiresASecondGeminiCardOrHistoryStrip() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("../../Sources/CodexCreditMenuBar/main.swift")
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        // Status menu chart, dropdown and pinned panel all take the same
-        // four strips, including account2's.
-        XCTAssertEqual(source.components(separatedBy: "gemini2History: strips.gemini2").count - 1, 2)
-        XCTAssertTrue(source.contains("gemini2: strips.gemini2"))
-        // The old nested account2 ring and the local-fallback NAS history are gone.
+        XCTAssertFalse(source.contains("gemini2History"))
+        XCTAssertFalse(source.contains("gemini2: strips.gemini2"))
         XCTAssertFalse(source.contains("account2Snapshot"))
-        XCTAssertFalse(source.contains("nasHistorySeries()"))
     }
 }
 
@@ -3219,6 +3486,16 @@ final class ClaudeUsageFetchOutcomeTests: XCTestCase {
         XCTAssertEqual(UsageConsumptionCore.amountTitle(0, unit: "%"), "0%")
         // 100.00 must survive trailing-zero trimming intact.
         XCTAssertEqual(UsageConsumptionCore.amountTitle(100, unit: ""), "100")
+    }
+
+    /// A positive percent delta too small for one decimal (e.g. a nearly-idle
+    /// refresh) must not collapse to the same "0%" a true zero reads as —
+    /// the chart bar it labels is visibly non-empty.
+    func testAmountTitlePercentNeverFlattensPositiveDeltaToZero() {
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(0.02, unit: "%"), "<0.1%")
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(0.04, unit: "%"), "<0.1%")
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(0, unit: "%"), "0%")
+        XCTAssertEqual(UsageConsumptionCore.amountTitle(0.3, unit: "%"), "0.3%")
     }
 
     func testNewestSampleIsDrawnInTheLeftmostSlot() {

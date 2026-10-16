@@ -3048,31 +3048,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             codex: strips.codex,
             claude: strips.claude,
             gemini: strips.gemini,
-            gemini2: strips.gemini2,
             grok: strips.grok
         )
         historyChartItem.isHidden = !hasContent
     }
 
-    /// The one place every chart (status menu, dropdown, pinned panel)
-    /// gets its strips from. NAS mode draws NAS history only — a series
-    /// that has not parsed yet is simply absent, never filled from this
-    /// Mac's local trackers — and local mode draws the local trackers only,
-    /// with no account2 strip because nothing local measures account2.
+    /// The one place every chart (status menu, dropdown, pinned panel) gets
+    /// its strips from. NAS mode draws the NAS history for whichever
+    /// account `nasState.selectedGeminiServiceID` currently names — never
+    /// both accounts at once — and local mode draws the local trackers.
     private func currentHistoryStrips() -> (
         codex: UsageHistoryStrip?,
         claude: UsageHistoryStrip?,
         gemini: UsageHistoryStrip?,
-        gemini2: UsageHistoryStrip?,
         grok: UsageHistoryStrip?
     ) {
         switch dataCollectionSourcePreference {
         case .nas:
+            let selected = nasState.selectedGeminiServiceID
             return (
                 nasCodexHistoryStrip(),
                 nasClaudeHistoryStrip(),
-                nasGeminiHistoryStrip(key: "gemini", accountLabel: "본계정", color: UsageBrandColors.geminiText),
-                nasGeminiHistoryStrip(key: "gemini2", accountLabel: "부계정", color: UsageBrandColors.geminiGradient[2]),
+                nasGeminiHistoryStrip(
+                    key: selected.rawValue,
+                    accountLabel: selected == .gemini2 ? "부계정" : "본계정",
+                    color: UsageBrandColors.geminiText
+                ),
                 grokHistoryStrip()
             )
         case .localMac:
@@ -3080,7 +3081,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 lastSnapshot.flatMap { codexHistoryStrip(from: $0) },
                 claudeHistoryStrip(),
                 geminiHistoryStrip(),
-                nil,
                 grokHistoryStrip()
             )
         }
@@ -3400,22 +3400,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     source: .localMac,
                     colors: Array(UsageBrandColors.geminiGradient.prefix(2))
                 ),
-                // Nothing on this Mac measures the fixed account2 identity;
-                // say so instead of showing account1's numbers or zeros.
-                gemini2: Self.unavailableColumn(
-                    title: "Gemini 부계정",
-                    accentColor: UsageBrandColors.geminiText,
-                    reason: "이 Mac 직접 조회에서는 부계정을 조회하지 않습니다",
-                    detail: "놀이터(기본)를 선택하면 표시됩니다"
-                ),
                 grok: grok
             )
         case .nas:
+            // Only the currently selected fixed account is ever rendered as
+            // the Gemini card; the other account's detail stays in NAS
+            // server status, not on this Mac's menu.
+            let selected = nasState.selectedGeminiServiceID
+            let title = selected == .gemini2 ? "Gemini · 부" : "Gemini · 주"
             return UsagePanelModel(
                 codex: nasCodexColumn(),
                 claude: nasClaudeColumn(),
-                gemini: nasGeminiColumn(id: .gemini, title: "Gemini 본계정", snapshot: nasState.geminiSnapshot),
-                gemini2: nasGeminiColumn(id: .gemini2, title: "Gemini 부계정", snapshot: nasState.gemini2Snapshot),
+                gemini: nasGeminiColumn(id: selected, title: title, snapshot: nasState.selectedGeminiSnapshot),
                 grok: grok
             )
         }
@@ -3552,13 +3548,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         )
     }
 
-    /// Gemini account1/account2 cards. Each reads only its own fixed slot,
-    /// so a failure or empty value in one never shows the other's numbers.
+    /// The single visible Gemini card, reading only the fixed slot named by
+    /// `id` (the currently selected account) — never another account's
+    /// numbers, even while that other account is active on NAS.
     private func nasGeminiColumn(id: NASServiceID, title: String, snapshot: GeminiUsageSnapshot?) -> UsagePanelColumn {
         let slot = nasState.slot(id)
-        let colors = id == .gemini2
-            ? Array(UsageBrandColors.geminiGradient.suffix(2))
-            : Array(UsageBrandColors.geminiGradient.prefix(2))
+        let colors = Array(UsageBrandColors.geminiGradient.prefix(2))
         // Host/return status is shown even while the card has no quota
         // values; it never changes the card's own fetched/stale/error state.
         let hostLines = NASHostStatusPresentation.footerLines(
@@ -3739,9 +3734,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         var extraRows: [UsagePanelRow] = []
         let fableLimit = ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)
 
-        // The plan file is this Mac's own Claude metadata; NAS cards never
-        // read it.
-        if nasSlot == nil, let planTitle = ClaudePlanStore.readTitle() {
+        // A NAS-reported plan (from the fresh, same-token `claude_details`
+        // profile/usage data) always takes priority when present. The local
+        // `.claude.json` file read is this Mac's own metadata and is kept
+        // only as a fallback for a local (non-NAS) card lacking a remote
+        // plan.
+        if let planTitle = snapshot.planTitle ?? (nasSlot == nil ? ClaudePlanStore.readTitle() : nil) {
             summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
         }
 
@@ -3942,8 +3940,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         let sessionColor = colors.first ?? accent
         let weeklyColor = colors.count > 1 ? colors[1] : accent
-        let sessionQuota = makeQuota(caption: sessionCaption, remaining: sessionRemaining, color: sessionColor, accessibilityLabel: "\(accessibilityPrefix) 세션 사용량")
-        let weeklyQuota = makeQuota(caption: weeklyCaption, remaining: weeklyRemaining, color: weeklyColor, accessibilityLabel: "\(accessibilityPrefix) 주간 사용량")
+        // The ring caption matches the "주간 남음"/"세션 남음" wording every
+        // other card's gauge uses; the row label above keeps the bare
+        // "세션"/"주간" prefix ("세션 초기화") unchanged.
+        let sessionQuota = makeQuota(caption: "\(sessionCaption) 남음", remaining: sessionRemaining, color: sessionColor, accessibilityLabel: "\(accessibilityPrefix) 세션 사용량")
+        let weeklyQuota = makeQuota(caption: "\(weeklyCaption) 남음", remaining: weeklyRemaining, color: weeklyColor, accessibilityLabel: "\(accessibilityPrefix) 주간 사용량")
 
         var rows: [UsagePanelRow] = []
         if let planTitle = snapshot?.planTitle {
@@ -4106,6 +4107,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// `extraUsage`'s `limitCents`/`usedCents` are cents-denominated
     /// regardless of which API field variant populated them.
     private static func extraUsageTitle(_ extraUsage: ClaudeExtraUsage) -> String {
+        if extraUsage.isEnabled == false { return "사용 안 함" }
         let currency = extraUsage.currency ?? "USD"
         func amount(_ cents: Double?) -> String? {
             guard let cents else { return nil }
@@ -4693,7 +4695,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             codexHistory: strips.codex,
             claudeHistory: strips.claude,
             geminiHistory: strips.gemini,
-            gemini2History: strips.gemini2,
             grokHistory: strips.grok,
             codexRefreshInterval: Int(refreshInterval),
             claudeRefreshInterval: Int(claudeRefreshInterval),
@@ -4727,7 +4728,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             codexHistory: strips.codex,
             claudeHistory: strips.claude,
             geminiHistory: strips.gemini,
-            gemini2History: strips.gemini2,
             grokHistory: strips.grok,
             codexRefreshInterval: Int(refreshInterval),
             claudeRefreshInterval: Int(claudeRefreshInterval),

@@ -126,6 +126,13 @@ enum CodexPlanCore {
         default: return nil
         }
     }
+
+    /// Exact keys this switch recognizes, lowercased. Anything else (including
+    /// future unknown `planType` values) is hidden rather than guessed.
+    static let allowlist: Set<String> = [
+        "free", "go", "plus", "pro", "prolite", "team", "self_serve_business_usage_based",
+        "business", "ent26", "enterprise", "enterprise_cbp_usage_based", "edu",
+    ]
 }
 
 /// One bar of a column's consumption strip: how much the tracked metric moved
@@ -154,8 +161,13 @@ enum UsageConsumptionCore {
     /// the chart view needs the same formatting.
     static func amountTitle(_ amount: Double, unit: String) -> String {
         if unit == "%" {
-            return String(format: "%.1f%%", max(0, amount))
+            let clamped = max(0, amount)
+            let formatted = String(format: "%.1f%%", clamped)
                 .replacingOccurrences(of: ".0%", with: "%")
+            // A true zero reads "0%"; a positive delta too small for one
+            // decimal (e.g. 0.02%) must not collapse to that same "0%" —
+            // the bar it labels is visibly non-empty.
+            return (clamped > 0 && formatted == "0%") ? "<0.1%" : formatted
         }
         guard amount > 0 else { return "0\(unit)" }
         let format = amount < 0.01 ? "%.4f" : "%.2f"
@@ -762,6 +774,24 @@ enum ClaudePlanCore {
         default: return nil
         }
     }
+
+    /// Exact `claude_details.plan_type` values the NAS backend reports,
+    /// lowercased. Anything else is hidden rather than guessed.
+    static let nasAllowlist: Set<String> = ["max_5x", "max_20x", "max", "pro", "team", "enterprise"]
+
+    /// Display title for a NAS-reported `plan_type`, already restricted to
+    /// `nasAllowlist` by the caller.
+    static func title(fromNASPlanType planType: String) -> String? {
+        switch planType {
+        case "max_5x": return "Claude Max 5×"
+        case "max_20x": return "Claude Max 20×"
+        case "max": return "Claude Max"
+        case "pro": return "Claude Pro"
+        case "team": return "Claude Team"
+        case "enterprise": return "Claude Enterprise"
+        default: return nil
+        }
+    }
 }
 
 /// Pure parsing and shared-payload logic for the Gemini/Antigravity `agy`
@@ -1148,10 +1178,25 @@ struct NASUsageItem: Equatable {
     let hasCredits: Bool
     let creditBalance: Double?
     let creditsUnlimited: Bool
+    /// Codex-only `codex_details` object (confirmed app-server plan/reset
+    /// voucher count). `hasCodexDetails` records that the object was present
+    /// at all, independent of whether its two fields were individually
+    /// recognizable.
+    let hasCodexDetails: Bool
+    let codexPlanType: String?
+    let codexResetCreditsAvailable: Int?
+    /// Claude-only `claude_details` object on the `전체` aggregate item
+    /// (confirmed `/api/oauth/profile`/usage-derived plan and optional
+    /// pay-as-you-go spend). `hasClaudeDetails` records that the object was
+    /// present at all, independent of whether its sub-fields were
+    /// individually recognizable.
+    let hasClaudeDetails: Bool
+    let claudePlanType: String?
+    let claudeExtraUsage: NASClaudeExtraUsage?
 
     var remainingFraction: Double { remainingPercent / 100 }
 
-    static func parse(_ value: Any?, allowsCredits: Bool) -> NASUsageItem? {
+    static func parse(_ value: Any?, allowsCredits: Bool, allowsClaudeDetails: Bool = false) -> NASUsageItem? {
         guard let object = value as? [String: Any] else { return nil }
         guard let name = object["name"] as? String, !name.isEmpty, name.count <= 64 else { return nil }
         guard let rawWindow = object["window"] as? String, let window = Window(rawValue: rawWindow) else { return nil }
@@ -1191,6 +1236,38 @@ struct NASUsageItem: Equatable {
             }
         }
 
+        // Unlike `credits`, a malformed `codex_details` sub-field never fails
+        // the whole item: it only drops that one field, so a foreign/invalid
+        // plan_type or reset_credits_available cannot erase the already
+        // healthy weekly quota/credit balance carried by the rest of the item.
+        var hasCodexDetails = false
+        var codexPlanType: String?
+        var codexResetCreditsAvailable: Int?
+        if allowsCredits, !NASJSON.isAbsent(object["codex_details"]), let details = object["codex_details"] as? [String: Any] {
+            hasCodexDetails = true
+            if let planType = details["plan_type"] as? String, CodexPlanCore.allowlist.contains(planType.lowercased()) {
+                codexPlanType = planType.lowercased()
+            }
+            if let resetCredits = NASJSON.integer(details["reset_credits_available"]), resetCredits >= 0 {
+                codexResetCreditsAvailable = resetCredits
+            }
+        }
+
+        // Like `codex_details`, a malformed `claude_details` sub-field never
+        // fails the whole item: it only drops that one field.
+        var hasClaudeDetails = false
+        var claudePlanType: String?
+        var claudeExtraUsage: NASClaudeExtraUsage?
+        if allowsClaudeDetails, !NASJSON.isAbsent(object["claude_details"]), let details = object["claude_details"] as? [String: Any] {
+            hasClaudeDetails = true
+            if let planType = details["plan_type"] as? String, ClaudePlanCore.nasAllowlist.contains(planType.lowercased()) {
+                claudePlanType = planType.lowercased()
+            }
+            if !NASJSON.isAbsent(details["extra_usage"]) {
+                claudeExtraUsage = NASClaudeExtraUsage.parse(details["extra_usage"])
+            }
+        }
+
         return NASUsageItem(
             name: name,
             window: window,
@@ -1198,7 +1275,13 @@ struct NASUsageItem: Equatable {
             resetsAt: resetsAt,
             hasCredits: hasCredits,
             creditBalance: creditBalance,
-            creditsUnlimited: creditsUnlimited
+            creditsUnlimited: creditsUnlimited,
+            hasCodexDetails: hasCodexDetails,
+            codexPlanType: codexPlanType,
+            codexResetCreditsAvailable: codexResetCreditsAvailable,
+            hasClaudeDetails: hasClaudeDetails,
+            claudePlanType: claudePlanType,
+            claudeExtraUsage: claudeExtraUsage
         )
     }
 
@@ -1216,7 +1299,93 @@ struct NASUsageItem: Equatable {
                 "unlimited": creditsUnlimited,
             ]
         }
+        if hasCodexDetails {
+            object["codex_details"] = [
+                "plan_type": codexPlanType.map { $0 as Any } ?? NSNull(),
+                "reset_credits_available": codexResetCreditsAvailable.map { $0 as Any } ?? NSNull(),
+            ]
+        }
+        if hasClaudeDetails {
+            object["claude_details"] = [
+                "plan_type": claudePlanType.map { $0 as Any } ?? NSNull(),
+                "extra_usage": claudeExtraUsage?.jsonObject() ?? NSNull(),
+            ]
+        }
         return object
+    }
+}
+
+/// Claude-only pay-as-you-go spend sub-object of `claude_details`. Every
+/// field is validated and retained independently: an unrecognizable
+/// `currency`/`decimal_places` never discards an otherwise-valid
+/// `is_enabled`/`utilization`, and vice versa.
+struct NASClaudeExtraUsage: Equatable {
+    let isEnabled: Bool?
+    let monthlyLimitMinor: Double?
+    let usedMinor: Double?
+    let utilization: Double?
+    let currency: String?
+    let decimalPlaces: Int?
+
+    static func parse(_ value: Any?) -> NASClaudeExtraUsage? {
+        guard let object = value as? [String: Any] else { return nil }
+
+        var isEnabled: Bool?
+        if !NASJSON.isAbsent(object["is_enabled"]) {
+            isEnabled = NASJSON.bool(object["is_enabled"])
+        }
+        var monthlyLimitMinor: Double?
+        if !NASJSON.isAbsent(object["monthly_limit_minor"]) {
+            if let value = NASJSON.number(object["monthly_limit_minor"]), value >= 0 {
+                monthlyLimitMinor = value
+            }
+        }
+        var usedMinor: Double?
+        if !NASJSON.isAbsent(object["used_minor"]) {
+            if let value = NASJSON.number(object["used_minor"]), value >= 0 {
+                usedMinor = value
+            }
+        }
+        var utilization: Double?
+        if !NASJSON.isAbsent(object["utilization"]) {
+            if let value = NASJSON.number(object["utilization"]), (0...100).contains(value) {
+                utilization = value
+            }
+        }
+        var currency: String?
+        if let rawCurrency = object["currency"] as? String, rawCurrency == "USD" {
+            currency = rawCurrency
+        }
+        var decimalPlaces: Int?
+        if !NASJSON.isAbsent(object["decimal_places"]) {
+            if let value = NASJSON.integer(object["decimal_places"]), (0...6).contains(value) {
+                decimalPlaces = value
+            }
+        }
+
+        guard isEnabled != nil || monthlyLimitMinor != nil || usedMinor != nil
+            || utilization != nil || currency != nil || decimalPlaces != nil
+        else { return nil }
+
+        return NASClaudeExtraUsage(
+            isEnabled: isEnabled,
+            monthlyLimitMinor: monthlyLimitMinor,
+            usedMinor: usedMinor,
+            utilization: utilization,
+            currency: currency,
+            decimalPlaces: decimalPlaces
+        )
+    }
+
+    func jsonObject() -> [String: Any] {
+        [
+            "is_enabled": isEnabled.map { $0 as Any } ?? NSNull(),
+            "monthly_limit_minor": monthlyLimitMinor.map { $0 as Any } ?? NSNull(),
+            "used_minor": usedMinor.map { $0 as Any } ?? NSNull(),
+            "utilization": utilization.map { $0 as Any } ?? NSNull(),
+            "currency": currency.map { $0 as Any } ?? NSNull(),
+            "decimal_places": decimalPlaces.map { $0 as Any } ?? NSNull(),
+        ]
     }
 }
 
@@ -1286,7 +1455,7 @@ struct NASServiceEntry: Equatable {
         }
         var items: [NASUsageItem] = []
         for rawItem in rawItems {
-            guard let item = NASUsageItem.parse(rawItem, allowsCredits: id == .codex) else {
+            guard let item = NASUsageItem.parse(rawItem, allowsCredits: id == .codex, allowsClaudeDetails: id == .claude) else {
                 return .entry(schemaInvalid(id))
             }
             items.append(item)
@@ -1616,11 +1785,11 @@ enum NASItemMappingCore {
         guard let weekly = unique(entry.items, window: .weekly, matching: { $0 == "codex" }) else { return nil }
         return RateLimitSnapshot(
             accountID: nil,
-            planType: nil,
+            planType: weekly.codexPlanType,
             usedPercent: 100 - weekly.remainingPercent,
             windowDurationMinutes: NASUsageItem.Window.weekly.minutes,
             resetsAt: weekly.resetsAt,
-            resetCredits: nil,
+            resetCredits: weekly.codexResetCreditsAvailable,
             creditBalance: weekly.creditBalance,
             sparkUsedPercent: nil,
             sparkWindowDurationMinutes: nil,
@@ -1655,6 +1824,11 @@ enum NASItemMappingCore {
         }
 
         guard session != nil || weekly != nil || !modelLimits.isEmpty else { return nil }
+        // `claude_details` lives on the `전체` item; it can arrive on either
+        // the weekly or session entry, so both are checked, weekly first.
+        let details = weekly?.hasClaudeDetails == true ? weekly : (session?.hasClaudeDetails == true ? session : nil)
+        let planTitle = details?.claudePlanType.flatMap(ClaudePlanCore.title(fromNASPlanType:))
+        let extraUsage = claudeExtraUsage(from: details?.claudeExtraUsage)
         return ClaudeUsageSnapshot(
             quotaSource: "nas",
             weeklyUsedPercent: weekly.map { 100 - $0.remainingPercent },
@@ -1662,7 +1836,34 @@ enum NASItemMappingCore {
             fiveHourUsedPercent: session.map { 100 - $0.remainingPercent },
             fiveHourResetsAt: session?.resetsAt,
             publishedAt: fetchedAt,
-            modelWeeklyLimits: modelLimits
+            modelWeeklyLimits: modelLimits,
+            extraUsage: extraUsage,
+            planTitle: planTitle
+        )
+    }
+
+    /// `monthly_limit_minor`/`used_minor` are converted into the
+    /// cents-denominated `ClaudeExtraUsage` fields only when the currency is
+    /// confirmedly `USD` and the exponent is known. Unknown currency/exponent leaves the
+    /// monetary fields `nil` rather than mislabeling an unconvertible amount
+    /// as dollars. `isEnabled` and `currency` pass through independently of
+    /// that conversion so a known `false` still renders as "disabled".
+    static func claudeExtraUsage(from raw: NASClaudeExtraUsage?) -> ClaudeExtraUsage? {
+        guard let raw else { return nil }
+        let canConvertToCents = raw.currency == "USD" && raw.decimalPlaces != nil
+        func cents(_ value: Double?) -> Double? {
+            guard canConvertToCents, let value, let places = raw.decimalPlaces else { return nil }
+            let converted = value * pow(10, Double(2 - places))
+            return converted.isFinite ? converted : nil
+        }
+        let limitCents = cents(raw.monthlyLimitMinor)
+        let usedCents = cents(raw.usedMinor)
+        guard raw.isEnabled != nil || limitCents != nil || usedCents != nil else { return nil }
+        return ClaudeExtraUsage(
+            limitCents: limitCents,
+            usedCents: usedCents,
+            currency: canConvertToCents ? raw.currency : nil,
+            isEnabled: raw.isEnabled
         )
     }
 
@@ -1746,6 +1947,37 @@ struct NASFourServiceState: Equatable {
     var geminiSnapshot: GeminiUsageSnapshot? { slot(.gemini).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
     var gemini2Snapshot: GeminiUsageSnapshot? { slot(.gemini2).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
 
+    /// Which fixed Gemini slot the single Gemini card currently shows.
+    /// Never guessed from quota values, and never taken from an arbitrary
+    /// host: only the execution host whose `host_id` is literally `"nas"`
+    /// speaks for this card, because that is the one authoritative NAS
+    /// executor — any other host (e.g. a Mac) is read-only metadata for the
+    /// footer, not a selection signal. With switching disabled, or its
+    /// state unknown, this is always `.gemini` (account1/주계정). Only when
+    /// `auto_switch_enabled == true` *and* the `"nas"` host is itself
+    /// `running`/`active` on a named account does the card move to that
+    /// account; a `"nas"` host that is absent, idle, or returning falls
+    /// back to the primary, since the backend's `return_state` marks the
+    /// *primary*'s own confirmed return (see `gemini_accounts.py
+    /// ingest_event`), not a secondary selection, and idle events clear
+    /// `execution_account` entirely. There is currently no field for "the
+    /// account last selected while idle" — that needs a future explicit
+    /// `selected_account` field from the backend; until then this never
+    /// pretends to remember one.
+    var selectedGeminiServiceID: NASServiceID {
+        guard let hostStatus, hostStatus.autoSwitchEnabled == true,
+              let nasHost = hostStatus.hosts.first(where: { $0.hostID == "nas" }),
+              NASExecutionHost.isRunningPhase(nasHost.phase),
+              let account = nasHost.executionAccount
+        else { return .gemini }
+        return account
+    }
+
+    /// The snapshot for whichever fixed slot `selectedGeminiServiceID` names.
+    var selectedGeminiSnapshot: GeminiUsageSnapshot? {
+        selectedGeminiServiceID == .gemini2 ? gemini2Snapshot : geminiSnapshot
+    }
+
     /// Persists only the last good entries, in the same sanitized shape the
     /// NAS sent, under their fixed service IDs.
     func encodedCache() -> Data? {
@@ -1818,18 +2050,23 @@ enum NASHostStatusPresentation {
             }
         }
         // Short lines: the card footer is a narrow fixed-width column.
+        // A heartbeat age only means anything for a host that is actually
+        // running — an idle shared host's last heartbeat is not this card's
+        // liveness signal and would just repeat stale noise on every card.
         for host in displayHosts.prefix(maximumHostLines) {
             lines.append(host.executionAccount == nil
                 ? "공용 호스트 \(displayIdentifier(host.hostID))"
                 : "호스트 \(displayIdentifier(host.hostID))")
             var parts = [phaseLabel(host.phase)]
-            if let heartbeat = host.lastHeartbeatAt {
+            if NASExecutionHost.isRunningPhase(host.phase), let heartbeat = host.lastHeartbeatAt {
                 parts.append("신호 \(ageLabel(from: heartbeat, now: now))")
             } else if let changedAt = host.stateChangedAt {
                 parts.append("변경 \(ageLabel(from: changedAt, now: now))")
             }
             lines.append(parts.joined(separator: " · "))
-            if let returnState = host.returnState {
+            // "not_required"/"none" is not a meaningful return condition —
+            // showing it on both cards only repeats non-information.
+            if let returnState = host.returnState, isNotableReturn(returnState) {
                 lines.append(returnLabel(returnState))
             }
         }
@@ -1868,6 +2105,16 @@ enum NASHostStatusPresentation {
         case "returned"?, "done"?, "completed"?, "committed"?: return "완료"
         case "failed"?, "error"?, "rejected"?, "aborted"?: return "실패"
         case let phase?: return phase
+        }
+    }
+
+    /// `not_required`/`none` describe a host that was never waiting on a
+    /// return in the first place — worth filtering so the footer isn't
+    /// padded with a line that carries no decision-relevant information.
+    static func isNotableReturn(_ returnState: String) -> Bool {
+        switch returnState {
+        case "not_required", "none": return false
+        default: return true
         }
     }
 
@@ -2337,6 +2584,18 @@ struct ClaudeExtraUsage: Sendable, Equatable {
     let limitCents: Double?
     let usedCents: Double?
     let currency: String?
+    /// Tri-state: `nil` when the source never reported it (all existing
+    /// local-origin snapshots), `true`/`false` when a NAS `claude_details`
+    /// confirmed it. A known `false` is a distinct, renderable "disabled"
+    /// state — never conflated with "unknown".
+    let isEnabled: Bool?
+
+    init(limitCents: Double? = nil, usedCents: Double? = nil, currency: String? = nil, isEnabled: Bool? = nil) {
+        self.limitCents = limitCents
+        self.usedCents = usedCents
+        self.currency = currency
+        self.isEnabled = isEnabled
+    }
 }
 
 /// Account identity from `/api/oauth/profile`, fetched at most once per
@@ -2366,6 +2625,11 @@ struct ClaudeUsageSnapshot {
     let modelWeeklyLimits: [ClaudeModelWeeklyLimit]
     let extraUsage: ClaudeExtraUsage?
     let account: ClaudeAccountInfo?
+    /// Confirmed plan display title. For a NAS-sourced snapshot this comes
+    /// from `claude_details.plan_type`; for a local-only snapshot this stays
+    /// `nil` — `ClaudePlanStore`'s own local file read remains the only
+    /// local-only fallback, applied by the caller, not here.
+    let planTitle: String?
 
     init(
         quotaSource: String? = nil,
@@ -2380,7 +2644,8 @@ struct ClaudeUsageSnapshot {
         publishedAt: Date? = nil,
         modelWeeklyLimits: [ClaudeModelWeeklyLimit] = [],
         extraUsage: ClaudeExtraUsage? = nil,
-        account: ClaudeAccountInfo? = nil
+        account: ClaudeAccountInfo? = nil,
+        planTitle: String? = nil
     ) {
         self.quotaSource = quotaSource
         self.model = model
@@ -2395,6 +2660,7 @@ struct ClaudeUsageSnapshot {
         self.modelWeeklyLimits = modelWeeklyLimits
         self.extraUsage = extraUsage
         self.account = account
+        self.planTitle = planTitle
     }
 
     /// Returns a copy with `account` replaced — used to merge in a profile
@@ -2413,7 +2679,8 @@ struct ClaudeUsageSnapshot {
             publishedAt: publishedAt,
             modelWeeklyLimits: modelWeeklyLimits,
             extraUsage: extraUsage,
-            account: account
+            account: account,
+            planTitle: planTitle
         )
     }
 
@@ -2563,7 +2830,8 @@ enum ClaudeUsageCore {
                 "fresh": false,
                 "modelWeeklyLimits": [],
                 "extraUsage": NSNull(),
-                "account": NSNull()
+                "account": NSNull(),
+                "planTitle": NSNull()
             ]
         }
 
@@ -2604,7 +2872,8 @@ enum ClaudeUsageCore {
                 [
                     "limitCents": extraUsage.limitCents ?? NSNull(),
                     "usedCents": extraUsage.usedCents ?? NSNull(),
-                    "currency": extraUsage.currency ?? NSNull()
+                    "currency": extraUsage.currency ?? NSNull(),
+                    "isEnabled": extraUsage.isEnabled ?? NSNull()
                 ]
             } ?? NSNull(),
             "account": snapshot.account.map { account -> [String: Any] in
@@ -2613,7 +2882,8 @@ enum ClaudeUsageCore {
                     "organizationName": account.organizationName ?? NSNull(),
                     "organizationUUID": account.organizationUUID ?? NSNull()
                 ]
-            } ?? NSNull()
+            } ?? NSNull(),
+            "planTitle": snapshot.planTitle ?? NSNull()
         ]
     }
 
@@ -2659,7 +2929,8 @@ enum ClaudeUsageCore {
             ClaudeExtraUsage(
                 limitCents: ($0["limitCents"] as? NSNumber)?.doubleValue,
                 usedCents: ($0["usedCents"] as? NSNumber)?.doubleValue,
-                currency: $0["currency"] as? String
+                currency: $0["currency"] as? String,
+                isEnabled: $0["isEnabled"] as? Bool
             )
         }
         let account = (payload["account"] as? [String: Any]).map {
@@ -2684,7 +2955,8 @@ enum ClaudeUsageCore {
             publishedAt: date("fetchedAt"),
             modelWeeklyLimits: modelWeeklyLimits,
             extraUsage: extraUsage,
-            account: account
+            account: account,
+            planTitle: payload["planTitle"] as? String
         )
 
         guard snapshot.publishedAt != nil
@@ -2722,7 +2994,8 @@ enum ClaudeUsageCore {
             publishedAt: preferred.publishedAt ?? fallback.publishedAt,
             modelWeeklyLimits: preferred.modelWeeklyLimits.isEmpty ? fallback.modelWeeklyLimits : preferred.modelWeeklyLimits,
             extraUsage: preferred.extraUsage ?? fallback.extraUsage,
-            account: preferred.account ?? fallback.account
+            account: preferred.account ?? fallback.account,
+            planTitle: preferred.planTitle ?? fallback.planTitle
         )
     }
 
@@ -2761,7 +3034,8 @@ enum ClaudeUsageCore {
                 publishedAt: cache.publishedAt,
                 modelWeeklyLimits: current.modelWeeklyLimits,
                 extraUsage: current.extraUsage,
-                account: current.account
+                account: current.account,
+                planTitle: cache.planTitle ?? current.planTitle
             )
         }
 
@@ -2781,7 +3055,8 @@ enum ClaudeUsageCore {
             publishedAt: current.publishedAt,
             modelWeeklyLimits: current.modelWeeklyLimits,
             extraUsage: current.extraUsage,
-            account: current.account
+            account: current.account,
+            planTitle: current.planTitle
         )
     }
 }

@@ -550,17 +550,8 @@ private final class UsageHistoryBarView: NSView {
 struct UsagePanelModel {
     let codex: UsagePanelColumn
     let claude: UsagePanelColumn
-    /// Gemini account1 (본계정) in NAS mode; the local CLI reading in the
-    /// explicit local mode.
     let gemini: UsagePanelColumn
-    /// Gemini account2 (부계정). Always its own card, bound to the fixed
-    /// account2 identity — never a ring nested inside the Gemini card.
-    let gemini2: UsagePanelColumn
-    /// Legacy local Grok data; collected but not rendered as a card.
     let grok: UsagePanelColumn
-
-    /// The four visible service cards in their fixed order.
-    var cards: [UsagePanelColumn] { [codex, claude, gemini, gemini2] }
 }
 
 /// Compact circular progress indicator used for a column's primary quota.
@@ -968,12 +959,14 @@ private final class ProviderTitleMarkView: NSView {
         case codex, claude, gemini, grok
 
         init(providerTitle: String) {
-            switch providerTitle {
-            case "Claude": self = .claude
-            case "Grok": self = .grok
-            default:
-                // "Gemini", "Gemini 본계정", "Gemini 부계정" share the mark.
-                self = providerTitle.hasPrefix("Gemini") ? .gemini : .codex
+            if providerTitle.hasPrefix("Claude") {
+                self = .claude
+            } else if providerTitle.hasPrefix("Gemini") {
+                self = .gemini
+            } else if providerTitle.hasPrefix("Grok") {
+                self = .grok
+            } else {
+                self = .codex
             }
         }
     }
@@ -1908,47 +1901,25 @@ private final class UsageColumnView: NSView {
     }
 }
 
-/// Shared geometry for every fixed-width row in the usage menu. The four
-/// service cards (Codex, Claude, Gemini account1, Gemini account2) and the
-/// history chart under them share the `card…` grid; the lower control rows
-/// keep their three-slot grid spread over the same total width, so the
-/// menu still reads as one object end to end.
+/// Shared column geometry for every fixed-width row in the usage menu
+/// (the split panel itself, the history chart, and the usage-page buttons)
+/// so their three columns and two dividers always land at the same x
+/// positions and the menu reads as one object end to end.
 enum UsagePanelLayout {
+    static let columnWidth: CGFloat = 178
+    static let columnGap: CGFloat = 12
     static let sidePadding: CGFloat = 12
     static let controlRowHeight: CGFloat = 30
     static let controlVerticalInset: CGFloat = 3
-
-    /// Four fixed service cards. 178 pt keeps Claude's three peer rings at
-    /// their standard diameter.
-    static let cardColumnCount = 4
-    static let cardColumnWidth: CGFloat = 178
-    static let cardColumnGap: CGFloat = 12
-    static let viewWidth: CGFloat = sidePadding * 2
-        + cardColumnWidth * CGFloat(cardColumnCount)
-        + cardColumnGap * CGFloat(cardColumnCount - 1)
-
-    /// Leading x of each service card, left to right.
-    static let cardColumnX: [CGFloat] = (0..<cardColumnCount).map { index in
-        sidePadding + CGFloat(index) * (cardColumnWidth + cardColumnGap)
-    }
-
-    /// x of the hairline divider between card `index` and `index + 1`.
-    static func cardDividerX(after index: Int) -> CGFloat {
-        cardColumnX[index] + cardColumnWidth + cardColumnGap / 2
-    }
-
-    /// Three-slot grid for the lower control rows (usage-page buttons,
-    /// refresh controls, lifecycle/version rows) across the same width.
     static let columnCount = 3
-    static let columnGap: CGFloat = 12
-    static let columnWidth: CGFloat = (viewWidth - sidePadding * 2 - columnGap * CGFloat(columnCount - 1)) / CGFloat(columnCount)
+    static let viewWidth: CGFloat = sidePadding * 2 + columnWidth * CGFloat(columnCount) + columnGap * CGFloat(columnCount - 1)
 
-    /// Leading x of each control slot, left to right.
+    /// Leading x of each provider column, left to right.
     static let columnX: [CGFloat] = (0..<columnCount).map { index in
         sidePadding + CGFloat(index) * (columnWidth + columnGap)
     }
 
-    /// x of the hairline divider between control slot `index` and `index + 1`.
+    /// x of the hairline divider between column `index` and `index + 1`.
     static func dividerX(after index: Int) -> CGFloat {
         columnX[index] + columnWidth + columnGap / 2
     }
@@ -2049,20 +2020,19 @@ final class PanelBackgroundView: NSVisualEffectView {
     }
 }
 
-/// Four-card status panel — Codex, Claude, Gemini account1, then Gemini
-/// account2 — hosted as the `view` of a single NSMenuItem. Grok data is
-/// still collected in `UsagePanelModel.grok` but is not rendered as a card.
+/// Three-column status panel — Codex, Claude, then Gemini — hosted as
+/// the `view` of a single NSMenuItem. Grok data is still collected in
+/// `UsagePanelModel.grok` but is not rendered while its column is hidden.
 @MainActor
 final class SplitUsagePanelView: NSView {
-    private let columnWidth = UsagePanelLayout.cardColumnWidth
+    private let columnWidth = UsagePanelLayout.columnWidth
     private let topPadding: CGFloat = 8
     private let bottomPadding: CGFloat = 8
 
     private let codexColumnView = UsageColumnView()
     private let claudeColumnView = UsageColumnView()
     private let geminiColumnView = UsageColumnView()
-    private let gemini2ColumnView = UsageColumnView()
-    private let dividers: [NSView] = (0..<UsagePanelLayout.cardColumnCount - 1).map { _ in
+    private let dividers: [NSView] = (0..<UsagePanelLayout.columnCount - 1).map { _ in
         let view = NSView()
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
@@ -2081,7 +2051,6 @@ final class SplitUsagePanelView: NSView {
         addSubview(codexColumnView)
         addSubview(claudeColumnView)
         addSubview(geminiColumnView)
-        addSubview(gemini2ColumnView)
         dividers.forEach(addSubview)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -2094,7 +2063,7 @@ final class SplitUsagePanelView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard appliedTheme == .bk, appliedContentHeight > 0 else { return }
-        for x in UsagePanelLayout.cardColumnX {
+        for x in UsagePanelLayout.columnX {
             BKStyleTokens.drawCard(
                 in: NSRect(
                     x: x - 4,
@@ -2110,8 +2079,8 @@ final class SplitUsagePanelView: NSView {
     func apply(_ model: UsagePanelModel) {
         let theme = UsagePanelThemeStore.current
         appliedTheme = theme
-        let columnViews = [codexColumnView, claudeColumnView, geminiColumnView, gemini2ColumnView]
-        let columns = model.cards
+        let columnViews = [codexColumnView, claudeColumnView, geminiColumnView]
+        let columns = [model.codex, model.claude, model.gemini]
 
         let bodyHeights = zip(columnViews, columns).map { view, column in
             view.apply(column, width: columnWidth, theme: theme)
@@ -2140,13 +2109,13 @@ final class SplitUsagePanelView: NSView {
         }
 
         for (index, columnView) in columnViews.enumerated() {
-            columnView.frame = NSRect(x: UsagePanelLayout.cardColumnX[index], y: topPadding, width: columnWidth, height: contentHeight)
+            columnView.frame = NSRect(x: UsagePanelLayout.columnX[index], y: topPadding, width: columnWidth, height: contentHeight)
         }
         // BK Style separates columns with enamel cards, so the hairline
         // dividers only appear in the 기본 theme.
         for (index, divider) in dividers.enumerated() {
             divider.isHidden = theme == .bk
-            divider.frame = NSRect(x: UsagePanelLayout.cardDividerX(after: index), y: topPadding, width: 1, height: contentHeight)
+            divider.frame = NSRect(x: UsagePanelLayout.dividerX(after: index), y: topPadding, width: 1, height: contentHeight)
         }
         appliedContentHeight = contentHeight
         needsDisplay = true
@@ -2156,11 +2125,11 @@ final class SplitUsagePanelView: NSView {
         newFrame.size.width = UsagePanelLayout.viewWidth
         frame = newFrame
 
-        let summaries = model.cards.map { card in
-            card.quota.map { "\(card.title) \($0.accessibilityValue)" } ?? "\(card.title) 정보 없음"
-        }
-        setAccessibilityLabel("Codex, Claude, Gemini 본계정 및 Gemini 부계정 사용량 패널")
-        setAccessibilityValue(summaries.joined(separator: ", "))
+        let codexSummary = model.codex.quota?.accessibilityValue ?? model.codex.title
+        let claudeSummary = model.claude.quota?.accessibilityValue ?? model.claude.title
+        let geminiSummary = model.gemini.quota?.accessibilityValue ?? model.gemini.title
+        setAccessibilityLabel("Codex, Claude 및 Gemini 사용량 패널")
+        setAccessibilityValue("\(codexSummary), \(claudeSummary), \(geminiSummary)")
     }
 }
 
@@ -2176,7 +2145,7 @@ final class UsageHistoryChartView: NSView {
     // panel's dividers. That alignment is what makes the whole menu read as
     // one object.
     private static let viewWidth: CGFloat = UsagePanelLayout.viewWidth
-    private static let columnWidth: CGFloat = UsagePanelLayout.cardColumnWidth
+    private static let columnWidth: CGFloat = UsagePanelLayout.columnWidth
 
     /// The card is inset from the strips, not the other way round, so the bars
     /// keep their column alignment while the card frames them.
@@ -2204,18 +2173,15 @@ final class UsageHistoryChartView: NSView {
     private let codexCaption = UsageHistoryChartView.makeCaption()
     private let claudeCaption = UsageHistoryChartView.makeCaption()
     private let geminiCaption = UsageHistoryChartView.makeCaption()
-    private let gemini2Caption = UsageHistoryChartView.makeCaption()
     private let grokCaption = UsageHistoryChartView.makeCaption()
     private let codexBars = UsageHistoryBarView()
     private let claudeBars = UsageHistoryBarView()
     private let geminiBars = UsageHistoryBarView()
-    private let gemini2Bars = UsageHistoryBarView()
     private let grokBars = UsageHistoryBarView()
     /// The caption each column falls back to once the pointer leaves its strip.
     private var codexBaseCaption = ""
     private var claudeBaseCaption = ""
     private var geminiBaseCaption = ""
-    private var gemini2BaseCaption = ""
     private var grokBaseCaption = ""
 
     override var isFlipped: Bool { true }
@@ -2228,8 +2194,6 @@ final class UsageHistoryChartView: NSView {
         addSubview(claudeBars)
         addSubview(geminiCaption)
         addSubview(geminiBars)
-        addSubview(gemini2Caption)
-        addSubview(gemini2Bars)
         addSubview(grokCaption)
         addSubview(grokBars)
         setAccessibilityElement(false)
@@ -2245,10 +2209,6 @@ final class UsageHistoryChartView: NSView {
         geminiBars.onHover = { [weak self] sample in
             guard let self else { return }
             self.geminiCaption.stringValue = sample.map { self.geminiBars.hoverTitle(for: $0) } ?? self.geminiBaseCaption
-        }
-        gemini2Bars.onHover = { [weak self] sample in
-            guard let self else { return }
-            self.gemini2Caption.stringValue = sample.map { self.gemini2Bars.hoverTitle(for: $0) } ?? self.gemini2BaseCaption
         }
         grokBars.onHover = { [weak self] sample in
             guard let self else { return }
@@ -2285,9 +2245,9 @@ final class UsageHistoryChartView: NSView {
 
         // Dividers between columns, at the same x as the usage panel's.
         NSColor.separatorColor.setFill()
-        for index in 0..<(UsagePanelLayout.cardColumnCount - 1) {
+        for index in 0..<(UsagePanelLayout.columnCount - 1) {
             NSBezierPath(rect: NSRect(
-                x: UsagePanelLayout.cardDividerX(after: index),
+                x: UsagePanelLayout.dividerX(after: index),
                 y: Self.contentTop,
                 width: 1,
                 height: Self.baselineY - Self.contentTop
@@ -2297,7 +2257,7 @@ final class UsageHistoryChartView: NSView {
         // A recessive floor under each strip, so the bars read as sitting on an
         // axis rather than floating.
         NSColor.separatorColor.withAlphaComponent(0.6).setFill()
-        for x in UsagePanelLayout.cardColumnX {
+        for x in UsagePanelLayout.columnX {
             NSBezierPath(rect: NSRect(
                 x: x + Self.columnContentInset,
                 y: Self.baselineY,
@@ -2311,10 +2271,9 @@ final class UsageHistoryChartView: NSView {
         // A column stacking more than one bucket (Codex + Spark, Claude +
         // Fable) shows those colours side by side as a legend, the same way
         // Gemini's four brand colors are drawn instead of one dot.
-        drawSeriesMark(for: codexBars, x: UsagePanelLayout.cardColumnX[0] + Self.columnContentInset, visible: !codexCaption.isHidden)
-        drawSeriesMark(for: claudeBars, x: UsagePanelLayout.cardColumnX[1] + Self.columnContentInset, visible: !claudeCaption.isHidden)
-        drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.cardColumnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
-        drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.cardColumnX[3] + Self.columnContentInset, visible: !gemini2Caption.isHidden)
+        drawSeriesMark(for: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset, visible: !codexCaption.isHidden)
+        drawSeriesMark(for: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset, visible: !claudeCaption.isHidden)
+        drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
     }
 
     private func drawSeriesMark(for bars: UsageHistoryBarView, x: CGFloat, visible: Bool) {
@@ -2371,25 +2330,19 @@ final class UsageHistoryChartView: NSView {
         codex: UsageHistoryStrip?,
         claude: UsageHistoryStrip?,
         gemini: UsageHistoryStrip?,
-        gemini2: UsageHistoryStrip? = nil,
         grok: UsageHistoryStrip?
     ) -> Bool {
         codexBaseCaption = codex?.caption ?? ""
         claudeBaseCaption = claude?.caption ?? ""
         geminiBaseCaption = gemini?.caption ?? ""
-        gemini2BaseCaption = gemini2?.caption ?? ""
         grokBaseCaption = grok?.caption ?? ""
-        let codexShown = configure(codex, caption: codexCaption, bars: codexBars, x: UsagePanelLayout.cardColumnX[0] + Self.columnContentInset)
-        let claudeShown = configure(claude, caption: claudeCaption, bars: claudeBars, x: UsagePanelLayout.cardColumnX[1] + Self.columnContentInset)
-        let geminiShown = configure(gemini, caption: geminiCaption, bars: geminiBars, x: UsagePanelLayout.cardColumnX[2] + Self.columnContentInset)
-        // Gemini account2 has its own strip under its own card; `nil` (no
-        // NAS history parsed yet, or local mode) leaves that slot empty
-        // rather than drawing fabricated zero bars.
-        let gemini2Shown = configure(gemini2, caption: gemini2Caption, bars: gemini2Bars, x: UsagePanelLayout.cardColumnX[3] + Self.columnContentInset)
+        let codexShown = configure(codex, caption: codexCaption, bars: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset)
+        let claudeShown = configure(claude, caption: claudeCaption, bars: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset)
+        let geminiShown = configure(gemini, caption: geminiCaption, bars: geminiBars, x: UsagePanelLayout.columnX[2] + Self.columnContentInset)
         // Grok samples keep arriving, but the strip stays hidden while the
         // provider has no visible column of its own.
         _ = configure(nil, caption: grokCaption, bars: grokBars, x: 0)
-        let anyShown = codexShown || claudeShown || geminiShown || gemini2Shown
+        let anyShown = codexShown || claudeShown || geminiShown
         needsDisplay = true
         return anyShown
     }
@@ -2784,7 +2737,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         codexHistory: UsageHistoryStrip?,
         claudeHistory: UsageHistoryStrip?,
         geminiHistory: UsageHistoryStrip?,
-        gemini2History: UsageHistoryStrip?,
         grokHistory: UsageHistoryStrip?,
         codexRefreshInterval: Int,
         claudeRefreshInterval: Int,
@@ -2796,7 +2748,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
             codex: codexHistory,
             claude: claudeHistory,
             gemini: geminiHistory,
-            gemini2: gemini2History,
             grok: grokHistory
         )
         historyView.isHidden = !showsHistory
