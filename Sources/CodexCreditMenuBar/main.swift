@@ -2498,7 +2498,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if refreshIntervalPreference == UsageCore.smartRefreshPreference,
            codexSmartRefreshPolicy.update(
                values: [snapshot.usedPercent, snapshot.creditBalance],
-               identityTokens: [snapshot.accountID, SmartRefreshPolicy.identityToken(snapshot.resetsAt)]
+               identityTokens: [
+                   snapshot.accountID,
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.resetsAt, usedIsZero: (snapshot.usedPercent ?? 0) == 0)
+               ]
            ) {
             smartCadenceDidChange(for: .codex)
         }
@@ -2666,7 +2669,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                            snapshot.weeklyUsedPercent,
                            ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
                        ],
-                       identityTokens: [snapshot.account?.email, SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)]
+                       identityTokens: [
+                           snapshot.account?.email,
+                           SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourUsedPercent ?? 0) == 0)
+                       ]
                    ) {
                     self.smartCadenceDidChange(for: .claude)
                 }
@@ -2757,7 +2763,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                            snapshot.weeklyRemainingFraction.map { $0 * 100 },
                            snapshot.creditBalance.map(Double.init)
                        ],
-                       identityTokens: [snapshot.accountEmail, SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)]
+                       identityTokens: [
+                           snapshot.accountEmail,
+                           SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourRemainingFraction ?? 1) >= 1)
+                       ]
                    ) {
                     self.smartCadenceDidChange(for: .gemini)
                 }
@@ -2859,7 +2868,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if refreshIntervalPreference == UsageCore.smartRefreshPreference, let snapshot = nasState.codexSnapshot,
            codexSmartRefreshPolicy.update(
                values: [snapshot.usedPercent, snapshot.creditBalance],
-               identityTokens: [snapshot.accountID, SmartRefreshPolicy.identityToken(snapshot.resetsAt)]
+               identityTokens: [
+                   snapshot.accountID,
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.resetsAt, usedIsZero: (snapshot.usedPercent ?? 0) == 0)
+               ]
            ) {
             smartCadenceDidChange(for: .codex)
         }
@@ -2870,7 +2882,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                    snapshot.weeklyUsedPercent,
                    ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
                ],
-               identityTokens: [snapshot.account?.email, SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)]
+               identityTokens: [
+                   snapshot.account?.email,
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourUsedPercent ?? 0) == 0)
+               ]
            ) {
             smartCadenceDidChange(for: .claude)
         }
@@ -2900,7 +2915,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                        ?? nasState.selectedGeminiServiceID.accountRef,
                    nasState.hostStatus?.hosts.first(where: { $0.hostID == "nas" })?.selectionGeneration,
                    nasState.selectedGeminiServiceID.rawValue,
-                   SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourRemainingFraction ?? 1) >= 1)
                ]
            ) {
             smartCadenceDidChange(for: .gemini)
@@ -3537,7 +3552,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             let updatedAt = lastRateLimitUpdatedAt ?? lastSnapshot?.updatedAt
             text = updatedAt.map { "마지막 갱신 \(Self.timeFormatter.string(from: $0))" } ?? ""
         case .nas:
-            text = lastNASSnapshotReceivedAt.map { "놀이터 확인 \(Self.timeFormatter.string(from: $0))" } ?? "놀이터 기준"
+            text = lastNASSnapshotReceivedAt.map { "마지막 갱신 \(Self.timeFormatter.string(from: $0))" } ?? ""
         }
         menuHeaderView.setLastUpdatedText(text)
         menuHeaderView.applyThemeState()
@@ -3742,8 +3757,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             rowGroups: rowGroups,
             accountLines: nasSlot == nil
                 ? [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"]
-                : [nasAccountLine],
-            refreshLine: nasSlot == nil ? "업데이트 \(relativeUpdate)" : "NAS 조회 \(relativeUpdate)",
+                : [],
+            refreshLine: "업데이트 \(relativeUpdate)",
             statusLines: status.lines,
             statusColor: status.color
         )
@@ -3849,7 +3864,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 value: Self.resetDateTimeTitle(resetsAt)
             ))
         }
-        resetRows.append(UsagePanelRow(label: "리셋권", value: ClaudeUsageCore.limitResetsTitle(isCurrent ? snapshot.limitResets : nil)))
         // The Fable weekly limit is promoted to its own top ring (session,
         // Fable, weekly), so it is excluded from the lower model-limit rows
         // that the rest of `modelWeeklyLimits` still populates.
@@ -3894,12 +3908,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             }
         }
         if nasSlot != nil {
-            accountLines = [nasAccountLine]
+            accountLines = []
         } else if accountLines.isEmpty {
             accountLines.append("계정 정보 없음")
         }
         let refreshLine = snapshot.publishedAt.map {
-            "\(nasSlot != nil ? "NAS 조회" : (isCurrent ? "업데이트" : "마지막 확인")) \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
+            "\(isCurrent ? "업데이트" : "마지막 확인") \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
         }
         if let nasSlot {
             var status = nasStatus(issue: nasSlot.issue, isStale: nasSlot.isStale)
@@ -4014,24 +4028,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let weeklyQuota = makeQuota(caption: "\(weeklyCaption) 남음", remaining: weeklyRemaining, color: weeklyColor, accessibilityLabel: "\(accessibilityPrefix) 주간 사용량")
 
         var rows: [UsagePanelRow] = []
-        // Always keep this row even when the plan is unknown, instead of
-        // dropping it, so the card's row set doesn't shift based on data
-        // availability; a missing plan is never inferred from 5h-bucket
-        // usage, only reported as such.
-        rows.append(UsagePanelRow(label: "요금제", value: snapshot?.planTitle ?? "확인 불가"))
+        if let planTitle = snapshot?.planTitle {
+            rows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        }
         rows.append(UsagePanelRow(label: "\(sessionCaption) 초기화", value: sessionResetValue()))
         rows.append(UsagePanelRow(label: "\(weeklyCaption) 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
-        // `creditBalance` of exactly 0 is a real, trusted reading from the
-        // matched/selected account's own snapshot — never carried over from a
-        // previously selected account — and is shown as-is; only an absent
-        // (nil) value falls back to "확인 불가". A missing credit reading
-        // never implies quota exhaustion or an account switch.
-        if let creditBalance = snapshot?.creditBalance {
-            rows.append(UsagePanelRow(label: "AI 크레딧", value: Self.creditDetailTitle(from: Double(creditBalance))))
-        } else if snapshot != nil {
-            rows.append(UsagePanelRow(label: "AI 크레딧", value: "확인 불가"))
-        }
-
         let status: (lines: [String], color: NSColor)
         if isNAS {
             status = Self.nasStatus(issue: fetchFailureLabel, isStale: isStale)
@@ -4050,9 +4051,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             quota: sessionQuota,
             secondaryQuota: weeklyQuota,
             rowGroups: [UsagePanelRowGroup(rows: rows)],
-            accountLines: [accountLine] + (isNAS ? extraAccountLines : []),
+            accountLines: isNAS ? [] : [accountLine],
             refreshLine: snapshot?.publishedAt.map { publishedAt in
-                "\(isNAS ? "NAS 조회" : "C") \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))"
+                "\(isNAS ? "업데이트" : "C") \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))"
             },
             statusLines: status.lines,
             statusColor: status.color

@@ -119,6 +119,18 @@ struct SmartRefreshPolicy: Equatable {
     static func identityToken(_ date: Date?) -> String? {
         date.map { String($0.timeIntervalSince1970) }
     }
+
+    /// Quota-bucket reset identity token. A fully-unused bucket (`usedIsZero`)
+    /// rolls its own reset instant forward on every read even with no real
+    /// activity, so it must not contribute to the fingerprint at all. A
+    /// used bucket's reset instant can jitter by a second between reads of
+    /// the same underlying reset, so it is minute-normalized before
+    /// comparison.
+    static func quotaResetIdentityToken(_ date: Date?, usedIsZero: Bool) -> String? {
+        guard !usedIsZero, let date else { return nil }
+        let normalizedSeconds = (date.timeIntervalSince1970 / 60).rounded() * 60
+        return String(normalizedSeconds)
+    }
 }
 
 struct CodexSparkWeeklyWindow: Equatable {
