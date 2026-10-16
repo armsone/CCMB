@@ -24,13 +24,13 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
             secondaryQuota: nil,
             rowGroups: [
                 UsagePanelRowGroup(rows: [
-                    UsagePanelRow(label: "요금제", value: "Plus", isEmphasized: false),
+                    UsagePanelRow(label: "요금제", value: "ChatGPT Pro", isEmphasized: false),
                     UsagePanelRow(label: "주간 초기화", value: "4일 뒤", isEmphasized: true),
                     UsagePanelRow(label: "초기화 가능", value: "3개", isEmphasized: false),
                     UsagePanelRow(label: "남은 크레딧", value: "$12.50", isEmphasized: true),
                 ])
             ],
-            accountLines: ["놀이터(NAS) 기준"],
+            accountLines: ["계정 정보 없음"],
             refreshLine: "마지막 갱신 방금",
             statusLines: [],
             statusColor: .secondaryLabelColor
@@ -48,42 +48,49 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
             title: "Claude",
             accentColor: accent,
             quota: ring("세션 남음", 60),
-            secondaryQuota: ring("Fable 주간 남음", 45),
+            secondaryQuota: ring("Fable 남음", 45),
             tertiaryQuota: ring("주간 남음", 50),
             rowGroups: [
                 UsagePanelRowGroup(rows: [
+                    UsagePanelRow(label: "요금제", value: "Claude Max 5×"),
                     UsagePanelRow(label: "세션 초기화", value: "2시간 뒤", isEmphasized: true),
-                    UsagePanelRow(label: "주간 초기화", value: "3일 뒤", isEmphasized: true),
-                    UsagePanelRow(label: "리셋권", value: ClaudeUsageCore.limitResetsTitle(ClaudeLimitResets(remainingCount: 0, usableNow: false, expiresAt: nil))),
-                ])
+                    UsagePanelRow(label: "Fable 초기화", value: "3일 뒤"),
+                    UsagePanelRow(label: "주간 초기화", value: "3일 뒤"),
+                ]),
+                UsagePanelRowGroup(title: "추가 사용량", glyph: .creditCard, rows: [UsagePanelRow(label: "추가 사용량", value: "사용 안 함", valueColor: .systemPurple)])
             ],
-            accountLines: ["놀이터(NAS) 기준"],
+            accountLines: ["계정 정보 없음"],
             refreshLine: "마지막 갱신 방금",
             statusLines: [],
             statusColor: .secondaryLabelColor
         )
     }
 
-    /// The restored Gemini card: two peer rings (session, weekly) for
+    /// The v2.0.33 Gemini card: four peer rings (CLI and online) for
     /// whichever fixed account is currently selected, matching
     /// `geminiColumn` in `main.swift`.
     private func sanitizedGeminiColumn(selected: NASServiceID) -> UsagePanelColumn {
         let accent = UsageBrandColors.geminiText
         func ring(_ caption: String, _ percent: Double) -> UsagePanelQuota {
-            UsagePanelQuota(caption: caption, percentText: "\(Int(percent))%", fraction: percent / 100, color: accent, accessibilityValue: "\(caption) \(Int(percent))%")
+            UsagePanelQuota(caption: caption, percentText: "\(Int(percent))%", fraction: percent / 100, color: caption == "C주간" ? UsageBrandColors.geminiGradient[1] : UsageBrandColors.geminiGradient[0], accessibilityValue: "\(caption) \(Int(percent))%")
         }
         return UsagePanelColumn(
             title: selected == .gemini2 ? "Gemini · 부" : "Gemini · 주",
             accentColor: accent,
-            quota: ring("세션 남음", 80),
-            secondaryQuota: ring("주간 남음", 65),
+            quota: ring("C세션", 80),
+            secondaryQuota: ring("C주간", 65),
+            tertiaryQuota: UsagePanelQuota(caption: "O세션", percentText: "—", fraction: 0, color: UsageBrandColors.geminiGradient[2], accessibilityValue: "온라인 세션 미수집"),
+            quaternaryQuota: UsagePanelQuota(caption: "O주간", percentText: "—", fraction: 0, color: UsageBrandColors.geminiGradient[3], accessibilityValue: "온라인 주간 미수집"),
             rowGroups: [
                 UsagePanelRowGroup(rows: [
-                    UsagePanelRow(label: "세션 초기화", value: "1시간 뒤", isEmphasized: false),
-                    UsagePanelRow(label: "주간 초기화", value: "5일 뒤", isEmphasized: false),
+                    UsagePanelRow(label: "요금제", value: "NAS 미수집"),
+                    UsagePanelRow(label: "C세션 초기화", value: "1시간 뒤", isEmphasized: false),
+                    UsagePanelRow(label: "C주간 초기화", value: "5일 뒤", isEmphasized: false),
+                    UsagePanelRow(label: "O세션 초기화", value: "NAS 미수집"),
+                    UsagePanelRow(label: "O주간 초기화", value: "NAS 미수집"),
                 ])
             ],
-            accountLines: ["놀이터(NAS) 기준"],
+            accountLines: ["계정 정보 없음"],
             refreshLine: "마지막 갱신 방금",
             statusLines: [],
             statusColor: .secondaryLabelColor
@@ -97,7 +104,7 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
             quota: UsagePanelQuota(caption: "사용량", percentText: "10%", fraction: 0.1, color: .systemGray, accessibilityValue: "10%"),
             secondaryQuota: nil,
             rowGroups: [UsagePanelRowGroup(rows: [UsagePanelRow(label: "주간 사용", value: "10%", isEmphasized: true)])],
-            accountLines: ["놀이터(NAS) 기준"],
+            accountLines: ["계정 정보 없음"],
             refreshLine: "마지막 갱신 방금",
             statusLines: [],
             statusColor: .secondaryLabelColor
@@ -243,6 +250,7 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
                 quota: gemini.quota,
                 secondaryQuota: gemini.secondaryQuota,
                 tertiaryQuota: gemini.tertiaryQuota,
+                quaternaryQuota: gemini.quaternaryQuota,
                 rowGroups: gemini.rowGroups,
                 accountLines: gemini.accountLines + extraGeminiLines,
                 refreshLine: gemini.refreshLine,

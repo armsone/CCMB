@@ -3434,11 +3434,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             )
         case .nas:
             // Menu-bar figures in NAS mode come only from NAS values (Gemini
-            // = account1), never from a leftover local reading.
+            // = selected account), never from a leftover local reading.
             let parts = Self.statusTitleParts(
                 from: nasState.codexSnapshot,
                 claude: nasState.claudeSnapshot,
-                gemini: nasState.geminiSnapshot
+                gemini: nasState.selectedGeminiSnapshot
             )
             if parts.isEmpty {
                 setStatusTitle("NAS")
@@ -3449,7 +3449,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 "놀이터 기준 " + Self.accessibilityStatus(
                     from: nasState.codexSnapshot,
                     claude: nasState.claudeSnapshot,
-                    gemini: nasState.geminiSnapshot
+                    gemini: nasState.selectedGeminiSnapshot
                 )
             )
         }
@@ -3480,7 +3480,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     fetchFailureLabel: lastGeminiFetchFailureLabel,
                     isStale: false,
                     source: .localMac,
-                    colors: Array(UsageBrandColors.geminiGradient.prefix(2))
+                    colors: UsageBrandColors.geminiGradient
                 ),
                 grok: grok
             )
@@ -3635,32 +3635,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// numbers, even while that other account is active on NAS.
     private func nasGeminiColumn(id: NASServiceID, title: String, snapshot: GeminiUsageSnapshot?) -> UsagePanelColumn {
         let slot = nasState.slot(id)
-        let colors = Array(UsageBrandColors.geminiGradient.prefix(2))
-        // Host/return status is shown even while the card has no quota
-        // values; it never changes the card's own fetched/stale/error state.
-        let hostLines = NASHostStatusPresentation.footerLines(
-            for: id,
-            state: nasState,
-            source: dataCollectionSourcePreference
-        )
-        guard let snapshot else {
-            return Self.unavailableColumn(
-                title: title,
-                accentColor: UsageBrandColors.geminiText,
-                reason: slot.issue.map { "갱신 실패: \($0)" } ?? "놀이터 값을 기다리는 중",
-                accountLine: Self.nasAccountLine,
-                extraAccountLines: hostLines,
-                statusColor: slot.issue == nil ? .secondaryLabelColor : .systemRed
-            )
-        }
+        // The 4-position ring layout (C세션/C주간/O세션/O주간) needs all four
+        // original Google brand colors; dropping to the first two would leave
+        // the O(온라인) rings uncolored.
+        let colors = UsageBrandColors.geminiGradient
         return geminiColumn(
             title: title,
             from: snapshot,
             fetchFailureLabel: slot.issue,
             isStale: slot.isStale,
             source: .nas,
-            colors: colors,
-            extraAccountLines: hostLines
+            colors: colors
         )
     }
 
@@ -3677,6 +3662,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         if let planTitle = CodexPlanCore.title(for: snapshot.planType) {
             summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        } else if nasSlot != nil {
+            summaryRows.append(UsagePanelRow(label: "요금제", value: "NAS 미수집"))
         }
 
         if let usedPercent = snapshot.usedPercent {
@@ -3719,6 +3706,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         if let resetCredits = snapshot.resetCredits {
             creditRows.append(UsagePanelRow(label: "초기화 가능", value: "\(resetCredits)개"))
+        } else if nasSlot != nil {
+            creditRows.append(UsagePanelRow(label: "초기화 가능", value: "NAS 미수집"))
         }
         if snapshot.creditsUnlimited {
             creditRows.append(UsagePanelRow(label: "남은 크레딧", value: "무제한", isEmphasized: true))
@@ -3755,9 +3744,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             quota: quota,
             secondaryQuota: nil,
             rowGroups: rowGroups,
-            accountLines: nasSlot == nil
-                ? [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"]
-                : [],
+            accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
             refreshLine: "업데이트 \(relativeUpdate)",
             statusLines: status.lines,
             statusColor: status.color
@@ -3822,6 +3809,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         // plan.
         if let planTitle = snapshot.planTitle ?? (nasSlot == nil ? ClaudePlanStore.readTitle() : nil) {
             summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        } else if nasSlot != nil {
+            summaryRows.append(UsagePanelRow(label: "요금제", value: "NAS 미수집"))
         }
 
         if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent) {
@@ -3888,6 +3877,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         if let extraUsage = snapshot.extraUsage {
             extraRows.append(UsagePanelRow(label: "추가 사용량", value: extraUsageTitle(extraUsage), valueColor: .systemPurple))
+        } else if nasSlot != nil {
+            extraRows.append(UsagePanelRow(label: "추가 사용량", value: "NAS 미수집"))
         }
 
         var rowGroups: [UsagePanelRowGroup] = []
@@ -3902,14 +3893,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             rowGroups.append(UsagePanelRowGroup(title: "추가 사용량", glyph: .creditCard, rows: extraRows))
         }
         var accountLines: [String] = []
-        if nasSlot == nil, let account = snapshot.account {
+        if let account = snapshot.account {
             if let email = account.email {
                 accountLines.append("계정 \(email)")
             }
         }
-        if nasSlot != nil {
-            accountLines = []
-        } else if accountLines.isEmpty {
+        if accountLines.isEmpty {
             accountLines.append("계정 정보 없음")
         }
         let refreshLine = snapshot.publishedAt.map {
@@ -3977,25 +3966,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         return (reason, until)
     }
 
-    /// Two peer rings (session, weekly) for one Gemini card. In local mode
-    /// this is the local CLI reading (whatever account the CLI has active,
-    /// shown with its email); in NAS mode it is one fixed account
-    /// (account1 or account2) and never reads local account metadata.
+    /// Four compact peer rings directly under the Gemini title. Their fixed
+    /// order is CLI session/weekly, then online session/weekly; the canonical
+    /// blue/red/yellow/green Google palette provides a second visual key.
     private func geminiColumn(
         title: String,
         from snapshot: GeminiUsageSnapshot?,
         fetchFailureLabel: String?,
         isStale: Bool,
         source: DataCollectionSource,
-        colors: [NSColor],
-        extraAccountLines: [String] = []
+        colors: [NSColor]
     ) -> UsagePanelColumn {
         let accent = UsageBrandColors.geminiText
         let now = Date()
+        // NAS mode never reads this Mac's web session, relay or login.
         let isNAS = source == .nas
-        let sessionCaption = isNAS ? "세션" : "C세션"
-        let weeklyCaption = isNAS ? "주간" : "C주간"
-        let accessibilityPrefix = isNAS ? "남은 \(title)" : "남은 Gemini CLI"
+        let online = isNAS ? nil : lastGeminiOnlineSnapshot
         func makeQuota(caption: String, remaining: Double?, color: NSColor, accessibilityLabel: String) -> UsagePanelQuota {
             UsagePanelQuota(
                 caption: caption,
@@ -4006,57 +3992,165 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     ?? "\(accessibilityLabel) 정보 없음"
             )
         }
-        let sessionRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.fiveHourRemainingFraction) }
-        let weeklyRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.weeklyRemainingFraction) }
+        func onlineResetValue(_ text: String?) -> String {
+            guard var text, !text.isEmpty else { return "정보 없음" }
+            for suffix in ["에 초기화", "에 재설정", " resets"] where text.hasSuffix(suffix) {
+                text.removeLast(suffix.count)
+                break
+            }
 
-        func sessionResetValue() -> String {
+            let locale = Locale(identifier: "ko_KR")
+            let timeZone = TimeZone.autoupdatingCurrent
+            let output = DateFormatter()
+            output.locale = locale
+            output.timeZone = timeZone
+
+            func resetDateTitle(_ date: Date) -> String {
+                let calendar = Calendar.autoupdatingCurrent
+                if calendar.isDateInToday(date) {
+                    output.dateFormat = "HH:mm"
+                } else if calendar.isDateInTomorrow(date) {
+                    output.dateFormat = "'내일' HH:mm"
+                } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: now),
+                          calendar.isDate(date, inSameDayAs: dayAfterTomorrow) {
+                    output.dateFormat = "'모레' HH:mm"
+                } else {
+                    output.dateFormat = "M/d(EEEEE) HH:mm"
+                }
+                return output.string(from: date)
+            }
+
+            let datedInput = DateFormatter()
+            datedInput.locale = locale
+            datedInput.timeZone = timeZone
+            datedInput.dateFormat = "yyyy년 M월 d일 a h:mm"
+            let currentYear = Calendar.current.component(.year, from: now)
+            if let date = datedInput.date(from: "\(currentYear)년 \(text)") {
+                return resetDateTitle(date)
+            }
+
+            for format in ["yyyy MMM d 'at' h:mm a", "yyyy MMM d, 'at' h:mm a"] {
+                let englishInput = DateFormatter()
+                englishInput.locale = Locale(identifier: "en_US_POSIX")
+                englishInput.timeZone = timeZone
+                englishInput.dateFormat = format
+                if let date = englishInput.date(from: "\(currentYear) \(text)") {
+                    return resetDateTitle(date)
+                }
+            }
+
+            let timeFormats = [
+                (locale, "a h:mm"),
+                (Locale(identifier: "en_US_POSIX"), "h:mm a")
+            ]
+            for (timeLocale, timeFormat) in timeFormats {
+                let timeInput = DateFormatter()
+                timeInput.locale = timeLocale
+                timeInput.timeZone = timeZone
+                timeInput.dateFormat = timeFormat
+                if let parsedTime = timeInput.date(from: text) {
+                    let parsedComponents = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: parsedTime)
+                    guard let hour = parsedComponents.hour, let minute = parsedComponents.minute else { continue }
+                    var dateComponents = Calendar.autoupdatingCurrent.dateComponents([.year, .month, .day], from: now)
+                    dateComponents.hour = hour
+                    dateComponents.minute = minute
+                    guard var date = Calendar.autoupdatingCurrent.date(from: dateComponents) else { continue }
+                    if date < now {
+                        date = Calendar.autoupdatingCurrent.date(byAdding: .day, value: 1, to: date) ?? date
+                    }
+                    return resetDateTitle(date)
+                }
+            }
+            return text
+        }
+
+        let cliSessionRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.fiveHourRemainingFraction) }
+        let cliWeeklyRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.weeklyRemainingFraction) }
+        let onlineSessionRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.sessionUsedPercent) }
+        let onlineWeeklyRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.weeklyUsedPercent) }
+        let onlineNeedsLogin = !isNAS && (online == nil || geminiOnlineNeedsConnection)
+
+        func cliSessionResetValue() -> String {
             if let resetsAt = snapshot?.fiveHourResetsAt {
                 return Self.resetDateTimeTitle(resetsAt)
             }
-            if let remaining = sessionRemaining, remaining >= 100 {
+            if let remaining = cliSessionRemaining, remaining >= 100 {
                 return "사용 시작 후 5시간"
             }
             return "정보 없음"
         }
 
-        let sessionColor = colors.first ?? accent
-        let weeklyColor = colors.count > 1 ? colors[1] : accent
-        // The ring caption matches the "주간 남음"/"세션 남음" wording every
-        // other card's gauge uses; the row label above keeps the bare
-        // "세션"/"주간" prefix ("세션 초기화") unchanged.
-        let sessionQuota = makeQuota(caption: "\(sessionCaption) 남음", remaining: sessionRemaining, color: sessionColor, accessibilityLabel: "\(accessibilityPrefix) 세션 사용량")
-        let weeklyQuota = makeQuota(caption: "\(weeklyCaption) 남음", remaining: weeklyRemaining, color: weeklyColor, accessibilityLabel: "\(accessibilityPrefix) 주간 사용량")
+        let cliSessionQuota = makeQuota(caption: "C세션", remaining: cliSessionRemaining, color: colors[0], accessibilityLabel: "남은 Gemini CLI 세션 사용량")
+        let cliWeeklyQuota = makeQuota(caption: "C주간", remaining: cliWeeklyRemaining, color: colors[1], accessibilityLabel: "남은 Gemini CLI 주간 사용량")
+        let onlineSessionQuota = makeQuota(caption: "O세션", remaining: onlineSessionRemaining, color: colors[2], accessibilityLabel: "남은 Gemini 온라인 세션 사용량")
+        let onlineWeeklyQuota = makeQuota(caption: "O주간", remaining: onlineWeeklyRemaining, color: colors[3], accessibilityLabel: "남은 Gemini 온라인 주간 사용량")
 
+        var rowGroups: [UsagePanelRowGroup] = []
         var rows: [UsagePanelRow] = []
         if let planTitle = snapshot?.planTitle {
             rows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        } else if isNAS {
+            rows.append(UsagePanelRow(label: "요금제", value: "NAS 미수집"))
         }
-        rows.append(UsagePanelRow(label: "\(sessionCaption) 초기화", value: sessionResetValue()))
-        rows.append(UsagePanelRow(label: "\(weeklyCaption) 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
-        let status: (lines: [String], color: NSColor)
+        rows.append(UsagePanelRow(label: "C세션 초기화", value: cliSessionResetValue()))
+        rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
+        rows.append(UsagePanelRow(
+            label: "O세션 초기화",
+            value: isNAS ? "NAS 미수집" : (onlineNeedsLogin ? "" : onlineResetValue(online?.sessionResetText)),
+            action: onlineNeedsLogin ? UsagePanelRowAction(
+                title: "로그인",
+                accessibilityLabel: "Gemini 온라인 로그인",
+                handler: { [weak self] in self?.connectGeminiOnline() }
+            ) : nil
+        ))
+        rows.append(UsagePanelRow(label: "O주간 초기화", value: isNAS ? "NAS 미수집" : onlineResetValue(online?.weeklyResetText)))
+        rowGroups.append(UsagePanelRowGroup(rows: rows))
+
+        var statusLines: [String] = []
+        var statusColor = NSColor.secondaryLabelColor
         if isNAS {
-            status = Self.nasStatus(issue: fetchFailureLabel, isStale: isStale)
+            let status = Self.nasStatus(issue: fetchFailureLabel, isStale: isStale)
+            statusLines = status.lines
+            statusColor = status.color
         } else if let fetchFailureLabel {
-            status = (["CLI 갱신 실패: \(fetchFailureLabel)"], .systemRed)
-        } else {
-            status = ([], .secondaryLabelColor)
+            statusLines.append("CLI 갱신 실패: \(fetchFailureLabel)")
+            statusColor = .systemRed
+        }
+        if !isNAS && geminiOnlineParseFailed {
+            statusLines.append("온라인 확인 불가")
+            statusColor = .systemOrange
+        } else if let online, !GeminiOnlineUsageCore.isFresh(fetchedAt: online.fetchedAt, now: now) {
+            statusLines.append("온라인 마지막 값")
+            statusColor = .systemOrange
         }
 
-        let accountLine = isNAS
-            ? Self.nasAccountLine
-            : (snapshot?.accountEmail.map { "계정 \($0)" } ?? "계정 정보 없음")
         return UsagePanelColumn(
             title: title,
             accentColor: accent,
-            quota: sessionQuota,
-            secondaryQuota: weeklyQuota,
-            rowGroups: [UsagePanelRowGroup(rows: rows)],
-            accountLines: isNAS ? [] : [accountLine],
-            refreshLine: snapshot?.publishedAt.map { publishedAt in
-                "\(isNAS ? "업데이트" : "C") \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))"
-            },
-            statusLines: status.lines,
-            statusColor: status.color
+            quota: cliSessionQuota,
+            secondaryQuota: cliWeeklyQuota,
+            tertiaryQuota: onlineSessionQuota,
+            quaternaryQuota: onlineWeeklyQuota,
+            rowGroups: rowGroups,
+            accountLines: [
+                online?.accountEmail.map { "계정 \($0)" }
+                    ?? snapshot?.accountEmail.map { "계정 \($0)" }
+                    ?? "계정 정보 없음"
+            ],
+            refreshLine: {
+                var parts: [String] = []
+                if let publishedAt = snapshot?.publishedAt {
+                    parts.append("C \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))")
+                }
+                if isNAS {
+                    parts.append("O 미수집")
+                } else if let fetchedAt = online?.fetchedAt {
+                    parts.append("O \(Self.relativeFormatter.localizedString(for: fetchedAt, relativeTo: now))")
+                }
+                return parts.isEmpty ? nil : parts.joined(separator: " · ")
+            }(),
+            statusLines: statusLines,
+            statusColor: statusColor
         )
     }
 
