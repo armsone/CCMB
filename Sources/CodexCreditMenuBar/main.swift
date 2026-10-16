@@ -1261,18 +1261,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var codexSmartRefreshPolicy = SmartRefreshPolicy()
     private var claudeSmartRefreshPolicy = SmartRefreshPolicy()
     private var geminiSmartRefreshPolicy = SmartRefreshPolicy()
+    private static let nasRefreshInterval: TimeInterval = 180
     private var refreshInterval: TimeInterval {
-        refreshIntervalPreference == UsageCore.smartRefreshPreference
+        if isNASMode { return Self.nasRefreshInterval }
+        return refreshIntervalPreference == UsageCore.smartRefreshPreference
             ? codexSmartRefreshPolicy.interval
             : TimeInterval(refreshIntervalPreference)
     }
     private var claudeRefreshInterval: TimeInterval {
-        claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference
+        if isNASMode { return Self.nasRefreshInterval }
+        return claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference
             ? claudeSmartRefreshPolicy.interval
             : TimeInterval(claudeRefreshIntervalPreference)
     }
     private var geminiRefreshInterval: TimeInterval {
-        geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference
+        if isNASMode { return Self.nasRefreshInterval }
+        return geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference
             ? geminiSmartRefreshPolicy.interval
             : TimeInterval(geminiRefreshIntervalPreference)
     }
@@ -1989,6 +1993,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func smartCadenceDidChange(for provider: SmartProvider) {
+        guard !isNASMode else { return }
         let now = Date()
         let interval: TimeInterval
         switch provider {
@@ -2106,32 +2111,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func updateRefreshIntervalMenu() {
         for item in refreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
-            item.state = refreshIntervalPreference == seconds ? .on : .off
+            item.state = (isNASMode ? Int(Self.nasRefreshInterval) : refreshIntervalPreference) == seconds ? .on : .off
             setDetailTitle(item.title, for: item)
         }
         for item in claudeRefreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
-            item.state = claudeRefreshIntervalPreference == seconds ? .on : .off
+            item.state = (isNASMode ? Int(Self.nasRefreshInterval) : claudeRefreshIntervalPreference) == seconds ? .on : .off
         }
         for item in geminiRefreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
-            item.state = geminiRefreshIntervalPreference == seconds ? .on : .off
+            item.state = (isNASMode ? Int(Self.nasRefreshInterval) : geminiRefreshIntervalPreference) == seconds ? .on : .off
         }
         for item in grokRefreshIntervalItems {
             let seconds = (item.representedObject as? Int) ?? -1
             item.state = Int(grokRefreshInterval) == seconds ? .on : .off
         }
-        codexIntervalItem.title = "Codex · \(refreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(refreshInterval)))" : Self.intervalTitle(refreshInterval))"
-        claudeIntervalItem.title = "Claude · \(claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(claudeRefreshInterval)))" : Self.intervalTitle(claudeRefreshInterval))"
-        geminiIntervalItem.title = "Gemini · \(geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(geminiRefreshInterval)))" : Self.intervalTitle(geminiRefreshInterval))"
+        codexIntervalItem.title = isNASMode ? "Codex · NAS 3분" : "Codex · \(refreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(refreshInterval)))" : Self.intervalTitle(refreshInterval))"
+        claudeIntervalItem.title = isNASMode ? "Claude · NAS 3분" : "Claude · \(claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(claudeRefreshInterval)))" : Self.intervalTitle(claudeRefreshInterval))"
+        geminiIntervalItem.title = isNASMode ? "Gemini · NAS 3분" : "Gemini · \(geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(geminiRefreshInterval)))" : Self.intervalTitle(geminiRefreshInterval))"
         grokIntervalItem.title = "Grok · \(Self.intervalTitle(grokRefreshInterval))"
         menuRefreshControlsView.apply(
-            codex: refreshIntervalPreference,
-            claude: claudeRefreshIntervalPreference,
-            gemini: geminiRefreshIntervalPreference,
+            codex: isNASMode ? Int(Self.nasRefreshInterval) : refreshIntervalPreference,
+            claude: isNASMode ? Int(Self.nasRefreshInterval) : claudeRefreshIntervalPreference,
+            gemini: isNASMode ? Int(Self.nasRefreshInterval) : geminiRefreshIntervalPreference,
             grok: Int(grokRefreshInterval)
         )
-        setDetailTitle("자동 새로 고침 · 앱별 설정", for: intervalItem)
+        setDetailTitle(isNASMode ? "자동 새로 고침 · NAS 공통 3분" : "자동 새로 고침 · 앱별 설정", for: intervalItem)
     }
 
     private func setDetailTitle(_ title: String, for item: NSMenuItem) {
@@ -2830,7 +2835,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func refreshAllFromNAS(force: Bool) {
         guard isNASMode else { return }
         let requestedGeneration = dataSourceGeneration
-        let minimumInterval: TimeInterval = force ? 0 : 180
+        let minimumInterval: TimeInterval = force ? 0 : Self.nasRefreshInterval
         NASFourServiceClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
             guard let self else { return }
             guard self.acceptsResult(from: .nas, generation: requestedGeneration, kind: "nas_snapshot") else { return }
@@ -2929,7 +2934,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func refreshNASHistory(force: Bool) {
         guard isNASMode else { return }
         let requestedGeneration = dataSourceGeneration
-        let minimumInterval: TimeInterval = force ? 0 : 180
+        let minimumInterval: TimeInterval = force ? 0 : Self.nasRefreshInterval
         NASHistoryClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
             guard let self else { return }
             guard self.acceptsResult(from: .nas, generation: requestedGeneration, kind: "nas_history") else { return }
@@ -3630,18 +3635,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         func reset(_ date: Date?) -> String { date.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음" }
         var statuses: [String] = []
-        for (id, label) in [(NASServiceID.gemini, "본계정"), (.gemini2, "보조계정")] {
+        for (id, label) in [(NASServiceID.gemini, "본계정"), (.gemini2, "부계정")] {
             let slot = nasState.slot(id)
             let status = Self.nasStatus(issue: slot.issue, isStale: slot.isStale)
             statuses += status.lines.map { "\(label) · \($0)" }
         }
-        let accounts = [("본계정", primary), ("보조계정", secondary)]
+        let accounts = [("본계정", primary), ("부계정", secondary)]
         return UsagePanelColumn(
             title: title, accentColor: UsageBrandColors.geminiText,
             quota: quota("세션", primary?.fiveHourRemainingFraction, colors[0], "본계정"),
             secondaryQuota: quota("주간", primary?.weeklyRemainingFraction, colors[1], "본계정"),
-            tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, colors[2], "보조계정"),
-            quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, colors[3], "보조계정"),
+            tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, colors[2], "부계정"),
+            quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, colors[3], "부계정"),
             rowGroups: [UsagePanelRowGroup(rows: [
                 UsagePanelRow(label: "요금제", value: primary?.planTitle ?? "NAS 미수집"),
                 UsagePanelRow(label: "본 세션 초기화", value: reset(primary?.fiveHourResetsAt)),
@@ -4644,6 +4649,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func applyCodexRefreshInterval(_ seconds: Int) {
+        guard !isNASMode else {
+            updateRefreshIntervalMenu()
+            updateSplitPanel()
+            return
+        }
         refreshIntervalPreference = seconds
         if seconds == UsageCore.smartRefreshPreference { codexSmartRefreshPolicy.reset() }
         UserDefaults.standard.set(seconds, forKey: Self.refreshIntervalDefaultsKey)
@@ -4716,6 +4726,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func applyClaudeRefreshInterval(_ seconds: Int) {
+        guard !isNASMode else {
+            updateRefreshIntervalMenu()
+            updateSplitPanel()
+            return
+        }
         claudeRefreshIntervalPreference = seconds
         if seconds == UsageCore.smartRefreshPreference { claudeSmartRefreshPolicy.reset() }
         UserDefaults.standard.set(seconds, forKey: Self.claudeRefreshIntervalDefaultsKey)
@@ -4786,6 +4801,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func applyGeminiRefreshInterval(_ seconds: Int) {
+        guard !isNASMode else {
+            updateRefreshIntervalMenu()
+            updateSplitPanel()
+            return
+        }
         geminiRefreshIntervalPreference = seconds
         if seconds == UsageCore.smartRefreshPreference { geminiSmartRefreshPolicy.reset() }
         UserDefaults.standard.set(seconds, forKey: Self.geminiRefreshIntervalDefaultsKey)
