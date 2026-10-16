@@ -65,6 +65,7 @@ struct UsagePanelRow {
     /// Optional second line spanning the full row width (e.g. an exact
     /// reset date/time for a per-model weekly limit row).
     let detail: String?
+    let detailAlignment: NSTextAlignment
     let valueColor: NSColor?
     let isEmphasized: Bool
     let accessibilityLabel: String
@@ -74,6 +75,7 @@ struct UsagePanelRow {
         label: String,
         value: String,
         detail: String? = nil,
+        detailAlignment: NSTextAlignment = .left,
         valueColor: NSColor? = nil,
         isEmphasized: Bool = false,
         accessibilityLabel: String? = nil,
@@ -82,6 +84,7 @@ struct UsagePanelRow {
         self.label = label
         self.value = value
         self.detail = detail
+        self.detailAlignment = detailAlignment
         self.valueColor = valueColor
         self.isEmphasized = isEmphasized
         self.action = action
@@ -902,6 +905,17 @@ private final class UsageMetricRowView: NSView {
         detailField.stringValue = row.detail ?? ""
         detailField.isHidden = !hasDetail
         detailField.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = row.detailAlignment
+        paragraph.minimumLineHeight = Self.detailLineHeight
+        paragraph.maximumLineHeight = Self.detailLineHeight
+        paragraph.paragraphSpacing = 0
+        paragraph.paragraphSpacingBefore = 0
+        detailField.attributedStringValue = NSAttributedString(string: row.detail ?? "", attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: detailField.textColor ?? NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraph
+        ])
         if let action = row.action {
             actionButton.isHidden = false
             actionButton.title = action.title
@@ -953,7 +967,7 @@ private final class UsageMetricRowView: NSView {
         if hasDetail {
             let detailY = firstLineY + Self.firstLineHeight
             let lineCount = (row.detail ?? "").components(separatedBy: "\n").count
-            detailField.frame = NSRect(x: inset, y: detailY, width: max(0, width - inset * 2), height: CGFloat(lineCount) * Self.detailLineHeight)
+            detailField.frame = NSRect(x: inset, y: detailY, width: max(0, width - inset * 2), height: CGFloat(lineCount) * Self.detailLineHeight + (lineCount > 1 ? 4 : 0))
         } else {
             detailField.frame = .zero
         }
@@ -1776,6 +1790,7 @@ private final class UsageColumnView: NSView {
                     rowIndex += 1
                     let height = row.detail.map {
                         Self.detailRowHeight + CGFloat($0.components(separatedBy: "\n").count - 1) * UsageMetricRowView.detailLineHeight
+                            + ($0.contains("\n") ? 4 : 0)
                     } ?? Self.singleLineRowHeight
                     rowView.apply(row, width: width, height: height, theme: theme)
                     rowView.frame = NSRect(x: 0, y: y, width: width, height: height)

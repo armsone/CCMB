@@ -3644,7 +3644,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, colors[3], "부계정"),
             rowGroups: [UsagePanelRowGroup(rows: [
                 UsagePanelRow(label: "본 요금제", value: primary?.planTitle ?? "정보 없음"),
-                UsagePanelRow(label: "부 요금제", value: secondary?.planTitle ?? "정보 없음"),
                 UsagePanelRow(label: "본 세션 초기화", value: reset(primary?.fiveHourResetsAt)),
                 UsagePanelRow(label: "본 주간 초기화", value: reset(primary?.weeklyResetsAt)),
                 UsagePanelRow(label: "부 세션 초기화", value: reset(secondary?.fiveHourResetsAt)),
@@ -3721,9 +3720,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             let expiryDetail = snapshot.resetCreditExpirations.isEmpty
                 ? (nasSlot != nil && resetCredits > 0 ? "만료 정보 없음" : nil)
                 : snapshot.resetCreditExpirations.map { "만료 \(Self.resetDateTimeTitle($0))" }.joined(separator: "\n")
-            creditRows.append(UsagePanelRow(label: "초기화 가능", value: "\(resetCredits)개", detail: expiryDetail))
+            creditRows.append(UsagePanelRow(label: "초기화", value: "\(resetCredits)개", detail: expiryDetail, detailAlignment: .right))
         } else if nasSlot != nil {
-            creditRows.append(UsagePanelRow(label: "초기화 가능", value: "NAS 미수집"))
+            creditRows.append(UsagePanelRow(label: "초기화", value: "NAS 미수집"))
         }
         if snapshot.creditsUnlimited {
             creditRows.append(UsagePanelRow(label: "남은 크레딧", value: "무제한", isEmphasized: true))
@@ -3869,9 +3868,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             ))
         }
         resetRows.append(UsagePanelRow(
-            label: "초기화권",
+            label: "초기화",
             value: snapshot.limitResets.map { "\($0.remainingCount)개" } ?? "확인 불가",
-            detail: snapshot.limitResets?.expiresAt.map { "만료 \(Self.resetDateTimeTitle($0))" }
+            detail: snapshot.limitResets?.expiresAt.map { "만료 \(Self.resetDateTimeTitle($0))" },
+            detailAlignment: .right
         ))
         // The Fable weekly limit is promoted to its own top ring (session,
         // Fable, weekly), so it is excluded from the lower model-limit rows
