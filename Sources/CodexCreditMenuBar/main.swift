@@ -3477,15 +3477,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 grok: grok
             )
         case .nas:
-            // Only the currently selected fixed account is ever rendered as
-            // the Gemini card; the other account's detail stays in NAS
-            // server status, not on this Mac's menu.
-            let selected = nasState.selectedGeminiServiceID
-            let title = selected == .gemini2 ? "Gemini · 부" : "Gemini · 주"
             return UsagePanelModel(
                 codex: nasCodexColumn(),
                 claude: nasClaudeColumn(),
-                gemini: nasGeminiColumn(title: title),
+                gemini: nasGeminiColumn(title: "Gemini"),
                 grok: grok
             )
         }
@@ -3648,13 +3643,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, colors[2], "부계정"),
             quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, colors[3], "부계정"),
             rowGroups: [UsagePanelRowGroup(rows: [
-                UsagePanelRow(label: "요금제", value: primary?.planTitle ?? "NAS 미수집"),
+                UsagePanelRow(label: "본 요금제", value: primary?.planTitle ?? "정보 없음"),
+                UsagePanelRow(label: "부 요금제", value: secondary?.planTitle ?? "정보 없음"),
                 UsagePanelRow(label: "본 세션 초기화", value: reset(primary?.fiveHourResetsAt)),
                 UsagePanelRow(label: "본 주간 초기화", value: reset(primary?.weeklyResetsAt)),
                 UsagePanelRow(label: "부 세션 초기화", value: reset(secondary?.fiveHourResetsAt)),
                 UsagePanelRow(label: "부 주간 초기화", value: reset(secondary?.weeklyResetsAt))
             ])],
-            accountLines: accounts.map { label, snapshot in "\(label) \(snapshot?.accountEmail ?? "정보 없음")" },
+            accountLines: accounts.map { label, snapshot in
+                let email = snapshot?.accountEmail ?? "정보 없음"
+                let display = email.lowercased().hasSuffix("@gmail.com") ? String(email.dropLast(10)) : email
+                return "\(label) \(display)"
+            },
             refreshLine: accounts.map { label, snapshot in
                 snapshot?.publishedAt.map { "\(label) \(Self.relativeFormatter.localizedString(for: $0, relativeTo: Date()))" } ?? "\(label) 미수집"
             }.joined(separator: " · "),
@@ -3865,6 +3865,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 value: Self.resetDateTimeTitle(resetsAt)
             ))
         }
+        resetRows.append(UsagePanelRow(
+            label: "초기화권",
+            value: ClaudeUsageCore.limitResetsTitle(snapshot.limitResets),
+            detail: snapshot.limitResets?.expiresAt.map { "만료 \(Self.resetDateTimeTitle($0))" }
+        ))
         // The Fable weekly limit is promoted to its own top ring (session,
         // Fable, weekly), so it is excluded from the lower model-limit rows
         // that the rest of `modelWeeklyLimits` still populates.
@@ -3909,6 +3914,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         if let nasSlot {
             var status = nasStatus(issue: nasSlot.issue, isStale: nasSlot.isStale)
+            if nasSlot.issue != nil, let retryAt = nasSlot.retryAt, retryAt > Date() {
+                status.lines.append("\(Self.resetDateTimeTitle(retryAt)) 이후 다시 조회")
+            }
             if status.lines.isEmpty, let unavailable = claudeUnavailableState(from: snapshot, now: Date()) {
                 status = (["\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until)) 초기화"], .systemOrange)
             }

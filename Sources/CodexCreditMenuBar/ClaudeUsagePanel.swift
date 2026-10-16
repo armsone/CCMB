@@ -1776,8 +1776,13 @@ private final class UsageColumnView: NSView {
             }
         }
 
-        accountLineCount = column.accountLines.count
         accountLabel.stringValue = column.accountLines.joined(separator: "\n")
+        // Reserve the wrapped height, not just the number of explicit newlines.
+        let footerTextWidth = max(1, width - 16)
+        let accountTextHeight = accountLabel.cell?.cellSize(forBounds:
+            NSRect(x: 0, y: 0, width: footerTextWidth, height: .greatestFiniteMagnitude)).height ?? 0
+        accountLineCount = column.accountLines.isEmpty ? 0 : max(column.accountLines.count,
+            Int(ceil(accountTextHeight / Self.statusLineHeight)))
         accountLabel.isHidden = column.accountLines.isEmpty
         hasRefreshLine = column.refreshLine != nil
         refreshLabel.stringValue = column.refreshLine ?? ""

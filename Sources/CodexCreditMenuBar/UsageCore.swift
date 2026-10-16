@@ -1508,6 +1508,7 @@ struct NASRefreshPolicy: Equatable {
 /// quota items. A missing/`unavailable` reading is kept distinct from a
 /// confirmed `0` balance and never invalidates the quota items alongside it.
 struct NASGeminiDetails: Equatable {
+    var planTitle: String? = nil
     let creditBalance: Int?
     let creditsFetchedAt: Date?
     let creditsStatus: String?
@@ -1528,8 +1529,12 @@ struct NASGeminiDetails: Equatable {
         if let status = object["credits_status"] as? String, ["ok", "unavailable"].contains(status) {
             creditsStatus = status
         }
-        guard creditBalance != nil || creditsFetchedAt != nil || creditsStatus != nil else { return nil }
-        return NASGeminiDetails(creditBalance: creditBalance, creditsFetchedAt: creditsFetchedAt, creditsStatus: creditsStatus)
+        let planTitle = (object["plan_title"] as? String).flatMap { value -> String? in
+            let title = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !title.isEmpty && title.count <= 120 && title.rangeOfCharacter(from: .controlCharacters) == nil ? title : nil
+        }
+        guard creditBalance != nil || creditsFetchedAt != nil || creditsStatus != nil || planTitle != nil else { return nil }
+        return NASGeminiDetails(planTitle: planTitle, creditBalance: creditBalance, creditsFetchedAt: creditsFetchedAt, creditsStatus: creditsStatus)
     }
 
     func jsonObject() -> [String: Any] {
@@ -1537,6 +1542,7 @@ struct NASGeminiDetails: Equatable {
             "credit_balance": creditBalance.map { $0 as Any } ?? NSNull(),
             "credits_fetched_at": creditsFetchedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
             "credits_status": creditsStatus.map { $0 as Any } ?? NSNull(),
+            "plan_title": planTitle.map { $0 as Any } ?? NSNull(),
         ]
     }
 }
@@ -2014,7 +2020,8 @@ enum NASItemMappingCore {
             fiveHourResetsAt: session?.resetsAt,
             creditBalance: creditBalance,
             publishedAt: fetchedAt,
-            accountEmail: entry.accountDisplay
+            accountEmail: entry.accountDisplay,
+            planTitle: entry.geminiDetails?.planTitle
         )
     }
 
@@ -2125,6 +2132,7 @@ enum NASItemMappingCore {
 /// why the most recent read (if any) did not replace it.
 struct NASServiceSlot: Equatable {
     var lastGood: NASServiceEntry?
+    var retryAt: Date? = nil
     /// True when the values on screen are not the latest successful read:
     /// the NAS marked them stale, a later read failed, or they were
     /// restored from disk at launch.
@@ -2163,6 +2171,7 @@ struct NASFourServiceState: Equatable {
         for id in NASServiceID.allCases {
             let entry = snapshot.entry(id)
             var slot = self.slot(id)
+            slot.retryAt = entry.ok ? nil : entry.refreshPolicy?.nextRefreshAt
             let previousAccount = slot.lastGood?.actualAccountRef ?? id.accountRef
             let incomingAccount = entry.actualAccountRef ?? id.accountRef
             if previousAccount != incomingAccount { slot.lastGood = nil }
