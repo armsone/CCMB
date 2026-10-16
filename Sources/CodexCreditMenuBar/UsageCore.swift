@@ -1557,6 +1557,7 @@ struct NASServiceEntry: Equatable {
     let error: NASServiceError?
     var actualAccountRef: String? = nil
     var historyIdentity: String? = nil
+    var accountDisplay: String? = nil
     /// Soft-parsed: an unrecognizable `gemini_details` never fails the
     /// envelope the way a malformed `actual_account_ref`/`history_identity`
     /// does, so a bad credit reading cannot turn a successful quota read
@@ -1647,9 +1648,13 @@ struct NASServiceEntry: Equatable {
             refreshPolicy = NASRefreshPolicy.parse(object["refresh_policy"])
         }
 
+        let display = (object["account_display"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accountDisplay = display.flatMap { value in
+            !value.isEmpty && value.count <= 254 && !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) ? value : nil
+        }
         return .entry(NASServiceEntry(
             id: id, ok: ok, fetchedAt: fetchedAt, stale: stale, items: items, error: error,
-            actualAccountRef: actualAccountRef, historyIdentity: historyIdentity,
+            actualAccountRef: actualAccountRef, historyIdentity: historyIdentity, accountDisplay: accountDisplay,
             geminiDetails: geminiDetails, refreshPolicy: refreshPolicy
         ))
     }
@@ -1661,6 +1666,7 @@ struct NASServiceEntry: Equatable {
             "account_ref": accountRef.map { $0 as Any } ?? NSNull(),
             "actual_account_ref": actualAccountRef.map { $0 as Any } ?? NSNull(),
             "history_identity": historyIdentity.map { $0 as Any } ?? NSNull(),
+            "account_display": accountDisplay.map { $0 as Any } ?? NSNull(),
             "ok": ok,
             "fetched_at": fetchedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
             "stale": stale,
@@ -2007,7 +2013,8 @@ enum NASItemMappingCore {
             fiveHourRemainingFraction: session?.remainingFraction,
             fiveHourResetsAt: session?.resetsAt,
             creditBalance: creditBalance,
-            publishedAt: fetchedAt
+            publishedAt: fetchedAt,
+            accountEmail: entry.accountDisplay
         )
     }
 
@@ -2020,7 +2027,7 @@ enum NASItemMappingCore {
         guard entry.ok, entry.id == .codex, let fetchedAt = entry.fetchedAt else { return nil }
         guard let weekly = unique(entry.items, window: .weekly, matching: { $0 == "codex" }) else { return nil }
         return RateLimitSnapshot(
-            accountID: nil,
+            accountID: entry.accountDisplay,
             planType: weekly.codexPlanType,
             usedPercent: 100 - weekly.remainingPercent,
             windowDurationMinutes: NASUsageItem.Window.weekly.minutes,
@@ -2075,6 +2082,7 @@ enum NASItemMappingCore {
             modelWeeklyLimits: modelLimits,
             extraUsage: extraUsage,
             limitResets: details?.claudeLimitResets,
+            account: entry.accountDisplay.map { ClaudeAccountInfo(email: $0, organizationName: nil, organizationUUID: nil) },
             planTitle: planTitle
         )
     }

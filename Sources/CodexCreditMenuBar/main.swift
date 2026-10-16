@@ -2830,7 +2830,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func refreshAllFromNAS(force: Bool) {
         guard isNASMode else { return }
         let requestedGeneration = dataSourceGeneration
-        let minimumInterval = force ? 0 : max(geminiRefreshInterval, NASFourServiceClient.minimumRequestIntervalSeconds)
+        let minimumInterval: TimeInterval = force ? 0 : 180
         NASFourServiceClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
             guard let self else { return }
             guard self.acceptsResult(from: .nas, generation: requestedGeneration, kind: "nas_snapshot") else { return }
@@ -2929,7 +2929,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func refreshNASHistory(force: Bool) {
         guard isNASMode else { return }
         let requestedGeneration = dataSourceGeneration
-        let minimumInterval = force ? 0 : max(geminiRefreshInterval, NASHistoryClient.minimumRequestIntervalSeconds)
+        let minimumInterval: TimeInterval = force ? 0 : 180
         NASHistoryClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
             guard let self else { return }
             guard self.acceptsResult(from: .nas, generation: requestedGeneration, kind: "nas_history") else { return }
@@ -3144,15 +3144,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     ) {
         switch dataCollectionSourcePreference {
         case .nas:
-            let selected = nasState.selectedGeminiServiceID
             return (
                 nasCodexHistoryStrip(),
                 nasClaudeHistoryStrip(),
-                nasGeminiHistoryStrip(
-                    key: selected.rawValue,
-                    accountLabel: selected == .gemini2 ? "부계정" : "본계정",
-                    color: UsageBrandColors.geminiText
-                ),
+                nasGeminiHistoryStrip(),
                 grokHistoryStrip()
             )
         case .localMac:
@@ -3337,25 +3332,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         return nasStrip(series: series, unit: "%")
     }
 
-    /// Gemini account1 and account2 each read only their own fixed series
-    /// (the NAS's 5-hour-session consumption per account); neither ever
-    /// borrows the other's points.
-    private func nasGeminiHistoryStrip(key: String, accountLabel: String, color: NSColor) -> UsageHistoryStrip? {
-        guard let history = lastNASHistory,
-              let id = NASServiceID(rawValue: key),
-              nasState.canShowHistory(history.series[key], for: id)
-        else { return nil }
-        let samples = NASHistoryChartCore.samples(history.series[key], unit: .percent)
-        let latest = samples.last.map { UsageConsumptionCore.amountTitle($0.amount, unit: "%") } ?? "기록 없음"
-        let failure = lastNASHistoryFetchFailureLabel.map { " · \($0)" } ?? ""
-        return UsageHistoryStrip(
-            caption: "갱신당 세션 \(latest)",
-            samples: samples,
-            slotCount: UsageConsumptionTracker.defaultCapacity,
-            unitSuffix: "%",
-            color: color,
-            accessibilityValue: "NAS 기록 Gemini \(accountLabel) 최근 \(samples.count)회 갱신 소비, 마지막 \(latest)\(failure)"
-        )
+    /// NAS consumption points are used as-is, with each account kept separate.
+    private func nasGeminiHistoryStrip() -> UsageHistoryStrip? {
+        guard let history = lastNASHistory else { return nil }
+        let series: [UsageHistorySeries] = [(NASServiceID.gemini, "본", UsageBrandColors.geminiGradient[0]), (.gemini2, "부", UsageBrandColors.geminiGradient[2])].compactMap { id, label, color in
+            guard let entry = nasState.slot(id).lastGood else { return nil }
+            let raw = history.series[id.rawValue]
+            if let expected = entry.historyIdentity, raw?.identityGeneration != expected { return nil }
+            if entry.historyIdentity == nil, entry.actualAccountRef != nil && entry.actualAccountRef != id.accountRef { return nil }
+            return UsageHistorySeries(label: label, samples: NASHistoryChartCore.samples(raw, unit: .percent), color: color)
+        }
+        return nasStrip(series: series, unit: "%")
     }
 
     private func nasStrip(series: [UsageHistorySeries], unit: String) -> UsageHistoryStrip {
@@ -3493,7 +3480,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             return UsagePanelModel(
                 codex: nasCodexColumn(),
                 claude: nasClaudeColumn(),
-                gemini: nasGeminiColumn(id: selected, title: title, snapshot: nasState.selectedGeminiSnapshot),
+                gemini: nasGeminiColumn(title: title),
                 grok: grok
             )
         }
@@ -3630,22 +3617,43 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         )
     }
 
-    /// The single visible Gemini card, reading only the fixed slot named by
-    /// `id` (the currently selected account) — never another account's
-    /// numbers, even while that other account is active on NAS.
-    private func nasGeminiColumn(id: NASServiceID, title: String, snapshot: GeminiUsageSnapshot?) -> UsagePanelColumn {
-        let slot = nasState.slot(id)
-        // The 4-position ring layout (C세션/C주간/O세션/O주간) needs all four
-        // original Google brand colors; dropping to the first two would leave
-        // the O(온라인) rings uncolored.
+    /// One card, with the primary pair followed by the current secondary pair.
+    private func nasGeminiColumn(title: String) -> UsagePanelColumn {
+        let primary = nasState.geminiSnapshot
+        let secondary = nasState.gemini2Snapshot
         let colors = UsageBrandColors.geminiGradient
-        return geminiColumn(
-            title: title,
-            from: snapshot,
-            fetchFailureLabel: slot.issue,
-            isStale: slot.isStale,
-            source: .nas,
-            colors: colors
+        func quota(_ caption: String, _ value: Double?, _ color: NSColor, _ account: String) -> UsagePanelQuota {
+            let remaining = value.flatMap { GeminiUsageCore.remainingPercent(from: $0) }
+            return UsagePanelQuota(caption: caption, percentText: remaining.map(Self.percentTitle(from:)) ?? "—",
+                fraction: (remaining ?? 0) / 100, color: color,
+                accessibilityValue: remaining.map { "\(account) \(caption) \(Self.percentTitle(from: $0))" } ?? "\(account) \(caption) 정보 없음")
+        }
+        func reset(_ date: Date?) -> String { date.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음" }
+        var statuses: [String] = []
+        for (id, label) in [(NASServiceID.gemini, "본계정"), (.gemini2, "보조계정")] {
+            let slot = nasState.slot(id)
+            let status = Self.nasStatus(issue: slot.issue, isStale: slot.isStale)
+            statuses += status.lines.map { "\(label) · \($0)" }
+        }
+        let accounts = [("본계정", primary), ("보조계정", secondary)]
+        return UsagePanelColumn(
+            title: title, accentColor: UsageBrandColors.geminiText,
+            quota: quota("세션", primary?.fiveHourRemainingFraction, colors[0], "본계정"),
+            secondaryQuota: quota("주간", primary?.weeklyRemainingFraction, colors[1], "본계정"),
+            tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, colors[2], "보조계정"),
+            quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, colors[3], "보조계정"),
+            rowGroups: [UsagePanelRowGroup(rows: [
+                UsagePanelRow(label: "요금제", value: primary?.planTitle ?? "NAS 미수집"),
+                UsagePanelRow(label: "본 세션 초기화", value: reset(primary?.fiveHourResetsAt)),
+                UsagePanelRow(label: "본 주간 초기화", value: reset(primary?.weeklyResetsAt)),
+                UsagePanelRow(label: "부 세션 초기화", value: reset(secondary?.fiveHourResetsAt)),
+                UsagePanelRow(label: "부 주간 초기화", value: reset(secondary?.weeklyResetsAt))
+            ])],
+            accountLines: accounts.map { label, snapshot in "\(label) \(snapshot?.accountEmail ?? "정보 없음")" },
+            refreshLine: accounts.map { label, snapshot in
+                snapshot?.publishedAt.map { "\(label) \(Self.relativeFormatter.localizedString(for: $0, relativeTo: Date()))" } ?? "\(label) 미수집"
+            }.joined(separator: " · "),
+            statusLines: statuses, statusColor: statuses.isEmpty ? .secondaryLabelColor : .systemOrange
         )
     }
 
@@ -3799,7 +3807,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         var summaryRows: [UsagePanelRow] = []
         var resetRows: [UsagePanelRow] = []
         var modelLimitRows: [UsagePanelRow] = []
-        var extraRows: [UsagePanelRow] = []
         let fableLimit = ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)
 
         // A NAS-reported plan (from the fresh, same-token `claude_details`
@@ -3875,12 +3882,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 detail: detail
             ))
         }
-        if let extraUsage = snapshot.extraUsage {
-            extraRows.append(UsagePanelRow(label: "추가 사용량", value: extraUsageTitle(extraUsage), valueColor: .systemPurple))
-        } else if nasSlot != nil {
-            extraRows.append(UsagePanelRow(label: "추가 사용량", value: "NAS 미수집"))
-        }
-
         var rowGroups: [UsagePanelRowGroup] = []
         let primaryRows = summaryRows + resetRows
         if !primaryRows.isEmpty {
@@ -3888,9 +3889,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         if !modelLimitRows.isEmpty {
             rowGroups.append(UsagePanelRowGroup(title: "모델별 주간 한도", glyph: .chart, rows: modelLimitRows))
-        }
-        if !extraRows.isEmpty {
-            rowGroups.append(UsagePanelRowGroup(title: "추가 사용량", glyph: .creditCard, rows: extraRows))
         }
         var accountLines: [String] = []
         if let account = snapshot.account {
