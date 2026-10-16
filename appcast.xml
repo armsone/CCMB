@@ -3,6 +3,22 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.1.15</title>
+            <pubDate>Fri, 16 Oct 2026 20:15:56 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.1.15</link>
+            <sparkle:version>202610162004</sparkle:version>
+            <sparkle:shortVersionString>2.1.15</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.1.15
+
+- NAS에서 받은 계정·요금제·초기화 정보를 기존 세 서비스 화면에 표시합니다.
+- Gemini 본계정과 부계정의 세션·주간 한도를 한 카드에서 비교하고 계정명을 간결하게 표시합니다.
+- Codex와 Claude의 초기화 개수·만료시간을 표시하고, 만료시간은 작은 글씨로 오른쪽 정렬합니다.
+- NAS 조회 주기와 소비 이력 표시를 정리하고, 오류가 발생해도 마지막 정상 정보를 유지합니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.1.15/CCMB-2.1.15.zip" length="3185946" type="application/octet-stream" sparkle:edSignature="g2Lmeld5NOgS/KKKVJWNaeileXcKJb4AKsXK7+XQHnyG6Kxq8kEsaGaEyxSZjt5/bvDTcCSGtIr/iQuJWhDbBA=="/>
+        </item>
+        <item>
             <title>2.1.6</title>
             <pubDate>Fri, 16 Oct 2026 18:09:07 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.1.6</link>
@@ -37,24 +53,6 @@
 - 기존 사용량·초기화 횟수·크레딧·추가 사용량 정보를 유지합니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.1.5/CCMB-2.1.5.zip" length="3149244" type="application/octet-stream" sparkle:edSignature="xZ9VdXpsKAl4yleJ2EqqR8frGmI5OETsu2HPiY1H0KMUJnbm990s1TV9paQm6b4EzUTnq/6Z2v6OXU42ecw5Dw=="/>
-        </item>
-        <item>
-            <title>2.1.4</title>
-            <pubDate>Fri, 16 Oct 2026 16:21:59 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.1.4</link>
-            <sparkle:version>202610161611</sparkle:version>
-            <sparkle:shortVersionString>2.1.4</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.1.4
-
-- NAS 모드에서도 실제 사용량 변화에 따라 빠르게, 유휴 상태에서는 느리게 갱신합니다.
-- 선택된 Gemini 계정의 AI 크레딧을 복구하고 미확인 값과 실제 0을 구분합니다.
-- CLI에서 제공하지 않는 Claude 웹 초기화권을 0개로 잘못 단정하지 않도록 수정했습니다.
-- 데이터 갱신 실패 시 이전 정상 정보와 조회 상태를 함께 유지합니다.
-
-Claude 웹 전용 초기화권은 웹 인증 경로가 별도로 필요하며 CLI 조회 불가를 권리 없음으로 표시하지 않습니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.1.4/CCMB-2.1.4.zip" length="3152294" type="application/octet-stream" sparkle:edSignature="c+OCGE9ISxRuqMRAr+sfnO7GblSRjqrmAdun7yM1mcye2kLjEs+D0EkeIWpPXsR0j/yAoLzUNbrT6Bq6NlMVAA=="/>
         </item>
         <item>
             <title>2.0.34</title>
