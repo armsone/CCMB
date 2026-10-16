@@ -2496,10 +2496,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func apply(_ snapshot: RateLimitSnapshot) {
         if refreshIntervalPreference == UsageCore.smartRefreshPreference,
-           codexSmartRefreshPolicy.update(values: [
-               snapshot.usedPercent,
-               snapshot.creditBalance
-           ]) {
+           codexSmartRefreshPolicy.update(
+               values: [snapshot.usedPercent, snapshot.creditBalance],
+               identityTokens: [snapshot.accountID, SmartRefreshPolicy.identityToken(snapshot.resetsAt)]
+           ) {
             smartCadenceDidChange(for: .codex)
         }
         scheduleResetVerification(
@@ -2660,11 +2660,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             case .success(let snapshot):
                 self.lastClaudeSnapshot = ClaudeUsageCore.merge(preferred: snapshot, fallback: self.lastClaudeSnapshot)
                 if self.claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference,
-                   self.claudeSmartRefreshPolicy.update(values: [
-                       snapshot.fiveHourUsedPercent,
-                       snapshot.weeklyUsedPercent,
-                       ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
-                   ]) {
+                   self.claudeSmartRefreshPolicy.update(
+                       values: [
+                           snapshot.fiveHourUsedPercent,
+                           snapshot.weeklyUsedPercent,
+                           ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
+                       ],
+                       identityTokens: [snapshot.account?.email, SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)]
+                   ) {
                     self.smartCadenceDidChange(for: .claude)
                 }
                 self.recordClaudeConsumption()
@@ -2748,11 +2751,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             case .success(let snapshot):
                 self.lastGeminiSnapshot = snapshot
                 if self.geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference,
-                   self.geminiSmartRefreshPolicy.update(values: [
-                       snapshot.fiveHourRemainingFraction,
-                       snapshot.weeklyRemainingFraction,
-                       snapshot.creditBalance.map(Double.init)
-                   ]) {
+                   self.geminiSmartRefreshPolicy.update(
+                       values: [
+                           snapshot.fiveHourRemainingFraction.map { $0 * 100 },
+                           snapshot.weeklyRemainingFraction.map { $0 * 100 },
+                           snapshot.creditBalance.map(Double.init)
+                       ],
+                       identityTokens: [snapshot.accountEmail, SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)]
+                   ) {
                     self.smartCadenceDidChange(for: .gemini)
                 }
                 self.recordGeminiConsumption()
@@ -2824,6 +2830,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 self.nasState.apply(snapshot)
                 self.lastNASSnapshotReceivedAt = Date()
                 self.persistNASServiceCache()
+                self.updateNASSmartRefreshPolicies()
                 self.diagnosticLog.log("nas_snapshot_applied", [
                     "okServices": .int(snapshot.entries.filter(\.ok).count)
                 ])
@@ -2841,6 +2848,63 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             self.updateSplitPanel()
         }
         refreshNASHistory(force: force)
+    }
+
+    /// NAS mode never calls the OAuth/API clients directly, so the three
+    /// smart policies below are the only place a cached NAS read can drive
+    /// the adaptive cadence. Only meaningful usage/account/reset fields from
+    /// the mapped snapshots go in — never `fetchedAt`/`stale`, which change
+    /// on every poll and would pin every provider to `active` forever.
+    private func updateNASSmartRefreshPolicies() {
+        if refreshIntervalPreference == UsageCore.smartRefreshPreference, let snapshot = nasState.codexSnapshot,
+           codexSmartRefreshPolicy.update(
+               values: [snapshot.usedPercent, snapshot.creditBalance],
+               identityTokens: [snapshot.accountID, SmartRefreshPolicy.identityToken(snapshot.resetsAt)]
+           ) {
+            smartCadenceDidChange(for: .codex)
+        }
+        if claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference, let snapshot = nasState.claudeSnapshot,
+           claudeSmartRefreshPolicy.update(
+               values: [
+                   snapshot.fiveHourUsedPercent,
+                   snapshot.weeklyUsedPercent,
+                   ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
+               ],
+               identityTokens: [snapshot.account?.email, SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)]
+           ) {
+            smartCadenceDidChange(for: .claude)
+        }
+        if geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference, let snapshot = nasState.selectedGeminiSnapshot,
+           geminiSmartRefreshPolicy.update(
+               values: [
+                   snapshot.fiveHourRemainingFraction.map { $0 * 100 },
+                   snapshot.weeklyRemainingFraction.map { $0 * 100 },
+                   snapshot.creditBalance.map(Double.init)
+               ],
+               // `accountEmail` is always nil for a NAS-mapped snapshot (it is
+               // local-collector-only); the NAS-selected service's own
+               // account ref is the correct identity here, matching the
+               // guard `selectedGeminiSnapshot` already applies above. The
+               // "nas" host's own `selected_account_id` is the exact
+               // selection the guard checks against, so it is preferred over
+               // the entry's `actualAccountRef` when present. `selectionGeneration`
+               // is carried through as-is (nil when the host has not
+               // published one, e.g. auto-switch is off) rather than
+               // invented, so a real generation bump still reactivates the
+               // policy without a placeholder masking an absent one. The
+               // service identity itself (`gemini` vs `gemini2`) is included
+               // so switching the selected slot also reactivates the policy.
+               identityTokens: [
+                   nasState.hostStatus?.hosts.first(where: { $0.hostID == "nas" })?.selectedAccountID
+                       ?? nasState.slot(nasState.selectedGeminiServiceID).lastGood?.actualAccountRef
+                       ?? nasState.selectedGeminiServiceID.accountRef,
+                   nasState.hostStatus?.hosts.first(where: { $0.hostID == "nas" })?.selectionGeneration,
+                   nasState.selectedGeminiServiceID.rawValue,
+                   SmartRefreshPolicy.identityToken(snapshot.fiveHourResetsAt)
+               ]
+           ) {
+            smartCadenceDidChange(for: .gemini)
+        }
     }
 
     /// Reads the NAS consumption-history v2 on its own throttle. A helper
@@ -3950,11 +4014,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let weeklyQuota = makeQuota(caption: "\(weeklyCaption) 남음", remaining: weeklyRemaining, color: weeklyColor, accessibilityLabel: "\(accessibilityPrefix) 주간 사용량")
 
         var rows: [UsagePanelRow] = []
-        if let planTitle = snapshot?.planTitle {
-            rows.append(UsagePanelRow(label: "요금제", value: planTitle))
-        }
+        // Always keep this row even when the plan is unknown, instead of
+        // dropping it, so the card's row set doesn't shift based on data
+        // availability; a missing plan is never inferred from 5h-bucket
+        // usage, only reported as such.
+        rows.append(UsagePanelRow(label: "요금제", value: snapshot?.planTitle ?? "확인 불가"))
         rows.append(UsagePanelRow(label: "\(sessionCaption) 초기화", value: sessionResetValue()))
         rows.append(UsagePanelRow(label: "\(weeklyCaption) 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
+        // `creditBalance` of exactly 0 is a real, trusted reading from the
+        // matched/selected account's own snapshot — never carried over from a
+        // previously selected account — and is shown as-is; only an absent
+        // (nil) value falls back to "확인 불가". A missing credit reading
+        // never implies quota exhaustion or an account switch.
+        if let creditBalance = snapshot?.creditBalance {
+            rows.append(UsagePanelRow(label: "AI 크레딧", value: Self.creditDetailTitle(from: Double(creditBalance))))
+        } else if snapshot != nil {
+            rows.append(UsagePanelRow(label: "AI 크레딧", value: "확인 불가"))
+        }
 
         let status: (lines: [String], color: NSColor)
         if isNAS {
@@ -5083,7 +5159,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private static func refreshPreferenceTitle(_ seconds: Int) -> String {
-        if seconds == UsageCore.smartRefreshPreference { return "스마트 (1→3→5→10분)" }
+        if seconds == UsageCore.smartRefreshPreference { return "스마트 (30초→2→5분)" }
         return seconds == 0 ? "끔" : durationTitle(seconds: seconds)
     }
 

@@ -3242,7 +3242,7 @@ private final class IntervalControlButton: RolloverButton {
         for seconds in options {
             let item = NSMenuItem(
                 title: seconds == UsageCore.smartRefreshPreference
-                    ? "스마트 (1→3→5→10분)"
+                    ? "스마트 (30초→2→5분)"
                     : (seconds == 0 ? "끔" : Self.durationTitle(seconds)),
                 action: #selector(selectInterval(_:)),
                 keyEquivalent: ""

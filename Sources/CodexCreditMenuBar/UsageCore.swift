@@ -24,20 +24,22 @@ struct RateLimitSnapshot {
 /// Provider-independent adaptive cadence. Each visible provider owns one
 /// instance, so activity in Claude does not unnecessarily accelerate Codex
 /// or Gemini. A value change greater than 0.01 immediately returns that
-/// provider to one-minute monitoring.
+/// provider to fast (30s) monitoring; repeated unchanged reads relax the
+/// interval to 120s, then 300s. Callers must only ever pass meaningful usage
+/// or account-identity values here (never a poll/fetch timestamp or an
+/// `updatedAt` clock), since a value that always differs would pin the
+/// policy to `active` forever.
 struct SmartRefreshPolicy: Equatable {
     enum Mode: Int, Equatable {
         case active
         case idleShort
         case idleMedium
-        case idleLong
 
         var interval: TimeInterval {
             switch self {
-            case .active: return 60
-            case .idleShort: return 180
+            case .active: return 30
+            case .idleShort: return 120
             case .idleMedium: return 300
-            case .idleLong: return 600
             }
         }
 
@@ -45,16 +47,14 @@ struct SmartRefreshPolicy: Equatable {
             switch self {
             case .active: return 3
             case .idleShort: return 6
-            case .idleMedium: return 12
-            case .idleLong: return nil
+            case .idleMedium: return nil
             }
         }
 
         var next: Mode {
             switch self {
             case .active: return .idleShort
-            case .idleShort: return .idleMedium
-            case .idleMedium, .idleLong: return .idleLong
+            case .idleShort, .idleMedium: return .idleMedium
             }
         }
     }
@@ -62,23 +62,36 @@ struct SmartRefreshPolicy: Equatable {
     private(set) var mode: Mode = .active
     private(set) var unchangedCount = 0
     private(set) var lastValues: [Double?]?
+    /// Exact-equality identity tokens (account id/email, reset timestamp as
+    /// an unambiguous string), tracked separately from `lastValues` so no
+    /// hashing or numeric folding is involved — hashValue is per-process and
+    /// can collide, so it must never stand in for identity comparison.
+    private(set) var lastIdentityTokens: [String?]?
 
     var interval: TimeInterval { mode.interval }
 
-    /// Returns true when the effective interval changed.
-    mutating func update(values: [Double?]) -> Bool {
-        guard let previous = lastValues else {
+    /// Returns true when the effective interval changed. `identityTokens`
+    /// are compared with exact string equality (never hashed into
+    /// `values`), so a switched account or a confirmed quota reset counts
+    /// as activity exactly like a changed usage percentage, with no
+    /// collision risk.
+    mutating func update(values: [Double?], identityTokens: [String?] = []) -> Bool {
+        guard let previousValues = lastValues, let previousIdentityTokens = lastIdentityTokens else {
             lastValues = values
+            lastIdentityTokens = identityTokens
             return false
         }
-        let changed = values.count != previous.count || zip(values, previous).contains { current, old in
+        let valuesChanged = values.count != previousValues.count || zip(values, previousValues).contains { current, old in
             switch (current, old) {
             case let (current?, old?): return abs(current - old) > 0.01
             case (nil, nil): return false
             default: return true
             }
         }
+        let identityChanged = identityTokens != previousIdentityTokens
+        let changed = valuesChanged || identityChanged
         lastValues = values
+        lastIdentityTokens = identityTokens
         if changed {
             let didChangeMode = mode != .active
             mode = .active
@@ -96,6 +109,15 @@ struct SmartRefreshPolicy: Equatable {
         mode = .active
         unchangedCount = 0
         lastValues = nil
+        lastIdentityTokens = nil
+    }
+
+    /// Formats a reset timestamp as an exact, unambiguous identity token
+    /// (epoch seconds), for use in `update(values:identityTokens:)`. Never
+    /// pass a poll/fetch timestamp (e.g. `updatedAt`) here — only a
+    /// confirmed upstream reset instant.
+    static func identityToken(_ date: Date?) -> String? {
+        date.map { String($0.timeIntervalSince1970) }
     }
 }
 
@@ -484,7 +506,7 @@ enum UsageCore {
     /// Selectable auto-refresh cadences in seconds, `0` meaning off. The menu,
     /// the persistence normalizer, and the tests all read this one list so a
     /// new cadence cannot be added in one place and forgotten in another.
-    /// `-1` selects the adaptive 1→3→5→10 minute policy used by the
+    /// `-1` selects the bounded adaptive 30s→2→5 minute policy used by the
     /// reference usage monitor; `0` disables automatic refresh.
     static let smartRefreshPreference = -1
     static let refreshIntervalOptions: [Int] = [-1, 0, 60, 180, 300, 600]
@@ -1425,6 +1447,88 @@ struct NASClaudeExtraUsage: Equatable {
     }
 }
 
+/// Describes the *upstream* collection cadence NAS itself is actually
+/// running — never the client's own automatic cached-GET polling, which
+/// stays independent (active 30s / idle 120s, up to 300s locally) and is
+/// never clamped to this value. A poll/fetch timestamp must never be
+/// confused with this: `nextRefreshAt` is NAS's own planned next collection,
+/// not "when the client last asked".
+struct NASRefreshPolicy: Equatable {
+    enum Mode: String { case active, idle, backoff }
+
+    let mode: Mode?
+    let intervalSeconds: Double?
+    let nextRefreshAt: Date?
+
+    static func parse(_ value: Any?) -> NASRefreshPolicy? {
+        guard let object = value as? [String: Any] else { return nil }
+        var mode: Mode?
+        if let rawMode = object["mode"] as? String {
+            mode = Mode(rawValue: rawMode)
+        }
+        var intervalSeconds: Double?
+        if !NASJSON.isAbsent(object["interval_seconds"]) {
+            if let value = NASJSON.number(object["interval_seconds"]), value >= 0 {
+                intervalSeconds = value
+            }
+        }
+        var nextRefreshAt: Date?
+        if !NASJSON.isAbsent(object["next_refresh_at"]) {
+            if let seconds = NASJSON.positiveTimestamp(object["next_refresh_at"]) {
+                nextRefreshAt = Date(timeIntervalSince1970: seconds)
+            }
+        }
+        guard mode != nil || intervalSeconds != nil || nextRefreshAt != nil else { return nil }
+        return NASRefreshPolicy(mode: mode, intervalSeconds: intervalSeconds, nextRefreshAt: nextRefreshAt)
+    }
+
+    func jsonObject() -> [String: Any] {
+        [
+            "mode": mode.map { $0.rawValue as Any } ?? NSNull(),
+            "interval_seconds": intervalSeconds.map { $0 as Any } ?? NSNull(),
+            "next_refresh_at": nextRefreshAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+        ]
+    }
+}
+
+/// Service-level `gemini_details` on a `gemini`/`gemini2` entry: the AI
+/// credit balance reading NAS collected independently of the session/weekly
+/// quota items. A missing/`unavailable` reading is kept distinct from a
+/// confirmed `0` balance and never invalidates the quota items alongside it.
+struct NASGeminiDetails: Equatable {
+    let creditBalance: Int?
+    let creditsFetchedAt: Date?
+    let creditsStatus: String?
+
+    static func parse(_ value: Any?) -> NASGeminiDetails? {
+        guard let object = value as? [String: Any] else { return nil }
+        var creditBalance: Int?
+        if !NASJSON.isAbsent(object["credit_balance"]) {
+            guard let balance = NASJSON.integer(object["credit_balance"]), balance >= 0 else { return nil }
+            creditBalance = balance
+        }
+        var creditsFetchedAt: Date?
+        if !NASJSON.isAbsent(object["credits_fetched_at"]) {
+            guard let seconds = NASJSON.positiveTimestamp(object["credits_fetched_at"]) else { return nil }
+            creditsFetchedAt = Date(timeIntervalSince1970: seconds)
+        }
+        var creditsStatus: String?
+        if let status = object["credits_status"] as? String, ["ok", "unavailable"].contains(status) {
+            creditsStatus = status
+        }
+        guard creditBalance != nil || creditsFetchedAt != nil || creditsStatus != nil else { return nil }
+        return NASGeminiDetails(creditBalance: creditBalance, creditsFetchedAt: creditsFetchedAt, creditsStatus: creditsStatus)
+    }
+
+    func jsonObject() -> [String: Any] {
+        [
+            "credit_balance": creditBalance.map { $0 as Any } ?? NSNull(),
+            "credits_fetched_at": creditsFetchedAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+            "credits_status": creditsStatus.map { $0 as Any } ?? NSNull(),
+        ]
+    }
+}
+
 /// One entry of the NAS v2 snapshot's fixed four-service envelope. `ok`,
 /// `stale`, and `error` are carried through as-is — this layer never
 /// invents a successful read out of a failed one, and never zeroes out a
@@ -1441,6 +1545,13 @@ struct NASServiceEntry: Equatable {
     let error: NASServiceError?
     var actualAccountRef: String? = nil
     var historyIdentity: String? = nil
+    /// Soft-parsed: an unrecognizable `gemini_details` never fails the
+    /// envelope the way a malformed `actual_account_ref`/`history_identity`
+    /// does, so a bad credit reading cannot turn a successful quota read
+    /// into an error.
+    var geminiDetails: NASGeminiDetails? = nil
+    /// Soft-parsed per-service `refresh_policy`; see `NASRefreshPolicy`.
+    var refreshPolicy: NASRefreshPolicy? = nil
 
     var service: String { id.rawValue }
     var provider: String { id.provider }
@@ -1515,7 +1626,20 @@ struct NASServiceEntry: Equatable {
         if ok, items.isEmpty || error != nil { return .entry(schemaInvalid(id)) }
         if !ok, error == nil { return .entry(schemaInvalid(id)) }
 
-        return .entry(NASServiceEntry(id: id, ok: ok, fetchedAt: fetchedAt, stale: stale, items: items, error: error, actualAccountRef: actualAccountRef, historyIdentity: historyIdentity))
+        var geminiDetails: NASGeminiDetails?
+        if (id == .gemini || id == .gemini2), !NASJSON.isAbsent(object["gemini_details"]) {
+            geminiDetails = NASGeminiDetails.parse(object["gemini_details"])
+        }
+        var refreshPolicy: NASRefreshPolicy?
+        if !NASJSON.isAbsent(object["refresh_policy"]) {
+            refreshPolicy = NASRefreshPolicy.parse(object["refresh_policy"])
+        }
+
+        return .entry(NASServiceEntry(
+            id: id, ok: ok, fetchedAt: fetchedAt, stale: stale, items: items, error: error,
+            actualAccountRef: actualAccountRef, historyIdentity: historyIdentity,
+            geminiDetails: geminiDetails, refreshPolicy: refreshPolicy
+        ))
     }
 
     func jsonObject() -> [String: Any] {
@@ -1532,6 +1656,8 @@ struct NASServiceEntry: Equatable {
             "error": error.map { error -> Any in
                 ["code": error.code, "message": error.message.map { $0 as Any } ?? NSNull()]
             } ?? NSNull(),
+            "gemini_details": geminiDetails?.jsonObject() ?? NSNull(),
+            "refresh_policy": refreshPolicy?.jsonObject() ?? NSNull(),
         ]
     }
 }
@@ -1772,6 +1898,9 @@ struct NASSnapshotV2: Equatable {
     /// Entries in the fixed `codex, claude, gemini, gemini2` order.
     let entries: [NASServiceEntry]
     var hostStatus = NASHostStatus(hosts: [], autoSwitchEnabled: nil)
+    /// Report-level `refresh_policy`: NAS's own overall collection cadence,
+    /// metadata only (see `NASRefreshPolicy`).
+    var refreshPolicy: NASRefreshPolicy? = nil
 
     func entry(_ id: NASServiceID) -> NASServiceEntry {
         entries.first { $0.id == id } ?? NASServiceEntry.schemaInvalid(id)
@@ -1827,7 +1956,11 @@ enum NASSnapshotV2Core {
                 retryAt: NASJSON.positiveTimestamp(raw["retry_at"]).map { Date(timeIntervalSince1970: $0) }
             )
         }
-        return NASSnapshotV2(generatedAt: generatedAt, collection: collection, entries: entries, hostStatus: hostStatus)
+        var refreshPolicy: NASRefreshPolicy?
+        if !NASJSON.isAbsent(object["refresh_policy"]) {
+            refreshPolicy = NASRefreshPolicy.parse(object["refresh_policy"])
+        }
+        return NASSnapshotV2(generatedAt: generatedAt, collection: collection, entries: entries, hostStatus: hostStatus, refreshPolicy: refreshPolicy)
     }
 }
 
@@ -1852,11 +1985,16 @@ enum NASItemMappingCore {
         let session = unique(entry.items, window: .session, matching: isGeminiModelsItem)
         let weekly = unique(entry.items, window: .weekly, matching: isGeminiModelsItem)
         guard session != nil || weekly != nil else { return nil }
+        // `credits_status == "unavailable"` or an absent `gemini_details`
+        // both map to a nil `creditBalance` — a missing reading, never a
+        // confirmed zero — so the quota rows above are never downgraded.
+        let creditBalance = entry.geminiDetails?.creditsStatus == "ok" ? entry.geminiDetails?.creditBalance : nil
         return GeminiUsageSnapshot(
             weeklyRemainingFraction: weekly?.remainingFraction,
             weeklyResetsAt: weekly?.resetsAt,
             fiveHourRemainingFraction: session?.remainingFraction,
             fiveHourResetsAt: session?.resetsAt,
+            creditBalance: creditBalance,
             publishedAt: fetchedAt
         )
     }
