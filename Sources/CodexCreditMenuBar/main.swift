@@ -3718,13 +3718,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         if let resetCredits = snapshot.resetCredits {
-            creditRows.append(UsagePanelRow(label: "초기화 가능", value: "\(resetCredits)개"))
-            for (index, expiry) in snapshot.resetCreditExpirations.enumerated() {
-                creditRows.append(UsagePanelRow(label: "\(index + 1)번 만료", value: Self.resetDateTimeTitle(expiry)))
-            }
-            if nasSlot != nil, resetCredits > 0, snapshot.resetCreditExpirations.isEmpty {
-                creditRows.append(UsagePanelRow(label: "만료", value: "정보 없음"))
-            }
+            let expiryDetail = snapshot.resetCreditExpirations.isEmpty
+                ? (nasSlot != nil && resetCredits > 0 ? "만료 정보 없음" : nil)
+                : snapshot.resetCreditExpirations.map { "만료 \(Self.resetDateTimeTitle($0))" }.joined(separator: "\n")
+            creditRows.append(UsagePanelRow(label: "초기화 가능", value: "\(resetCredits)개", detail: expiryDetail))
         } else if nasSlot != nil {
             creditRows.append(UsagePanelRow(label: "초기화 가능", value: "NAS 미수집"))
         }

@@ -836,7 +836,7 @@ private final class UsageRowBackgroundView: NSView {
 private final class UsageMetricRowView: NSView {
     private static let horizontalInset: CGFloat = 8
     private static let firstLineHeight: CGFloat = 15
-    private static let detailLineHeight: CGFloat = 12
+    static let detailLineHeight: CGFloat = 12
     private static let maximumLabelWidthFraction: CGFloat = 0.55
     private static let minimumValueWidth: CGFloat = 88
 
@@ -847,7 +847,12 @@ private final class UsageMetricRowView: NSView {
         field.alignment = .right
         return field
     }()
-    private let detailField = UsageMetricRowView.makeLabel(color: .secondaryLabelColor, size: 10, weight: .regular)
+    private let detailField: NSTextField = {
+        let field = UsageMetricRowView.makeLabel(color: .secondaryLabelColor, size: 10, weight: .regular)
+        field.maximumNumberOfLines = 0
+        field.cell?.usesSingleLineMode = false
+        return field
+    }()
     private let actionButton: NSButton = {
         let button = NSButton(title: "", target: nil, action: nil)
         button.bezelStyle = .rounded
@@ -947,7 +952,8 @@ private final class UsageMetricRowView: NSView {
 
         if hasDetail {
             let detailY = firstLineY + Self.firstLineHeight
-            detailField.frame = NSRect(x: inset, y: detailY, width: max(0, width - inset * 2), height: Self.detailLineHeight)
+            let lineCount = (row.detail ?? "").components(separatedBy: "\n").count
+            detailField.frame = NSRect(x: inset, y: detailY, width: max(0, width - inset * 2), height: CGFloat(lineCount) * Self.detailLineHeight)
         } else {
             detailField.frame = .zero
         }
@@ -1768,7 +1774,9 @@ private final class UsageColumnView: NSView {
                 for row in group.rows {
                     let rowView = rowViews[rowIndex]
                     rowIndex += 1
-                    let height = row.detail == nil ? Self.singleLineRowHeight : Self.detailRowHeight
+                    let height = row.detail.map {
+                        Self.detailRowHeight + CGFloat($0.components(separatedBy: "\n").count - 1) * UsageMetricRowView.detailLineHeight
+                    } ?? Self.singleLineRowHeight
                     rowView.apply(row, width: width, height: height, theme: theme)
                     rowView.frame = NSRect(x: 0, y: y, width: width, height: height)
                     y += height + Self.rowGap
