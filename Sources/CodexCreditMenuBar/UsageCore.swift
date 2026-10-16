@@ -1193,6 +1193,7 @@ struct NASUsageItem: Equatable {
     let hasClaudeDetails: Bool
     let claudePlanType: String?
     let claudeExtraUsage: NASClaudeExtraUsage?
+    var claudeLimitResets: ClaudeLimitResets? = nil
 
     var remainingFraction: Double { remainingPercent / 100 }
 
@@ -1258,8 +1259,10 @@ struct NASUsageItem: Equatable {
         var hasClaudeDetails = false
         var claudePlanType: String?
         var claudeExtraUsage: NASClaudeExtraUsage?
+        var claudeLimitResets: ClaudeLimitResets?
         if allowsClaudeDetails, !NASJSON.isAbsent(object["claude_details"]), let details = object["claude_details"] as? [String: Any] {
             hasClaudeDetails = true
+            claudeLimitResets = ClaudeLimitResets.parse(details["limit_resets"])
             if let planType = details["plan_type"] as? String, ClaudePlanCore.nasAllowlist.contains(planType.lowercased()) {
                 claudePlanType = planType.lowercased()
             }
@@ -1281,7 +1284,8 @@ struct NASUsageItem: Equatable {
             codexResetCreditsAvailable: codexResetCreditsAvailable,
             hasClaudeDetails: hasClaudeDetails,
             claudePlanType: claudePlanType,
-            claudeExtraUsage: claudeExtraUsage
+            claudeExtraUsage: claudeExtraUsage,
+            claudeLimitResets: claudeLimitResets
         )
     }
 
@@ -1309,9 +1313,41 @@ struct NASUsageItem: Equatable {
             object["claude_details"] = [
                 "plan_type": claudePlanType.map { $0 as Any } ?? NSNull(),
                 "extra_usage": claudeExtraUsage?.jsonObject() ?? NSNull(),
+                "limit_resets": claudeLimitResets?.jsonObject() ?? NSNull(),
             ]
         }
         return object
+    }
+}
+
+/// Confirmed grant count and separate current eligibility, never inferred from quota.
+struct ClaudeLimitResets: Sendable, Equatable {
+    let remainingCount: Int
+    let usableNow: Bool?
+    let expiresAt: Date?
+
+    static func parse(_ value: Any?) -> ClaudeLimitResets? {
+        guard let object = value as? [String: Any],
+              let count = NASJSON.integer(object["remaining_count"]), count >= 0
+        else { return nil }
+        var usable: Bool?
+        if !NASJSON.isAbsent(object["usable_now"]) {
+            guard let value = NASJSON.bool(object["usable_now"]) else { return nil }
+            usable = value
+        }
+        var expiry: Date?
+        if !NASJSON.isAbsent(object["expires_at"]) {
+            guard let value = NASJSON.positiveTimestamp(object["expires_at"]), value < 9_007_199_254_740_992
+            else { return nil }
+            expiry = Date(timeIntervalSince1970: value)
+        }
+        return ClaudeLimitResets(remainingCount: count, usableNow: usable, expiresAt: expiry)
+    }
+
+    func jsonObject() -> [String: Any] {
+        ["remaining_count": remainingCount,
+         "usable_now": usableNow.map { $0 as Any } ?? NSNull(),
+         "expires_at": expiresAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull()]
     }
 }
 
@@ -1888,6 +1924,7 @@ enum NASItemMappingCore {
             publishedAt: fetchedAt,
             modelWeeklyLimits: modelLimits,
             extraUsage: extraUsage,
+            limitResets: details?.claudeLimitResets,
             planTitle: planTitle
         )
     }
@@ -2562,6 +2599,7 @@ struct ClaudeUsageSnapshot {
     let publishedAt: Date?
     let modelWeeklyLimits: [ClaudeModelWeeklyLimit]
     let extraUsage: ClaudeExtraUsage?
+    let limitResets: ClaudeLimitResets?
     let account: ClaudeAccountInfo?
     /// Confirmed plan display title. For a NAS-sourced snapshot this comes
     /// from `claude_details.plan_type`; for a local-only snapshot this stays
@@ -2582,6 +2620,7 @@ struct ClaudeUsageSnapshot {
         publishedAt: Date? = nil,
         modelWeeklyLimits: [ClaudeModelWeeklyLimit] = [],
         extraUsage: ClaudeExtraUsage? = nil,
+        limitResets: ClaudeLimitResets? = nil,
         account: ClaudeAccountInfo? = nil,
         planTitle: String? = nil
     ) {
@@ -2597,6 +2636,7 @@ struct ClaudeUsageSnapshot {
         self.publishedAt = publishedAt
         self.modelWeeklyLimits = modelWeeklyLimits
         self.extraUsage = extraUsage
+        self.limitResets = limitResets
         self.account = account
         self.planTitle = planTitle
     }
@@ -2617,6 +2657,7 @@ struct ClaudeUsageSnapshot {
             publishedAt: publishedAt,
             modelWeeklyLimits: modelWeeklyLimits,
             extraUsage: extraUsage,
+            limitResets: limitResets,
             account: account,
             planTitle: planTitle
         )
@@ -2628,6 +2669,13 @@ struct ClaudeUsageSnapshot {
 }
 
 enum ClaudeUsageCore {
+    static func limitResetsTitle(_ resets: ClaudeLimitResets?) -> String {
+        guard let resets else { return "확인 불가" }
+        let count = "\(resets.remainingCount)개"
+        guard resets.remainingCount > 0, let usable = resets.usableNow else { return count }
+        return count + (usable ? " · 사용 가능" : " · 대기")
+    }
+
     /// The shared cache remains valid through the longest smart-refresh step
     /// plus one minute of timer leeway. Fetch failures still hide its values
     /// immediately rather than presenting stale numbers as live.
@@ -2768,6 +2816,7 @@ enum ClaudeUsageCore {
                 "fresh": false,
                 "modelWeeklyLimits": [],
                 "extraUsage": NSNull(),
+                "limitResets": NSNull(),
                 "account": NSNull(),
                 "planTitle": NSNull()
             ]
@@ -2814,6 +2863,7 @@ enum ClaudeUsageCore {
                     "isEnabled": extraUsage.isEnabled ?? NSNull()
                 ]
             } ?? NSNull(),
+            "limitResets": snapshot.limitResets?.jsonObject() ?? NSNull(),
             "account": snapshot.account.map { account -> [String: Any] in
                 [
                     "email": account.email ?? NSNull(),
@@ -2893,6 +2943,7 @@ enum ClaudeUsageCore {
             publishedAt: date("fetchedAt"),
             modelWeeklyLimits: modelWeeklyLimits,
             extraUsage: extraUsage,
+            limitResets: ClaudeLimitResets.parse(payload["limitResets"]),
             account: account,
             planTitle: payload["planTitle"] as? String
         )
@@ -2932,6 +2983,7 @@ enum ClaudeUsageCore {
             publishedAt: preferred.publishedAt ?? fallback.publishedAt,
             modelWeeklyLimits: preferred.modelWeeklyLimits.isEmpty ? fallback.modelWeeklyLimits : preferred.modelWeeklyLimits,
             extraUsage: preferred.extraUsage ?? fallback.extraUsage,
+            limitResets: preferred.limitResets,
             account: preferred.account ?? fallback.account,
             planTitle: preferred.planTitle ?? fallback.planTitle
         )
@@ -2972,6 +3024,7 @@ enum ClaudeUsageCore {
                 publishedAt: cache.publishedAt,
                 modelWeeklyLimits: current.modelWeeklyLimits,
                 extraUsage: current.extraUsage,
+                limitResets: cache.quotaSource == "claude-statusline" ? current.limitResets : cache.limitResets,
                 account: current.account,
                 planTitle: cache.planTitle ?? current.planTitle
             )
@@ -2993,6 +3046,7 @@ enum ClaudeUsageCore {
             publishedAt: current.publishedAt,
             modelWeeklyLimits: current.modelWeeklyLimits,
             extraUsage: current.extraUsage,
+            limitResets: current.limitResets,
             account: current.account,
             planTitle: current.planTitle
         )

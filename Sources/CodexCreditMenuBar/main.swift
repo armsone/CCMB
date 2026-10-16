@@ -3785,6 +3785,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 value: Self.resetDateTimeTitle(resetsAt)
             ))
         }
+        resetRows.append(UsagePanelRow(label: "리셋권", value: ClaudeUsageCore.limitResetsTitle(isCurrent ? snapshot.limitResets : nil)))
         // The Fable weekly limit is promoted to its own top ring (session,
         // Fable, weekly), so it is excluded from the lower model-limit rows
         // that the rest of `modelWeeklyLimits` still populates.

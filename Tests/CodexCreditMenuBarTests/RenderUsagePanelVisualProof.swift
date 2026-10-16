@@ -54,6 +54,7 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
                 UsagePanelRowGroup(rows: [
                     UsagePanelRow(label: "세션 초기화", value: "2시간 뒤", isEmphasized: true),
                     UsagePanelRow(label: "주간 초기화", value: "3일 뒤", isEmphasized: true),
+                    UsagePanelRow(label: "리셋권", value: ClaudeUsageCore.limitResetsTitle(ClaudeLimitResets(remainingCount: 0, usableNow: false, expiresAt: nil))),
                 ])
             ],
             accountLines: ["놀이터(NAS) 기준"],
