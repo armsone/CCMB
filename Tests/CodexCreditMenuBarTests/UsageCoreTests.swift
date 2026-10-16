@@ -61,32 +61,32 @@ final class LowerControlsLayoutTests: XCTestCase {
 }
 
 final class UsageCoreTests: XCTestCase {
-    func testSmartRefreshPolicySlowsFromOneToThreeToFiveToTenMinutes() {
+    func testSmartRefreshPolicySlowsFromThirtySecondsToTwoToFiveMinutes() {
         var policy = SmartRefreshPolicy()
-        XCTAssertEqual(policy.interval, 60)
+        XCTAssertEqual(policy.interval, 30)
         XCTAssertFalse(policy.update(values: [10, 20]))
 
         for _ in 0..<2 { XCTAssertFalse(policy.update(values: [10, 20])) }
         XCTAssertTrue(policy.update(values: [10, 20]))
-        XCTAssertEqual(policy.interval, 180)
+        XCTAssertEqual(policy.interval, 120)
 
         for _ in 0..<5 { XCTAssertFalse(policy.update(values: [10, 20])) }
         XCTAssertTrue(policy.update(values: [10, 20]))
         XCTAssertEqual(policy.interval, 300)
 
         for _ in 0..<11 { XCTAssertFalse(policy.update(values: [10, 20])) }
-        XCTAssertTrue(policy.update(values: [10, 20]))
-        XCTAssertEqual(policy.interval, 600)
+        XCTAssertFalse(policy.update(values: [10, 20]))
+        XCTAssertEqual(policy.interval, 300)
     }
 
-    func testSmartRefreshPolicyReturnsToOneMinuteWhenAnyValueChanges() {
+    func testSmartRefreshPolicyReturnsToThirtySecondsWhenAnyValueChanges() {
         var policy = SmartRefreshPolicy()
         XCTAssertFalse(policy.update(values: [10, 20]))
         for _ in 0..<3 { _ = policy.update(values: [10, 20]) }
-        XCTAssertEqual(policy.interval, 180)
+        XCTAssertEqual(policy.interval, 120)
 
         XCTAssertTrue(policy.update(values: [10, 20.02]))
-        XCTAssertEqual(policy.interval, 60)
+        XCTAssertEqual(policy.interval, 30)
         XCTAssertEqual(policy.unchangedCount, 0)
     }
 
