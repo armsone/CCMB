@@ -2162,7 +2162,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         statusItem.autosaveName = "CCMB.MainStatusItem"
         statusItem.isVisible = true
         statusItem.button?.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        statusItem.button?.toolTip = "Codex, Claude, Gemini 남은 사용량과 크레딧"
+        statusItem.button?.toolTip = "Codex, Claude, Gemini 본계정·부계정 남은 사용량과 크레딧"
         statusItem.button?.image = nil
         statusItem.button?.imagePosition = .noImage
         statusItem.button?.setAccessibilityLabel("Codex, Claude, Gemini 사용량")
@@ -3420,9 +3420,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         switch dataCollectionSourcePreference {
         case .localMac:
             guard let snapshot = lastSnapshot else { return }
-            setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot))
+            setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, gemini2: nil))
             statusItem.button?.setAccessibilityValue(
-                Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot)
+                Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, gemini2: nil)
             )
         case .nas:
             // Menu-bar figures in NAS mode come only from NAS values (Gemini
@@ -3430,7 +3430,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             let parts = Self.statusTitleParts(
                 from: nasState.codexSnapshot,
                 claude: nasState.claudeSnapshot,
-                gemini: nasState.selectedGeminiSnapshot
+                gemini: nasState.geminiSnapshot,
+                gemini2: nasState.gemini2Snapshot
             )
             if parts.isEmpty {
                 setStatusTitle("NAS")
@@ -3441,7 +3442,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 "놀이터 기준 " + Self.accessibilityStatus(
                     from: nasState.codexSnapshot,
                     claude: nasState.claudeSnapshot,
-                    gemini: nasState.selectedGeminiSnapshot
+                    gemini: nasState.geminiSnapshot,
+                    gemini2: nasState.gemini2Snapshot
                 )
             )
         }
@@ -5209,7 +5211,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func statusTitleParts(
         from snapshot: RateLimitSnapshot?,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?
+        gemini: GeminiUsageSnapshot?,
+        gemini2: GeminiUsageSnapshot?
     ) -> [(text: String, color: NSColor)] {
         var parts: [(text: String, color: NSColor)] = []
 
@@ -5224,8 +5227,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append((percentTitle(from: claudeRemaining), UsageBrandColors.claude))
         }
 
-        if let geminiRemaining = geminiRemainingValue(cli: gemini) {
-            parts.append((percentTitle(from: geminiRemaining), UsageBrandColors.geminiText))
+        if gemini != nil || gemini2 != nil {
+            // Missing account keeps its slot with a placeholder, never 0%.
+            parts.append((geminiRemainingValue(cli: gemini).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiText))
+            parts.append((geminiRemainingValue(cli: gemini2).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiWeeklyGradient[0]))
         }
 
         return parts
@@ -5238,7 +5243,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private static func accessibilityStatus(
         from snapshot: RateLimitSnapshot?,
         claude: ClaudeUsageSnapshot?,
-        gemini: GeminiUsageSnapshot?
+        gemini: GeminiUsageSnapshot?,
+        gemini2: GeminiUsageSnapshot?
     ) -> String {
         var parts: [String] = []
         if let usedPercent = snapshot?.usedPercent {
@@ -5247,8 +5253,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
             parts.append("남은 Claude 세션 \(percentTitle(from: claudeRemaining))")
         }
-        if let geminiRemaining = geminiRemainingValue(cli: gemini) {
-            parts.append("남은 Gemini 세션 사용량 \(percentTitle(from: geminiRemaining))")
+        if gemini != nil || gemini2 != nil {
+            for (label, snap) in [("본계정", gemini), ("부계정", gemini2)] {
+                let value = geminiRemainingValue(cli: snap).map(percentTitle(from:)) ?? "정보 없음"
+                parts.append("남은 Gemini \(label) 세션 사용량 \(value)")
+            }
         }
         return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
     }
