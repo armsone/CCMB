@@ -5230,7 +5230,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if gemini != nil || gemini2 != nil {
             // Missing account keeps its slot with a placeholder, never 0%.
             parts.append((geminiRemainingValue(cli: gemini).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiText))
-            parts.append((geminiRemainingValue(cli: gemini2).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiWeeklyGradient[0]))
+            parts.append((geminiRemainingValue(cli: gemini2).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiGradient[2]))
         }
 
         return parts
