@@ -2161,7 +2161,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func configureStatusItem() {
         statusItem.autosaveName = "CCMB.MainStatusItem"
         statusItem.isVisible = true
-        statusItem.button?.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        statusItem.button?.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         statusItem.button?.toolTip = "Codex, Claude, Gemini 본계정·부계정 남은 사용량과 크레딧"
         statusItem.button?.image = nil
         statusItem.button?.imagePosition = .noImage
