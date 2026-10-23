@@ -5151,9 +5151,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         statusItem.length = ceil(title.size().width + 8)
     }
 
-    /// Numbers use the menu bar's neutral adaptive ink. Only the percent
-    /// sign carries the provider accent, keeping the compact readout both
-    /// readable and visually consistent with neighboring menu bar items.
+    /// The percent sign is dropped from the menu bar readout and the number
+    /// carries the provider accent instead.
     private func appendStatusPart(
         _ text: String,
         providerColor: NSColor,
@@ -5171,10 +5170,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let number = String(text[..<percentIndex])
         title.append(NSAttributedString(
             string: number,
-            attributes: statusTitleAttributes(font: font, color: statusAdaptiveTextColor())
-        ))
-        title.append(NSAttributedString(
-            string: "%",
             attributes: statusTitleAttributes(font: font, color: providerColor)
         ))
     }
