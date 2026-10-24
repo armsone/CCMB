@@ -3653,7 +3653,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         // 세 번째 계정은 NAS가 gemini3를 보낸 경우에만 나타난다.
         let tertiary = nasState.hasGemini3 ? nasState.gemini3Snapshot : nil
         let showsThird = nasState.hasGemini3
-        let colors = UsageBrandColors.geminiGradient
         func quota(_ caption: String, _ value: Double?, _ color: NSColor, _ account: String) -> UsagePanelQuota {
             let remaining = value.flatMap { GeminiUsageCore.remainingPercent(from: $0) }
             return UsagePanelQuota(caption: caption, percentText: remaining.map(Self.percentTitle(from:)) ?? "—",
@@ -3684,18 +3683,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 UsagePanelRow(label: "3 세션 초기화", value: reset(tertiary?.fiveHourResetsAt)),
                 UsagePanelRow(label: "3 주간 초기화", value: reset(tertiary?.weeklyResetsAt))
             ]
-            let gray = UsageBrandColors.geminiThirdAccount
+            let third = UsageBrandColors.geminiThirdAccount
             supplementalQuotas = [
-                quota("3 세션", tertiary?.fiveHourRemainingFraction, gray, "세 번째 계정"),
-                quota("3 주간", tertiary?.weeklyRemainingFraction, gray, "세 번째 계정")
+                quota("3 세션", tertiary?.fiveHourRemainingFraction, third, "세 번째 계정"),
+                quota("3 주간", tertiary?.weeklyRemainingFraction, third, "세 번째 계정")
             ]
         }
         return UsagePanelColumn(
             title: title, accentColor: UsageBrandColors.geminiText,
-            quota: quota("세션", primary?.fiveHourRemainingFraction, colors[0], "본계정"),
-            secondaryQuota: quota("주간", primary?.weeklyRemainingFraction, colors[1], "본계정"),
-            tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, colors[2], "부계정"),
-            quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, colors[3], "부계정"),
+            quota: quota("세션", primary?.fiveHourRemainingFraction, UsageBrandColors.geminiMainAccount, "본계정"),
+            secondaryQuota: quota("주간", primary?.weeklyRemainingFraction, UsageBrandColors.geminiMainAccount, "본계정"),
+            tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, UsageBrandColors.geminiSecondAccount, "부계정"),
+            quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, UsageBrandColors.geminiSecondAccount, "부계정"),
             rowGroups: [UsagePanelRowGroup(rows: resetRows)],
             accountLines: accounts.map { label, snapshot in
                 let email = snapshot?.accountEmail ?? "정보 없음"
@@ -5272,8 +5271,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         if gemini != nil || gemini2 != nil {
             // Missing account keeps its slot with a placeholder, never 0%.
-            parts.append((geminiRemainingValue(cli: gemini).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiText))
-            parts.append((geminiRemainingValue(cli: gemini2).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiGradient[2]))
+            parts.append((geminiRemainingValue(cli: gemini).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiMainAccount))
+            parts.append((geminiRemainingValue(cli: gemini2).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiSecondAccount))
         }
         // 세 번째 계정은 NAS가 값을 보낸 경우에만 덧붙인다(없으면 기존 표시 그대로).
         if gemini3 != nil {

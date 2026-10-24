@@ -263,9 +263,12 @@ enum UsageBrandColors {
     /// blue, the leading color of the four-color mark.
     static let geminiText = geminiGradient[0]
 
-    /// 세 번째 Gemini 계정 전용 회색 #808080. 밝은/어두운 배경 모두에서 읽히는
-    /// 중간 명도라 라이트/다크 분기가 필요 없다.
-    static let geminiThirdAccount = NSColor(ccmbHex: 0x808080)
+    /// Account identity colors, in the order of Google's brand colors: main
+    /// blue, secondary red, third yellow (green stays unused). The same three
+    /// colors mark the account on the cards, the menu bar and the chart.
+    static let geminiMainAccount = geminiGradient[0]
+    static let geminiSecondAccount = geminiGradient[1]
+    static let geminiThirdAccount = geminiGradient[2]
 }
 
 private extension NSColor {

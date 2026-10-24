@@ -29,21 +29,140 @@ enum UsageTrendProvider: Int, CaseIterable {
     }
 }
 
-/// Line colors of the three Gemini accounts: blue, cyan and teal, close
-/// enough to read as one family and far enough apart to follow in one chart.
+/// Line colors of the three Gemini accounts: Google brand blue, red and
+/// yellow, the same colors the account cards use.
 enum UsageTrendPalette {
-    static let geminiMain = NSColor(srgbRed: 76 / 255.0, green: 141 / 255.0, blue: 246 / 255.0, alpha: 1)
-    static let geminiSecond = NSColor(srgbRed: 62 / 255.0, green: 195 / 255.0, blue: 240 / 255.0, alpha: 1)
-    static let geminiThird = NSColor(srgbRed: 47 / 255.0, green: 208 / 255.0, blue: 166 / 255.0, alpha: 1)
+    static let geminiMain = UsageBrandColors.geminiMainAccount
+    static let geminiSecond = UsageBrandColors.geminiSecondAccount
+    static let geminiThird = UsageBrandColors.geminiThirdAccount
+}
+
+/// One 30-minute stretch of one series: the measured consumption of every
+/// refresh recorded inside a wall-clock aligned half hour, summed. Buckets are
+/// the only thing the chart plots, so a 3-minute refresh cadence reads as a
+/// trend instead of a forest of needles. A stretch with no sample has no
+/// bucket at all (unknown, never zero); a real zero reading sums to zero.
+struct UsageTrendBucket {
+    /// Aligned half-hour boundary this bucket belongs to.
+    let start: Date
+    /// The part of that half hour that is actually on the chart: clipped to
+    /// the 24-hour window, to `now`, and to the first recorded sample.
+    let from: Date
+    let to: Date
+    let amount: Double
+    let sampleCount: Int
+    let firstAt: Date
+    let lastAt: Date
+    let segment: Int?
+    /// The half hour that is still running (left edge).
+    let isInProgress: Bool
+    /// Cut short at the older edge by the window or by the first recording.
+    var isClipped: Bool
+    /// Refreshes inside it are further apart than the source's own gap.
+    let hasGap: Bool
+
+    var isEdge: Bool { isInProgress || isClipped }
+    var midpoint: Date { Date(timeIntervalSince1970: (from.timeIntervalSince1970 + to.timeIntervalSince1970) / 2) }
+}
+
+enum UsageTrendBucketing {
+    static let bucketSeconds: TimeInterval = 30 * 60
+
+    /// Start of the local half hour that contains `date`.
+    static func boundary(for date: Date) -> Date {
+        let offset = TimeInterval(TimeZone.current.secondsFromGMT(for: date))
+        let local = date.timeIntervalSince1970 + offset
+        return Date(timeIntervalSince1970: floor(local / bucketSeconds) * bucketSeconds - offset)
+    }
+
+    private struct Key: Hashable {
+        let start: TimeInterval
+        let segment: Int?
+    }
+
+    /// Newest first. Samples of different baseline segments never share a
+    /// bucket, and samples outside `windowStart ... now` are not used.
+    static func buckets(
+        _ samples: [(sample: UsageConsumptionSample, segment: Int?)],
+        gap: TimeInterval,
+        now: Date,
+        windowStart: Date,
+        earliest: Date
+    ) -> [UsageTrendBucket] {
+        var groups: [Key: [(at: Date, amount: Double)]] = [:]
+        for item in samples where item.sample.at >= windowStart {
+            let at = min(item.sample.at, now)
+            let key = Key(start: boundary(for: at).timeIntervalSince1970, segment: item.segment)
+            groups[key, default: []].append((at, item.sample.amount))
+        }
+        let lowerBound = max(windowStart, earliest)
+        var result: [UsageTrendBucket] = []
+        for (key, entries) in groups {
+            let ordered = entries.sorted { $0.at < $1.at }
+            guard let first = ordered.first, let last = ordered.last else { continue }
+            let start = Date(timeIntervalSince1970: key.start)
+            let end = start.addingTimeInterval(bucketSeconds)
+            let from = max(start, lowerBound)
+            let to = max(from, min(end, now))
+            var hasGap = false
+            for (older, newer) in zip(ordered, ordered.dropFirst()) where newer.at.timeIntervalSince(older.at) > gap {
+                hasGap = true
+            }
+            result.append(UsageTrendBucket(
+                start: start,
+                from: from,
+                to: to,
+                amount: ordered.reduce(0) { $0 + max(0, $1.amount) },
+                sampleCount: ordered.count,
+                firstAt: first.at,
+                lastAt: last.at,
+                segment: key.segment,
+                isInProgress: end > now,
+                isClipped: start < lowerBound,
+                hasGap: hasGap
+            ))
+        }
+        result.sort {
+            $0.start != $1.start ? $0.start > $1.start : ($0.segment ?? -1) > ($1.segment ?? -1)
+        }
+        // A series that began recording part-way into its oldest half hour
+        // has only covered part of it.
+        if let oldest = result.last, oldest.firstAt.timeIntervalSince(oldest.from) > gap {
+            result[result.count - 1].isClipped = true
+        }
+        return result
+    }
+
+    /// Buckets (newest first) stay on one line only when they are neighbouring
+    /// half hours of the same baseline segment and the source itself did not
+    /// stop reporting between them. An empty half hour is never bridged.
+    static func runs(_ buckets: [UsageTrendBucket], gap: TimeInterval) -> [[UsageTrendBucket]] {
+        var result: [[UsageTrendBucket]] = []
+        var current: [UsageTrendBucket] = []
+        for bucket in buckets {
+            if let newer = current.last {
+                let neighbours = Int(((newer.start.timeIntervalSince(bucket.start)) / bucketSeconds).rounded()) == 1
+                if !neighbours || newer.segment != bucket.segment || newer.firstAt.timeIntervalSince(bucket.lastAt) > gap {
+                    result.append(current)
+                    current = []
+                }
+            }
+            current.append(bucket)
+        }
+        if !current.isEmpty { result.append(current) }
+        return result
+    }
 }
 
 /// Trailing 24-hour line chart with a restrained gradient under each line.
-/// Newest is on the LEFT, 24 hours ago on the RIGHT. Every series is drawn
-/// only from its real per-refresh samples, at the moment they were recorded:
-/// nothing is interpolated across a gap, summed across series, or padded. The
-/// stretch older than the first recorded sample is hatched and labelled
-/// instead of being drawn as zeros, and the vertical scale is the actual
-/// per-refresh consumption (never a normalised 0–100%).
+/// Newest is on the LEFT, 24 hours ago on the RIGHT. Each series plots the
+/// measured consumption of every 30-minute stretch (the sum of its real
+/// per-refresh amounts), so the line reads as a trend. Nothing is
+/// interpolated across a gap, summed across series or baseline segments, or
+/// padded: an empty stretch is left open, the stretch older than the first
+/// recorded sample is hatched and labelled instead of being drawn as zeros,
+/// and the vertical scale is the actual consumption (never a normalised
+/// 0–100%). The left-most half hour is still running and is drawn as such.
 @MainActor
 final class UsageTrendPlotView: NSView {
     static let windowDuration: TimeInterval = 24 * 60 * 60
@@ -75,12 +194,13 @@ final class UsageTrendPlotView: NSView {
 
     var strip: UsageHistoryStrip? {
         didSet {
-            hoveredDate = nil
+            hoveredStart = nil
             needsDisplay = true
         }
     }
 
-    private var hoveredDate: Date?
+    /// Aligned start of the half hour under the pointer.
+    private var hoveredStart: Date?
 
     override var isFlipped: Bool { true }
 
@@ -139,6 +259,37 @@ final class UsageTrendPlotView: NSView {
         }
     }
 
+    /// Everything the chart draws, derived from one `now`: per-series 30-minute
+    /// buckets (newest first) and the gap each series is split at.
+    private struct Plotted {
+        let now: Date
+        let earliest: Date?
+        let gaps: [TimeInterval]
+        let buckets: [[UsageTrendBucket]]
+    }
+
+    private func plotted(now: Date) -> Plotted {
+        let perSeries = visible(now: now)
+        let allSamples = perSeries.flatMap { $0.map(\.sample) }
+        let earliest = allSamples.map(\.at).min()
+        let fallback = Self.fallbackGap(for: allSamples)
+        let windowStart = now.addingTimeInterval(-Self.windowDuration)
+        var gaps: [TimeInterval] = []
+        var buckets: [[UsageTrendBucket]] = []
+        for (index, samples) in perSeries.enumerated() {
+            let gap = (strip != nil && index < strip!.series.count ? strip!.series[index].gapSeconds : nil) ?? fallback
+            gaps.append(gap)
+            buckets.append(UsageTrendBucketing.buckets(
+                samples, gap: gap, now: now, windowStart: windowStart, earliest: earliest ?? windowStart
+            ))
+        }
+        return Plotted(now: now, earliest: earliest, gaps: gaps, buckets: buckets)
+    }
+
+    private func x(for bucket: UsageTrendBucket, now: Date) -> CGFloat {
+        x(for: bucket.midpoint, now: now)
+    }
+
     /// A round axis maximum at or above the peak, so the three grid lines
     /// (0, half, max) carry tidy values.
     static func niceMaximum(for peak: Double) -> Double {
@@ -178,15 +329,14 @@ final class UsageTrendPlotView: NSView {
         let axisAttributes: [NSAttributedString.Key: Any] = [.font: Self.axisFont, .foregroundColor: labelColor]
         let noteAttributes: [NSAttributedString.Key: Any] = [.font: Self.noteFont, .foregroundColor: mutedColor]
 
-        let perSeries = visible(now: now)
-        let allSamples = perSeries.flatMap { $0.map(\.sample) }
-        let peak = allSamples.map(\.amount).max() ?? 0
+        let data = plotted(now: now)
+        let peak = data.buckets.flatMap { $0.map(\.amount) }.max() ?? 0
         let yMax = Self.niceMaximum(for: peak)
 
         drawGrid(in: rect, yMax: yMax, attributes: axisAttributes)
         drawTimeAxis(in: rect, now: now, attributes: axisAttributes)
 
-        guard let earliest = allSamples.map(\.at).min() else {
+        guard let earliest = data.earliest else {
             drawHatch(in: rect, context: context)
             drawCentered("아직 기록된 소모량이 없습니다", in: rect, attributes: noteAttributes)
             return
@@ -197,7 +347,7 @@ final class UsageTrendPlotView: NSView {
         if rect.maxX - earliestX > 6 {
             let blank = NSRect(x: earliestX, y: rect.minY, width: rect.maxX - earliestX, height: rect.height)
             drawHatch(in: blank, context: context)
-            let lines = ["기록 없음", "수집 시작 \(Self.startFormatter.string(from: earliest))"]
+            let lines = ["기록 없음"]
             let widest = lines.map { ($0 as NSString).size(withAttributes: noteAttributes).width }.max() ?? 0
             let lineHeight = (lines[0] as NSString).size(withAttributes: noteAttributes).height
             if widest + 8 <= blank.width {
@@ -213,42 +363,24 @@ final class UsageTrendPlotView: NSView {
             }
         }
 
-        let gapFallback = Self.fallbackGap(for: allSamples)
         // Later series first, so the first (main) line ends up on top.
-        for index in perSeries.indices.reversed() {
-            guard let strip, index < strip.series.count, !perSeries[index].isEmpty else { continue }
+        for index in data.buckets.indices.reversed() {
+            guard let strip, index < strip.series.count, !data.buckets[index].isEmpty else { continue }
             let entry = strip.series[index]
-            let gap = entry.gapSeconds ?? gapFallback
-            let runs = Self.runs(perSeries[index], gap: gap)
-            for run in runs {
-                let points = run.map { NSPoint(x: x(for: $0.sample.at, now: now), y: y(for: $0.sample.amount, yMax: yMax)) }
+            for run in UsageTrendBucketing.runs(data.buckets[index], gap: data.gaps[index]) {
+                let points = run.map {
+                    TrendPoint(
+                        location: NSPoint(x: x(for: $0, now: now), y: y(for: $0.amount, yMax: yMax)),
+                        isEdge: $0.isEdge
+                    )
+                }
                 drawRun(points, color: entry.color, baseline: rect.maxY, top: rect.minY, context: context)
             }
         }
 
-        if let hoveredDate {
-            drawHover(date: hoveredDate, perSeries: perSeries, now: now, yMax: yMax, rect: rect, context: context)
+        if let hoveredStart {
+            drawHover(start: hoveredStart, data: data, yMax: yMax, rect: rect, context: context)
         }
-    }
-
-    /// Consecutive samples (newest first) stay in one run only when they are
-    /// close enough in time and belong to the same baseline segment.
-    private static func runs(
-        _ samples: [(sample: UsageConsumptionSample, segment: Int?)],
-        gap: TimeInterval
-    ) -> [[(sample: UsageConsumptionSample, segment: Int?)]] {
-        var result: [[(sample: UsageConsumptionSample, segment: Int?)]] = []
-        var current: [(sample: UsageConsumptionSample, segment: Int?)] = []
-        for item in samples {
-            if let last = current.last,
-               last.sample.at.timeIntervalSince(item.sample.at) > gap || last.segment != item.segment {
-                result.append(current)
-                current = []
-            }
-            current.append(item)
-        }
-        if !current.isEmpty { result.append(current) }
-        return result
     }
 
     /// Without a gap the NAS declared (the local tracker), unconnected means
@@ -260,39 +392,74 @@ final class UsageTrendPlotView: NSView {
         return max(3_600, gaps[gaps.count / 2] * 4)
     }
 
-    private func drawRun(_ points: [NSPoint], color: NSColor, baseline: CGFloat, top: CGFloat, context: CGContext) {
+    private struct TrendPoint {
+        let location: NSPoint
+        /// The running half hour or a cut-short oldest one: drawn hollow and
+        /// linked with a dashed stroke, because it is not a full 30 minutes.
+        let isEdge: Bool
+    }
+
+    private func drawRun(_ points: [TrendPoint], color: NSColor, baseline: CGFloat, top: CGFloat, context: CGContext) {
         guard let first = points.first else { return }
         if points.count == 1 {
-            color.setFill()
-            NSBezierPath(ovalIn: NSRect(x: first.x - 2, y: first.y - 2, width: 4, height: 4)).fill()
+            drawMarker(first, color: color)
             return
         }
-        let line = NSBezierPath()
-        line.lineWidth = 1.6
-        line.lineJoinStyle = .round
-        line.lineCapStyle = .round
-        line.move(to: first)
-        points.dropFirst().forEach { line.line(to: $0) }
 
-        let area = line.copy() as! NSBezierPath
-        area.line(to: NSPoint(x: points[points.count - 1].x, y: baseline))
-        area.line(to: NSPoint(x: first.x, y: baseline))
-        area.close()
-        context.saveGState()
-        area.addClip()
-        let colors = [color.withAlphaComponent(0.26).cgColor, color.withAlphaComponent(0.02).cgColor] as CFArray
-        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
-            context.drawLinearGradient(
-                gradient,
-                start: CGPoint(x: 0, y: top),
-                end: CGPoint(x: 0, y: baseline),
-                options: []
-            )
+        // Fill only under complete half hours (edge points sit at the ends).
+        let complete = points.filter { !$0.isEdge }.map(\.location)
+        if complete.count >= 2, let head = complete.first, let tail = complete.last {
+            let area = NSBezierPath()
+            area.move(to: head)
+            complete.dropFirst().forEach { area.line(to: $0) }
+            area.line(to: NSPoint(x: tail.x, y: baseline))
+            area.line(to: NSPoint(x: head.x, y: baseline))
+            area.close()
+            context.saveGState()
+            area.addClip()
+            let colors = [color.withAlphaComponent(0.20).cgColor, color.withAlphaComponent(0.015).cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                context.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: 0, y: top),
+                    end: CGPoint(x: 0, y: baseline),
+                    options: []
+                )
+            }
+            context.restoreGState()
         }
-        context.restoreGState()
 
         color.setStroke()
-        line.stroke()
+        for (newer, older) in zip(points, points.dropFirst()) {
+            let link = NSBezierPath()
+            link.lineWidth = 1.4
+            link.lineJoinStyle = .miter
+            link.lineCapStyle = .butt
+            link.move(to: newer.location)
+            link.line(to: older.location)
+            if newer.isEdge || older.isEdge {
+                link.setLineDash([3, 2.5], count: 2, phase: 0)
+            }
+            link.stroke()
+        }
+        for point in points where point.isEdge {
+            drawMarker(point, color: color)
+        }
+    }
+
+    /// Hollow ring for a half hour that is not complete; a small dot for an
+    /// isolated complete one that has no neighbour to be joined to.
+    private func drawMarker(_ point: TrendPoint, color: NSColor) {
+        let dot = NSRect(x: point.location.x - 2.5, y: point.location.y - 2.5, width: 5, height: 5)
+        if point.isEdge {
+            let ring = NSBezierPath(ovalIn: dot)
+            color.setStroke()
+            ring.lineWidth = 1.2
+            ring.stroke()
+        } else {
+            color.setFill()
+            NSBezierPath(ovalIn: dot.insetBy(dx: 0.5, dy: 0.5)).fill()
+        }
     }
 
     private func drawGrid(in rect: NSRect, yMax: Double, attributes: [NSAttributedString.Key: Any]) {
@@ -320,7 +487,7 @@ final class UsageTrendPlotView: NSView {
     private func drawTimeAxis(in rect: NSRect, now: Date, attributes: [NSAttributedString.Key: Any]) {
         let labelY = rect.maxY + 3
         let stops: [(hours: Double, text: String)] = [
-            (0, "현재"), (6, "6시간 전"), (12, "12시간 전"), (18, "18시간 전"), (24, "24시간 전")
+            (0, "현재"), (6, "6h"), (12, "12h"), (18, "18h"), (24, "24h")
         ]
         for stop in stops {
             let tickX = rect.minX + CGFloat(stop.hours / 24) * rect.width
@@ -366,37 +533,52 @@ final class UsageTrendPlotView: NSView {
     // MARK: - Hover
 
     private func drawHover(
-        date: Date,
-        perSeries: [[(sample: UsageConsumptionSample, segment: Int?)]],
-        now: Date,
+        start: Date,
+        data: Plotted,
         yMax: Double,
         rect: NSRect,
         context: CGContext
     ) {
         guard let strip else { return }
-        let hoverX = x(for: date, now: now)
-        NSColor.labelColor.withAlphaComponent(0.3).setFill()
-        NSBezierPath(rect: NSRect(x: hoverX - 0.5, y: rect.minY, width: 1, height: rect.height)).fill()
-
+        let now = data.now
+        var range: (from: Date, to: Date)?
+        var inProgress = false
+        var anyPartial = false
         var parts: [String] = []
-        for (index, samples) in perSeries.enumerated() where index < strip.series.count {
+        var hoverX: CGFloat?
+        for (index, buckets) in data.buckets.enumerated() where index < strip.series.count {
             let entry = strip.series[index]
-            let match = samples.min { abs($0.sample.at.timeIntervalSince(date)) < abs($1.sample.at.timeIntervalSince(date)) }
-            guard let match, abs(match.sample.at.timeIntervalSince(date)) <= 90 else {
+            let prefix = entry.label.isEmpty ? "" : "\(entry.label) "
+            // Newest baseline segment first when a half hour holds two.
+            guard let bucket = buckets.first(where: { $0.start == start }) else {
                 parts.append(entry.label.isEmpty ? "—" : "\(entry.label) —")
                 continue
             }
-            let point = NSPoint(x: x(for: match.sample.at, now: now), y: y(for: match.sample.amount, yMax: yMax))
+            let point = NSPoint(x: x(for: bucket, now: now), y: y(for: bucket.amount, yMax: yMax))
+            hoverX = hoverX ?? point.x
+            range = range ?? (bucket.from, bucket.to)
+            inProgress = inProgress || bucket.isInProgress
+            let partial = !bucket.isInProgress && (bucket.isClipped || bucket.hasGap)
+            anyPartial = anyPartial || partial
             entry.color.setFill()
             NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
-            let amount = UsageConsumptionCore.amountTitle(match.sample.amount, unit: strip.unitSuffix)
-            parts.append(entry.label.isEmpty ? amount : "\(entry.label) \(amount)")
+            let amount = UsageConsumptionCore.amountTitle(bucket.amount, unit: strip.unitSuffix)
+            parts.append("\(prefix)\(amount)\(partial ? "*" : "")")
         }
-        let text = "\(Self.hoverTimeFormatter.string(from: date)) · \(parts.joined(separator: " · "))" as NSString
+        guard let hoverX, let range else { return }
+        NSColor.labelColor.withAlphaComponent(0.3).setFill()
+        NSBezierPath(rect: NSRect(x: hoverX - 0.5, y: rect.minY, width: 1, height: rect.height)).fill()
+
+        let span = "\(Self.hoverTimeFormatter.string(from: range.from))–\(Self.hoverTimeFormatter.string(from: range.to))"
+        var head = span
+        if inProgress { head += " 진행중" }
+        var tail = ""
+        if anyPartial { tail = " · * 일부만 수집" }
+        let text = "\(head) · \(parts.joined(separator: " · "))\(tail)" as NSString
         let attributes: [NSAttributedString.Key: Any] = [.font: Self.bubbleFont, .foregroundColor: NSColor.white]
         let size = text.size(withAttributes: attributes)
         let bubble = NSRect(
-            x: min(max(hoverX - size.width / 2 - 6, rect.minX), rect.maxX - size.width - 12),
+            x: min(max(hoverX - size.width / 2 - 6, rect.minX), max(rect.minX, rect.maxX - size.width - 12)),
             y: rect.minY + 2,
             width: size.width + 12,
             height: size.height + 4
@@ -406,34 +588,35 @@ final class UsageTrendPlotView: NSView {
         text.draw(at: NSPoint(x: bubble.minX + 6, y: bubble.minY + 2), withAttributes: attributes)
     }
 
-    private func sampleDate(at point: NSPoint) -> Date? {
+    /// Half hour whose bucket centre is nearest the pointer, among all series.
+    private func bucketStart(at point: NSPoint) -> Date? {
         let rect = plot
         guard rect.insetBy(dx: -Self.hoverRadius, dy: 0).contains(NSPoint(x: point.x, y: rect.midY)),
               point.y >= 0, point.y <= rect.maxY
         else { return nil }
-        let now = Date()
-        var best: (date: Date, distance: CGFloat)?
-        for sample in visible(now: now).flatMap({ $0 }) {
-            let distance = abs(x(for: sample.sample.at, now: now) - point.x)
+        let data = plotted(now: Date())
+        var best: (start: Date, distance: CGFloat)?
+        for bucket in data.buckets.flatMap({ $0 }) {
+            let distance = abs(x(for: bucket, now: data.now) - point.x)
             if distance <= Self.hoverRadius, distance < (best?.distance ?? .greatestFiniteMagnitude) {
-                best = (sample.sample.at, distance)
+                best = (bucket.start, distance)
             }
         }
-        return best?.date
+        return best?.start
     }
 
-    private func updateHover(to date: Date?) {
-        guard date != hoveredDate else { return }
-        hoveredDate = date
+    private func updateHover(to start: Date?) {
+        guard start != hoveredStart else { return }
+        hoveredStart = start
         needsDisplay = true
     }
 
     override func mouseMoved(with event: NSEvent) {
-        updateHover(to: sampleDate(at: convert(event.locationInWindow, from: nil)))
+        updateHover(to: bucketStart(at: convert(event.locationInWindow, from: nil)))
     }
 
     override func mouseEntered(with event: NSEvent) {
-        updateHover(to: sampleDate(at: convert(event.locationInWindow, from: nil)))
+        updateHover(to: bucketStart(at: convert(event.locationInWindow, from: nil)))
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -454,12 +637,11 @@ final class UsageHistoryChartView: NSView {
     private static let cardCornerRadius: CGFloat = 8
     private static let titleRowHeight: CGFloat = 24
     private static let legendRowHeight: CGFloat = 18
-    private static let footerRowHeight: CGFloat = 16
     private static let bottomPadding: CGFloat = 4
     private static let dotDiameter: CGFloat = 7
 
     private static let cardHeight = cardPadding + titleRowHeight + 4 + legendRowHeight + 2
-        + UsageTrendPlotView.totalHeight + 4 + footerRowHeight + cardPadding
+        + UsageTrendPlotView.totalHeight + cardPadding
     static let viewHeight: CGFloat = cardTop + cardHeight + bottomPadding
 
     private static let titleFont = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
@@ -522,6 +704,7 @@ final class UsageHistoryChartView: NSView {
             selected = first
         }
         plotView.strip = strips[selected]
+        refreshToolTip()
         needsDisplay = true
         return !strips.isEmpty
     }
@@ -553,7 +736,7 @@ final class UsageHistoryChartView: NSView {
 
         let contentX = card.minX + Self.cardPadding
         let titleY = card.minY + Self.cardPadding
-        let title = "최근 24시간 소모량" as NSString
+        let title = "24시간" as NSString
         let titleAttributes: [NSAttributedString.Key: Any] = [.font: Self.titleFont, .foregroundColor: primary]
         let titleSize = title.size(withAttributes: titleAttributes)
         title.draw(at: NSPoint(x: contentX, y: titleY + (Self.titleRowHeight - titleSize.height) / 2), withAttributes: titleAttributes)
@@ -562,9 +745,6 @@ final class UsageHistoryChartView: NSView {
 
         let legendY = titleY + Self.titleRowHeight + 4
         drawLegend(x: contentX, rightEdge: card.maxX - Self.cardPadding, y: legendY, secondary: secondary)
-
-        let footerY = legendY + Self.legendRowHeight + 2 + UsageTrendPlotView.totalHeight + 4
-        drawFooter(x: contentX, rightEdge: card.maxX - Self.cardPadding, y: footerY, secondary: secondary)
     }
 
     private func drawTabs(rightEdge: CGFloat, y: CGFloat, secondary: NSColor, primary: NSColor) {
@@ -606,8 +786,6 @@ final class UsageHistoryChartView: NSView {
     private func drawLegend(x: CGFloat, rightEdge: CGFloat, y: CGFloat, secondary: NSColor) {
         guard let strip = strips[selected] else { return }
         var currentX = x
-        let now = Date()
-        let windowStart = now.addingTimeInterval(-UsageTrendPlotView.windowDuration)
         for entry in strip.series {
             entry.color.setFill()
             NSBezierPath(ovalIn: NSRect(
@@ -617,11 +795,7 @@ final class UsageHistoryChartView: NSView {
                 height: Self.dotDiameter
             )).fill()
             currentX += Self.dotDiameter + 4
-            var label = entry.label
-            if strip.series.count > 1, let first = entry.samples.map(\.at).min(), first > windowStart.addingTimeInterval(1_200) {
-                let hours = now.timeIntervalSince(first) / 3_600
-                label += String(format: " %.1f시간", hours)
-            }
+            let label = entry.label
             if !label.isEmpty {
                 let attributes: [NSAttributedString.Key: Any] = [.font: Self.legendFont, .foregroundColor: entry.color]
                 let size = (label as NSString).size(withAttributes: attributes)
@@ -634,7 +808,10 @@ final class UsageHistoryChartView: NSView {
                 currentX += 6
             }
         }
-        let unit = "갱신당 소모량 (\(strip.unitSuffix.trimmingCharacters(in: .whitespaces)))" as NSString
+        let unitName = strip.unitSuffix.trimmingCharacters(in: .whitespaces)
+        var metric = unitName == "%" ? "30분 소모(%)" : "30분 소모(\(unitName))"
+        if let cue = coverageCue(for: strip) { metric += " · \(cue)" }
+        let unit = metric as NSString
         let attributes: [NSAttributedString.Key: Any] = [.font: Self.footerFont, .foregroundColor: secondary]
         let size = unit.size(withAttributes: attributes)
         if currentX + size.width + 8 <= rightEdge {
@@ -642,33 +819,23 @@ final class UsageHistoryChartView: NSView {
         }
     }
 
-    /// Left: which source and as-of time. Right: how much of the 24 hours is
-    /// actually covered.
-    private func drawFooter(x: CGFloat, rightEdge: CGFloat, y: CGFloat, secondary: NSColor) {
-        guard let strip = strips[selected] else { return }
-        let attributes: [NSAttributedString.Key: Any] = [.font: Self.footerFont, .foregroundColor: secondary]
+    /// "22.3h/24h" when less than the whole window has been recorded; nil
+    /// when the 24 hours are covered. Source and as-of time go to the tooltip.
+    private func coverageCue(for strip: UsageHistoryStrip) -> String? {
         let now = Date()
         let start = now.addingTimeInterval(-UsageTrendPlotView.windowDuration)
         let dates = strip.series.flatMap { $0.samples.map(\.at) }.filter { $0 >= start }
-        let coverage: String
-        if let first = dates.min() {
-            let hours = min(now.timeIntervalSince(first) / 3_600, 24)
-            coverage = hours >= 23.5 ? "24시간 전체 기록" : String(format: "24시간 중 %.1f시간만 기록", hours)
-        } else {
-            coverage = "24시간 중 기록 없음"
-        }
-        let latest = dates.max().map { Self.timeFormatter.string(from: $0) }
-        let source = [strip.sourceNote, latest.map { "마지막 기록 \($0)" }].compactMap { $0 }.joined(separator: " · ")
-        let sourceText = source as NSString
-        let coverageText = coverage as NSString
-        let coverageSize = coverageText.size(withAttributes: attributes)
-        coverageText.draw(at: NSPoint(x: rightEdge - coverageSize.width, y: y), withAttributes: attributes)
-        let available = rightEdge - x - coverageSize.width - 10
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        var sourceAttributes = attributes
-        sourceAttributes[.paragraphStyle] = paragraph
-        sourceText.draw(in: NSRect(x: x, y: y, width: max(0, available), height: Self.footerRowHeight), withAttributes: sourceAttributes)
+        guard let first = dates.min() else { return "0h/24h" }
+        let hours = min(now.timeIntervalSince(first) / 3_600, 24)
+        return hours >= 23.5 ? nil : String(format: "%.1fh/24h", hours)
+    }
+
+    private func refreshToolTip() {
+        guard let strip = strips[selected] else { toolTip = nil; return }
+        let start = Date().addingTimeInterval(-UsageTrendPlotView.windowDuration)
+        let latest = strip.series.flatMap { $0.samples.map(\.at) }.filter { $0 >= start }.max()
+            .map { "마지막 기록 \(Self.timeFormatter.string(from: $0))" }
+        toolTip = [strip.sourceNote, latest].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     // MARK: - Tabs
@@ -684,6 +851,7 @@ final class UsageHistoryChartView: NSView {
         selected = hit.provider
         UsageTrendProvider.stored = hit.provider
         plotView.strip = strips[selected]
+        refreshToolTip()
         needsDisplay = true
     }
 
