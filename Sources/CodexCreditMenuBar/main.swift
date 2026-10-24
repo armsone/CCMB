@@ -2162,7 +2162,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         statusItem.autosaveName = "CCMB.MainStatusItem"
         statusItem.isVisible = true
         statusItem.button?.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        statusItem.button?.toolTip = "Codex, Claude, Gemini 본계정·부계정 남은 사용량과 크레딧"
+        statusItem.button?.toolTip = "Codex, Claude, Gemini 본계정·부계정·세 번째 계정 남은 사용량과 크레딧"
         statusItem.button?.image = nil
         statusItem.button?.imagePosition = .noImage
         statusItem.button?.setAccessibilityLabel("Codex, Claude, Gemini 사용량")
@@ -3340,7 +3340,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// NAS consumption points are used as-is, with each account kept separate.
     private func nasGeminiHistoryStrip() -> UsageHistoryStrip? {
         guard let history = lastNASHistory else { return nil }
-        let series: [UsageHistorySeries] = [(NASServiceID.gemini, "본", UsageBrandColors.geminiGradient[0]), (.gemini2, "부", UsageBrandColors.geminiGradient[2])].compactMap { id, label, color in
+        let series: [UsageHistorySeries] = [
+            (NASServiceID.gemini, "본", UsageBrandColors.geminiGradient[0]),
+            (.gemini2, "부", UsageBrandColors.geminiGradient[2]),
+            (.gemini3, "세", UsageBrandColors.geminiThirdAccount)
+        ].compactMap { id, label, color in
             guard let entry = nasState.slot(id).lastGood else { return nil }
             let raw = history.series[id.rawValue]
             if let expected = entry.historyIdentity, raw?.identityGeneration != expected { return nil }
@@ -3431,7 +3435,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 from: nasState.codexSnapshot,
                 claude: nasState.claudeSnapshot,
                 gemini: nasState.geminiSnapshot,
-                gemini2: nasState.gemini2Snapshot
+                gemini2: nasState.gemini2Snapshot,
+                gemini3: nasState.gemini3Snapshot
             )
             if parts.isEmpty {
                 setStatusTitle("NAS")
@@ -3443,7 +3448,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     from: nasState.codexSnapshot,
                     claude: nasState.claudeSnapshot,
                     gemini: nasState.geminiSnapshot,
-                    gemini2: nasState.gemini2Snapshot
+                    gemini2: nasState.gemini2Snapshot,
+                    gemini3: nasState.gemini3Snapshot
                 )
             )
         }
@@ -3623,6 +3629,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func nasGeminiColumn(title: String) -> UsagePanelColumn {
         let primary = nasState.geminiSnapshot
         let secondary = nasState.gemini2Snapshot
+        // 세 번째 계정은 NAS가 gemini3를 보낸 경우에만 나타난다.
+        let tertiary = nasState.hasGemini3 ? nasState.gemini3Snapshot : nil
+        let showsThird = nasState.hasGemini3
         let colors = UsageBrandColors.geminiGradient
         func quota(_ caption: String, _ value: Double?, _ color: NSColor, _ account: String) -> UsagePanelQuota {
             let remaining = value.flatMap { GeminiUsageCore.remainingPercent(from: $0) }
@@ -3632,25 +3641,41 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         func reset(_ date: Date?) -> String { date.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음" }
         var statuses: [String] = []
-        for (id, label) in [(NASServiceID.gemini, "본계정"), (.gemini2, "부계정")] {
+        var statusAccounts = [(NASServiceID.gemini, "본계정"), (.gemini2, "부계정")]
+        if showsThird { statusAccounts.append((.gemini3, "세 번째 계정")) }
+        for (id, label) in statusAccounts {
             let slot = nasState.slot(id)
             let status = Self.nasStatus(issue: slot.issue, isStale: slot.isStale)
             statuses += status.lines.map { "\(label) · \($0)" }
         }
-        let accounts = [("본계정", primary), ("부계정", secondary)]
+        var accounts = [("본계정", primary), ("부계정", secondary)]
+        var resetRows = [
+            UsagePanelRow(label: "본 요금제", value: primary?.planTitle ?? "정보 없음"),
+            UsagePanelRow(label: "본 세션 초기화", value: reset(primary?.fiveHourResetsAt)),
+            UsagePanelRow(label: "본 주간 초기화", value: reset(primary?.weeklyResetsAt)),
+            UsagePanelRow(label: "부 세션 초기화", value: reset(secondary?.fiveHourResetsAt)),
+            UsagePanelRow(label: "부 주간 초기화", value: reset(secondary?.weeklyResetsAt))
+        ]
+        var supplementalQuotas: [UsagePanelQuota] = []
+        if showsThird {
+            accounts.append(("세 번째 계정", tertiary))
+            resetRows += [
+                UsagePanelRow(label: "3 세션 초기화", value: reset(tertiary?.fiveHourResetsAt)),
+                UsagePanelRow(label: "3 주간 초기화", value: reset(tertiary?.weeklyResetsAt))
+            ]
+            let gray = UsageBrandColors.geminiThirdAccount
+            supplementalQuotas = [
+                quota("3 세션", tertiary?.fiveHourRemainingFraction, gray, "세 번째 계정"),
+                quota("3 주간", tertiary?.weeklyRemainingFraction, gray, "세 번째 계정")
+            ]
+        }
         return UsagePanelColumn(
             title: title, accentColor: UsageBrandColors.geminiText,
             quota: quota("세션", primary?.fiveHourRemainingFraction, colors[0], "본계정"),
             secondaryQuota: quota("주간", primary?.weeklyRemainingFraction, colors[1], "본계정"),
             tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, colors[2], "부계정"),
             quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, colors[3], "부계정"),
-            rowGroups: [UsagePanelRowGroup(rows: [
-                UsagePanelRow(label: "본 요금제", value: primary?.planTitle ?? "정보 없음"),
-                UsagePanelRow(label: "본 세션 초기화", value: reset(primary?.fiveHourResetsAt)),
-                UsagePanelRow(label: "본 주간 초기화", value: reset(primary?.weeklyResetsAt)),
-                UsagePanelRow(label: "부 세션 초기화", value: reset(secondary?.fiveHourResetsAt)),
-                UsagePanelRow(label: "부 주간 초기화", value: reset(secondary?.weeklyResetsAt))
-            ])],
+            rowGroups: [UsagePanelRowGroup(rows: resetRows)],
             accountLines: accounts.map { label, snapshot in
                 let email = snapshot?.accountEmail ?? "정보 없음"
                 let display = email.lowercased().hasSuffix("@gmail.com") ? String(email.dropLast(10)) : email
@@ -3659,7 +3684,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             refreshLine: accounts.map { label, snapshot in
                 snapshot?.publishedAt.map { "\(label) \(Self.relativeFormatter.localizedString(for: $0, relativeTo: Date()))" } ?? "\(label) 미수집"
             }.joined(separator: " · "),
-            statusLines: statuses, statusColor: statuses.isEmpty ? .secondaryLabelColor : .systemOrange
+            statusLines: statuses, statusColor: statuses.isEmpty ? .secondaryLabelColor : .systemOrange,
+            supplementalQuotas: supplementalQuotas
         )
     }
 
@@ -5207,7 +5233,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         from snapshot: RateLimitSnapshot?,
         claude: ClaudeUsageSnapshot?,
         gemini: GeminiUsageSnapshot?,
-        gemini2: GeminiUsageSnapshot?
+        gemini2: GeminiUsageSnapshot?,
+        gemini3: GeminiUsageSnapshot? = nil
     ) -> [(text: String, color: NSColor)] {
         var parts: [(text: String, color: NSColor)] = []
 
@@ -5227,6 +5254,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append((geminiRemainingValue(cli: gemini).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiText))
             parts.append((geminiRemainingValue(cli: gemini2).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiGradient[2]))
         }
+        // 세 번째 계정은 NAS가 값을 보낸 경우에만 덧붙인다(없으면 기존 표시 그대로).
+        if gemini3 != nil {
+            parts.append((geminiRemainingValue(cli: gemini3).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiThirdAccount))
+        }
 
         return parts
     }
@@ -5239,7 +5270,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         from snapshot: RateLimitSnapshot?,
         claude: ClaudeUsageSnapshot?,
         gemini: GeminiUsageSnapshot?,
-        gemini2: GeminiUsageSnapshot?
+        gemini2: GeminiUsageSnapshot?,
+        gemini3: GeminiUsageSnapshot? = nil
     ) -> String {
         var parts: [String] = []
         if let usedPercent = snapshot?.usedPercent {
@@ -5249,7 +5281,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             parts.append("남은 Claude 세션 \(percentTitle(from: claudeRemaining))")
         }
         if gemini != nil || gemini2 != nil {
-            for (label, snap) in [("본계정", gemini), ("부계정", gemini2)] {
+            var accounts = [("본계정", gemini), ("부계정", gemini2)]
+            if gemini3 != nil { accounts.append(("세 번째 계정", gemini3)) }
+            for (label, snap) in accounts {
                 let value = geminiRemainingValue(cli: snap).map(percentTitle(from:)) ?? "정보 없음"
                 parts.append("남은 Gemini \(label) 세션 사용량 \(value)")
             }

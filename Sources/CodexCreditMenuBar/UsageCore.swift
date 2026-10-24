@@ -1120,17 +1120,17 @@ enum NASJSON {
     }
 }
 
-/// The four fixed card identities, in their fixed display order. Gemini's
-/// two accounts are bound to fixed `account_ref`s, never to whichever
+/// The card identities, in their display order. Gemini's
+/// accounts are bound to fixed `account_ref`s, never to whichever
 /// account currently happens to be active, so their numbers never swap.
 enum NASServiceID: String, CaseIterable {
-    case codex, claude, gemini, gemini2
+    case codex, claude, gemini, gemini2, gemini3
 
     var provider: String {
         switch self {
         case .codex: return "codex"
         case .claude: return "claude"
-        case .gemini, .gemini2: return "gemini"
+        case .gemini, .gemini2, .gemini3: return "gemini"
         }
     }
 
@@ -1139,6 +1139,7 @@ enum NASServiceID: String, CaseIterable {
         case .codex, .claude: return nil
         case .gemini: return "account1"
         case .gemini2: return "account2"
+        case .gemini3: return "account3"
         }
     }
 }
@@ -1656,7 +1657,7 @@ struct NASServiceEntry: Equatable {
         if !ok, error == nil { return .entry(schemaInvalid(id)) }
 
         var geminiDetails: NASGeminiDetails?
-        if (id == .gemini || id == .gemini2), !NASJSON.isAbsent(object["gemini_details"]) {
+        if (id == .gemini || id == .gemini2 || id == .gemini3), !NASJSON.isAbsent(object["gemini_details"]) {
             geminiDetails = NASGeminiDetails.parse(object["gemini_details"])
         }
         var refreshPolicy: NASRefreshPolicy?
@@ -1789,7 +1790,9 @@ struct NASExecutionHost: Equatable {
         let selectedRole = object["role"] as? String
         if !NASJSON.isAbsent(object["selected_account_id"]) {
             guard let selectedAccountID, isSafeAccountID(selectedAccountID),
-                  (selectedService == .gemini && selectedRole == "primary") || (selectedService == .gemini2 && selectedRole == "secondary")
+                  (selectedService == .gemini && selectedRole == "primary")
+                    || (selectedService == .gemini2 && selectedRole == "secondary")
+                    || (selectedService == .gemini3 && selectedRole == "secondary")
             else { return nil }
         }
         let executionAccount: NASServiceID?
@@ -1799,6 +1802,7 @@ struct NASExecutionHost: Equatable {
             switch object["execution_account"] as? String {
             case "account1"?: executionAccount = .gemini
             case "account2"?: executionAccount = .gemini2
+            case "account3"?: executionAccount = .gemini3
             case let ref? where ref == selectedAccountID && selectedService != nil:
                 executionAccount = selectedService
             default: return nil
@@ -1944,29 +1948,44 @@ struct NASSnapshotV2: Equatable {
     var claude: NASServiceEntry { entry(.claude) }
     var gemini: NASServiceEntry { entry(.gemini) }
     var gemini2: NASServiceEntry { entry(.gemini2) }
+    var gemini3: NASServiceEntry { entry(.gemini3) }
 }
 
-/// Strict reader/validator for the NAS's four-service v2 envelope
+/// Strict reader/validator for the NAS's service v2 envelope
 /// (`schema_version` exactly the integer 2, `quota_origin == "nas"`, and
-/// `services` exactly `codex, claude, gemini, gemini2` in that order, each
-/// with its fixed `provider`/`account_ref`). Root-level deviations — an
-/// unknown schema, a missing/extra/duplicate/reordered service, or a wrong
+/// `services` beginning with `codex, claude, gemini, gemini2` in that order, each
+/// with its fixed `provider`/`account_ref`, followed optionally by `gemini3`).
+/// Root-level deviations — an unknown schema, missing required services, or a wrong
 /// identity pairing — reject the whole envelope with `nil`. A single
 /// service whose *content* breaks the contract becomes that service's own
-/// `schema_changed` error so the other three keep their values. This parser
+/// `schema_changed` error so the other services keep their values. This parser
 /// never falls back to the legacy shape or to a local collector.
 enum NASSnapshotV2Core {
     static func parse(_ data: Data, now: Date = Date()) -> NASSnapshotV2? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         guard NASJSON.integer(object["schema_version"]) == 2 else { return nil }
         guard (object["quota_origin"] as? String) == "nas" else { return nil }
-        guard let rawServices = object["services"] as? [Any], rawServices.count == NASServiceID.allCases.count else { return nil }
+        guard let rawServices = object["services"] as? [Any], rawServices.count >= 4 else { return nil }
 
+        let baseServices: [NASServiceID] = [.codex, .claude, .gemini, .gemini2]
         var entries: [NASServiceEntry] = []
-        for (raw, id) in zip(rawServices, NASServiceID.allCases) {
+        for (raw, id) in zip(rawServices.prefix(4), baseServices) {
             switch NASServiceEntry.parse(raw, expected: id, now: now) {
             case .identityMismatch: return nil
             case .entry(let entry): entries.append(entry)
+            }
+        }
+
+        if rawServices.count > 4 {
+            for raw in rawServices.dropFirst(4) {
+                guard let rawDict = raw as? [String: Any] else { continue }
+                if rawDict["service"] as? String == NASServiceID.gemini3.rawValue,
+                   !entries.contains(where: { $0.id == .gemini3 }) {
+                    switch NASServiceEntry.parse(raw, expected: .gemini3, now: now) {
+                    case .identityMismatch: return nil
+                    case .entry(let entry): entries.append(entry)
+                    }
+                }
             }
         }
 
@@ -2015,7 +2034,7 @@ enum NASItemMappingCore {
     }
 
     static func geminiSnapshot(from entry: NASServiceEntry) -> GeminiUsageSnapshot? {
-        guard entry.ok, entry.id == .gemini || entry.id == .gemini2, let fetchedAt = entry.fetchedAt else { return nil }
+        guard entry.ok, entry.id == .gemini || entry.id == .gemini2 || entry.id == .gemini3, let fetchedAt = entry.fetchedAt else { return nil }
         let session = unique(entry.items, window: .session, matching: isGeminiModelsItem)
         let weekly = unique(entry.items, window: .weekly, matching: isGeminiModelsItem)
         guard session != nil || weekly != nil else { return nil }
@@ -2134,7 +2153,7 @@ enum NASItemMappingCore {
         switch entry.id {
         case .codex: return codexSnapshot(from: entry) != nil
         case .claude: return claudeSnapshot(from: entry) != nil
-        case .gemini, .gemini2: return geminiSnapshot(from: entry) != nil
+        case .gemini, .gemini2, .gemini3: return geminiSnapshot(from: entry) != nil
         }
     }
 }
@@ -2180,6 +2199,14 @@ struct NASFourServiceState: Equatable {
         hostStatus = snapshot.hostStatus
         hostStatusIsStale = false
         for id in NASServiceID.allCases {
+            if id == .gemini3, !snapshot.entries.contains(where: { $0.id == .gemini3 }) {
+                // 선택 서비스: 구버전/미설정 NAS 응답에는 없다. 새로 지어내지 않고,
+                // 이전에 받은 값이 있으면 그대로 두되 오래된 값으로만 표시한다.
+                var slot = self.slot(id)
+                if slot.lastGood != nil { slot.isStale = true }
+                slots[id] = slot
+                continue
+            }
             let entry = snapshot.entry(id)
             var slot = self.slot(id)
             slot.retryAt = entry.ok ? nil : entry.refreshPolicy?.nextRefreshAt
@@ -2204,6 +2231,7 @@ struct NASFourServiceState: Equatable {
         hostStatusIsStale = true
         for id in NASServiceID.allCases {
             var slot = self.slot(id)
+            if id == .gemini3, slot.lastGood == nil, slot.issue == nil { continue }
             slot.isStale = true
             slot.issue = label
             slots[id] = slot
@@ -2214,6 +2242,9 @@ struct NASFourServiceState: Equatable {
     var claudeSnapshot: ClaudeUsageSnapshot? { slot(.claude).lastGood.flatMap(NASItemMappingCore.claudeSnapshot(from:)) }
     var geminiSnapshot: GeminiUsageSnapshot? { slot(.gemini).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
     var gemini2Snapshot: GeminiUsageSnapshot? { slot(.gemini2).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
+    var gemini3Snapshot: GeminiUsageSnapshot? { slot(.gemini3).lastGood.flatMap(NASItemMappingCore.geminiSnapshot(from:)) }
+    /// 세 번째 계정 카드는 NAS가 `gemini3`를 한 번이라도 보냈을 때만 보인다.
+    var hasGemini3: Bool { slot(.gemini3).lastGood != nil || slot(.gemini3).issue != nil }
 
     /// NAS 실행 범위의 명시 선택을 idle에서도 유지한다. 다른 호스트는 이를 바꾸지 않는다.
     var selectedGeminiServiceID: NASServiceID {
@@ -2233,7 +2264,11 @@ struct NASFourServiceState: Equatable {
         let id = selectedGeminiServiceID
         if let selectedNASAccountID,
            selectedNASAccountID != (slot(id).lastGood?.actualAccountRef ?? id.accountRef) { return nil }
-        return id == .gemini2 ? gemini2Snapshot : geminiSnapshot
+        switch id {
+        case .gemini2: return gemini2Snapshot
+        case .gemini3: return gemini3Snapshot
+        default: return geminiSnapshot
+        }
     }
 
     func canShowHistory(_ series: NASHistorySeries?, for id: NASServiceID) -> Bool {
@@ -2314,6 +2349,8 @@ struct NASHistorySeries: Equatable {
 /// independent rather than folded into the first.
 struct NASHistoryV2: Equatable {
     static let seriesKeys = ["codex", "codexCredits", "claude", "claudeFable", "gemini", "gemini2"]
+    /// 구버전 payload에는 없을 수 있는 선택 series. 있으면 같은 규칙으로 검증한다.
+    static let optionalSeriesKeys = ["gemini3"]
 
     /// Each series has exactly one unit: credits only for `codexCredits`.
     static func unit(for key: String) -> NASHistoryUnit {
@@ -2370,10 +2407,14 @@ enum NASHistoryV2Core {
             return nil
         }
         guard let rawSeries = object["series"] as? [String: Any] else { return nil }
-        guard Set(rawSeries.keys) == Set(NASHistoryV2.seriesKeys) else { return nil }
+        let required = Set(NASHistoryV2.seriesKeys)
+        let keysPresent = Set(rawSeries.keys)
+        guard required.isSubset(of: keysPresent),
+              keysPresent.subtracting(required).isSubset(of: Set(NASHistoryV2.optionalSeriesKeys))
+        else { return nil }
 
         var series: [String: NASHistorySeries] = [:]
-        for key in NASHistoryV2.seriesKeys {
+        for key in NASHistoryV2.seriesKeys + NASHistoryV2.optionalSeriesKeys where rawSeries[key] != nil {
             guard let parsed = parseSeries(rawSeries[key], unit: NASHistoryV2.unit(for: key), now: now) else { return nil }
             series[key] = parsed
         }
@@ -2398,8 +2439,11 @@ enum NASHistoryV2Core {
     /// restore it through the same strict `parse`.
     static func encode(_ history: NASHistoryV2) -> Data? {
         var series: [String: Any] = [:]
-        for key in NASHistoryV2.seriesKeys {
-            guard let value = history.series[key] else { return nil }
+        for key in NASHistoryV2.seriesKeys + NASHistoryV2.optionalSeriesKeys {
+            guard let value = history.series[key] else {
+                if NASHistoryV2.optionalSeriesKeys.contains(key) { continue }
+                return nil
+            }
             series[key] = [
                 "identityGeneration": value.identityGeneration.map { $0 as Any } ?? NSNull(),
                 "points": value.points.map { point -> [String: Any] in

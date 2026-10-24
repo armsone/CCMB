@@ -262,6 +262,10 @@ enum UsageBrandColors {
     /// plain text (titles, row labels) rather than a gradient: Gemini's own
     /// blue, the leading color of the four-color mark.
     static let geminiText = geminiGradient[0]
+
+    /// 세 번째 Gemini 계정 전용 회색 #808080. 밝은/어두운 배경 모두에서 읽히는
+    /// 중간 명도라 라이트/다크 분기가 필요 없다.
+    static let geminiThirdAccount = NSColor(ccmbHex: 0x808080)
 }
 
 private extension NSColor {

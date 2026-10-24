@@ -51,52 +51,66 @@ enum BKStyleTokens {
     }
 
     /// White enamel: the strongest surface, carrying the provider cards.
+    /// In BK Style dark mode, flat warm charcoal #242422.
     static let enamelSurfaceTop = dynamic(
         light: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.92),
-        dark: NSColor(srgbRed: 0.20, green: 0.21, blue: 0.22, alpha: 0.92)
+        dark: NSColor(srgbRed: 0x24 / 255.0, green: 0x24 / 255.0, blue: 0x22 / 255.0, alpha: 1)
     )
     static let enamelSurfaceBottom = dynamic(
         light: NSColor(srgbRed: 0.955, green: 0.955, blue: 0.96, alpha: 0.92),
-        dark: NSColor(srgbRed: 0.155, green: 0.16, blue: 0.17, alpha: 0.92)
+        dark: NSColor(srgbRed: 0x20 / 255.0, green: 0x20 / 255.0, blue: 0x1E / 255.0, alpha: 1)
     )
 
-    /// Slightly recessed enamel used inside icon wells.
+    /// Flat warm charcoal panel background #1c1c1a.
+    static let panelBackground = dynamic(
+        light: NSColor(white: 0.95, alpha: 1),
+        dark: NSColor(srgbRed: 0x1C / 255.0, green: 0x1C / 255.0, blue: 0x1A / 255.0, alpha: 1)
+    )
+
+    /// Slightly recessed surface used inside icon wells.
     static let wellFill = dynamic(
         light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.97, alpha: 1),
-        dark: NSColor(srgbRed: 0.24, green: 0.25, blue: 0.26, alpha: 1)
+        dark: NSColor(srgbRed: 0x28 / 255.0, green: 0x28 / 255.0, blue: 0x26 / 255.0, alpha: 1)
     )
 
-    /// Glossy charcoal ink for technical structure: glyphs and group titles.
+    /// Technical structure ink: glyphs and group titles #e9e7df.
     static let charcoalInk = dynamic(
         light: NSColor(srgbRed: 0.19, green: 0.20, blue: 0.22, alpha: 1),
-        dark: NSColor(srgbRed: 0.86, green: 0.87, blue: 0.88, alpha: 1)
+        dark: NSColor(srgbRed: 0xE9 / 255.0, green: 0xE7 / 255.0, blue: 0xDF / 255.0, alpha: 1)
     )
 
-    /// Text colors for enamel surfaces. Do not derive these by applying an
-    /// alpha to AppKit's semantic labels: that can resolve the label against
-    /// the menu's old appearance before the light enamel card is attached,
-    /// leaving white text on a light card.
+    /// Text colors for enamel surfaces.
+    /// Primary text #e9e7df, muted #9a988b.
     static let bodyInk = dynamic(
         light: NSColor(srgbRed: 0.20, green: 0.21, blue: 0.23, alpha: 1),
-        dark: NSColor(srgbRed: 0.90, green: 0.91, blue: 0.92, alpha: 1)
+        dark: NSColor(srgbRed: 0xE9 / 255.0, green: 0xE7 / 255.0, blue: 0xDF / 255.0, alpha: 1)
     )
     static let secondaryInk = dynamic(
         light: NSColor(srgbRed: 0.33, green: 0.34, blue: 0.36, alpha: 1),
-        dark: NSColor(srgbRed: 0.74, green: 0.75, blue: 0.77, alpha: 1)
+        dark: NSColor(srgbRed: 0x9A / 255.0, green: 0x98 / 255.0, blue: 0x8B / 255.0, alpha: 1)
     )
     static let mutedInk = dynamic(
         light: NSColor(srgbRed: 0.45, green: 0.46, blue: 0.48, alpha: 1),
-        dark: NSColor(srgbRed: 0.62, green: 0.63, blue: 0.65, alpha: 1)
+        dark: NSColor(srgbRed: 0x76 / 255.0, green: 0x74 / 255.0, blue: 0x6B / 255.0, alpha: 1)
     )
 
-    /// Chrome is limited to precise thin rims and dividers.
+    /// Restrained bar colors: green / coral / blue.
+    static let barGreen = NSColor(srgbRed: 0x30 / 255.0, green: 0xA4 / 255.0, blue: 0x6C / 255.0, alpha: 1)
+    static let barCoral = NSColor(srgbRed: 0xEB / 255.0, green: 0x63 / 255.0, blue: 0x4B / 255.0, alpha: 1)
+    static let barBlue = NSColor(srgbRed: 0x4A / 255.0, green: 0x94 / 255.0, blue: 0xE8 / 255.0, alpha: 1)
+    static let barTrack = dynamic(
+        light: NSColor(white: 0, alpha: 0.08),
+        dark: NSColor(white: 1, alpha: 0.08)
+    )
+
+    /// Borders #35342e.
     static let chromeLine = dynamic(
         light: NSColor(white: 0, alpha: 0.16),
-        dark: NSColor(white: 1, alpha: 0.17)
+        dark: NSColor(srgbRed: 0x35 / 255.0, green: 0x34 / 255.0, blue: 0x2E / 255.0, alpha: 1)
     )
     static let chromeHighlight = dynamic(
         light: NSColor(white: 1, alpha: 0.85),
-        dark: NSColor(white: 1, alpha: 0.10)
+        dark: NSColor(white: 1, alpha: 0.05)
     )
     static let contactShadow = dynamic(
         light: NSColor(white: 0, alpha: 0.10),

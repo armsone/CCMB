@@ -305,6 +305,9 @@ struct UsagePanelColumn {
     /// column preserves the existing solid-ring look exactly.
     let primaryQuotaGradientColors: [NSColor]?
     let secondaryQuotaGradientColors: [NSColor]?
+    /// Optional extra ring row below the plain ring row, on the same
+    /// equal-width grid. Gemini uses it for the optional third account.
+    let supplementalQuotas: [UsagePanelQuota]
 
     init(
         title: String,
@@ -320,7 +323,8 @@ struct UsagePanelColumn {
         statusLines: [String],
         statusColor: NSColor,
         primaryQuotaGradientColors: [NSColor]? = nil,
-        secondaryQuotaGradientColors: [NSColor]? = nil
+        secondaryQuotaGradientColors: [NSColor]? = nil,
+        supplementalQuotas: [UsagePanelQuota] = []
     ) {
         self.title = title
         self.accentColor = accentColor
@@ -336,39 +340,52 @@ struct UsagePanelColumn {
         self.statusColor = statusColor
         self.primaryQuotaGradientColors = primaryQuotaGradientColors
         self.secondaryQuotaGradientColors = secondaryQuotaGradientColors
+        self.supplementalQuotas = supplementalQuotas
     }
 
     /// Every metric row across all groups, in display order.
     var allRows: [UsagePanelRow] { rowGroups.flatMap(\.rows) }
 }
 
-/// Fixed-height bar strip, newest sample on the left.
+/// Time-based trailing 24-hour line chart. Each series is an independent
+/// curve of real per-refresh consumption samples placed at the moment they
+/// were recorded; nothing is summed across series, padded, or interpolated
+/// across unmeasured stretches. The part of the window that predates the
+/// first recorded sample is shaded and labelled instead of drawn as zeros.
 private final class UsageHistoryBarView: NSView {
-    private static let barGap: CGFloat = 2
-    /// Zero-consumption refreshes still get a hairline, so the strip reads as
-    /// "sampled, nothing used" rather than as a hole in the data.
-    private static let minimumBarHeight: CGFloat = 1.5
+    static let windowDuration: TimeInterval = 24 * 60 * 60
+    /// Extra band under the plot for the time-axis labels. The plot itself
+    /// keeps the strip's original height.
+    static let axisHeight: CGFloat = 10
 
-    /// Real refreshes only, stored oldest-first, each carrying every bucket
-    /// that reported at that refresh. Never padded — padding is a drawing
-    /// concern, so the data stays honest about how much was measured.
-    /// Drawing reverses the order so the newest reading sits at the left edge.
-    var samples: [UsageConsumptionStackedSample] = [] {
-        didSet { needsDisplay = true }
+    private static let plotInsetX: CGFloat = 2
+    /// Headroom inside the plot that holds the peak label above the peak line.
+    private static let topInset: CGFloat = 10
+    private static let bottomInset: CGFloat = 2
+    private static let hoverRadius: CGFloat = 10
+    private static let minimumGapThreshold: TimeInterval = 60 * 60
+    private static let axisFont = NSFont.systemFont(ofSize: 8, weight: .medium)
+
+    /// Independent curves, each oldest-first with real readings only.
+    var series: [UsageHistorySeries] = [] {
+        didSet {
+            hoveredDate = nil
+            toolTip = coverageDescription
+            needsDisplay = true
+        }
     }
-    /// One entry per stacked bucket, indexed like `samples[n].amounts`.
-    /// Segment `0` (the ordinary meter) sits at the bottom of each bar.
-    var seriesLabels: [String] = []
-    var seriesColors: [NSColor] = [] {
-        didSet { needsDisplay = true }
-    }
-    /// Appended to the hovered value in the hover readout.
+    var seriesLabels: [String] { series.map(\.label) }
+    var seriesColors: [NSColor] { series.map(\.color) }
+    /// Appended to values in the peak label and the hover readout.
     var unitSuffix: String = ""
     /// Called with the hovered refresh, or `nil` when the pointer leaves the
-    /// strip. The owner uses it to swap the caption for a readout.
+    /// chart. The owner uses it to swap the caption for a readout.
     var onHover: ((UsageConsumptionStackedSample?) -> Void)?
+    var barColor: NSColor = .controlAccentColor {
+        didSet { needsDisplay = true }
+    }
 
-    private var hoveredSlot: Int?
+    private var hoveredDate: Date?
 
     private static let hoverTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -377,8 +394,15 @@ private final class UsageHistoryBarView: NSView {
         return formatter
     }()
 
-    /// Text shown when a bar is hovered: when the refresh happened and what
-    /// each bucket cost. Buckets with no reading at that refresh are omitted.
+    private static let coverageTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "M/d HH:mm"
+        return formatter
+    }()
+
+    /// Text shown when a point is hovered: when the refresh happened and what
+    /// each series cost. Series with no reading at that refresh are omitted.
     static func hoverTitle(
         for sample: UsageConsumptionStackedSample,
         labels: [String],
@@ -396,14 +420,19 @@ private final class UsageHistoryBarView: NSView {
     func hoverTitle(for sample: UsageConsumptionStackedSample) -> String {
         Self.hoverTitle(for: sample, labels: seriesLabels, unitSuffix: unitSuffix)
     }
-    /// Total slots drawn. Slots with no sample yet render as faint placeholders
-    /// so "we measured and nothing was used" stays distinguishable from
-    /// "we have not measured this far back yet".
-    var slotCount: Int = UsageConsumptionTracker.defaultCapacity {
-        didSet { needsDisplay = true }
-    }
-    var barColor: NSColor = .controlAccentColor {
-        didSet { needsDisplay = true }
+
+    /// How much of the trailing 24 hours actually has recorded samples.
+    var coverageDescription: String {
+        let window = currentWindow()
+        let visible = visibleSeries(in: window)
+        let dates = visible.flatMap { $0.map(\.at) }
+        guard let first = dates.min() else { return "최근 24시간 기록 없음" }
+        let count = visible.map(\.count).reduce(0, +)
+        let firstText = Self.coverageTimeFormatter.string(from: first)
+        if first.timeIntervalSince(window.start) > 60 {
+            return "24시간 중 첫 기록 \(firstText) 이후만 측정 · 표본 \(count)개 · 이전 구간은 기록 없음"
+        }
+        return "최근 24시간 표본 \(count)개 · 첫 기록 \(firstText)"
     }
 
     override var isFlipped: Bool { true }
@@ -417,79 +446,163 @@ private final class UsageHistoryBarView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        guard bounds.width > 0, bounds.height > 0 else { return }
-        let slots = max(slotCount, samples.count)
-        guard slots > 0 else { return }
+    // MARK: - Geometry
 
-        // Bars scale to the peak combined activity in this strip. The stacked
-        // shape keeps every reported bucket visible, but the UI never labels
-        // independent quota percentages as one arithmetic total.
-        let fractions = UsageConsumptionCore.barFractions(samples.map(\.total))
-        let count = CGFloat(slots)
-        let totalGap = Self.barGap * max(0, count - 1)
-        let barWidth = max(1, (bounds.width - totalGap) / count)
-        let baseline = bounds.height
-        let radius = min(1.5, barWidth / 2)
+    private func currentWindow(now: Date = Date()) -> (start: Date, end: Date) {
+        let latest = series.compactMap { $0.samples.map(\.at).max() }.max()
+        let end = max(now, latest ?? now)
+        return (end.addingTimeInterval(-Self.windowDuration), end)
+    }
 
-        for index in 0..<slots {
-            // Slot 0 is the newest reading; older ones trail off to the right.
-            let sampleIndex = UsageConsumptionCore.sampleIndex(
-                forSlot: index,
-                sampleCount: fractions.count
-            )
-            let fraction = sampleIndex.map { fractions[$0] }
-            let x = CGFloat(index) * (barWidth + Self.barGap)
-            if index == hoveredSlot {
-                // A faint full-height backdrop, so it is obvious which bar the
-                // readout belongs to even when that bar is a hairline.
-                NSColor.labelColor.withAlphaComponent(0.10).setFill()
-                NSBezierPath(
-                    roundedRect: NSRect(x: x - 1, y: 0, width: barWidth + 2, height: bounds.height),
-                    xRadius: 2,
-                    yRadius: 2
-                ).fill()
-            }
-            switch (sampleIndex, fraction) {
-            case (.some(let sampleIndex), .some(let value)) where value > 0:
-                let height = max(Self.minimumBarHeight, CGFloat(value) * bounds.height)
-                let rect = NSRect(x: x, y: baseline - height, width: barWidth, height: height)
-                drawStackedBar(samples[sampleIndex], in: rect, radius: radius)
-            case (_, .some):
-                // Measured, consumed nothing.
-                let rect = NSRect(x: x, y: baseline - Self.minimumBarHeight, width: barWidth, height: Self.minimumBarHeight)
-                barColor.withAlphaComponent(0.28).setFill()
-                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            case (_, .none):
-                // Not measured yet: an even fainter placeholder so the strip
-                // holds its shape without claiming a reading that never happened.
-                let rect = NSRect(x: x, y: baseline - Self.minimumBarHeight, width: barWidth, height: Self.minimumBarHeight)
-                barColor.withAlphaComponent(0.10).setFill()
-                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            }
+    /// Samples inside the window, per series, oldest-first.
+    private func visibleSeries(in window: (start: Date, end: Date)) -> [[UsageConsumptionSample]] {
+        series.map { entry in
+            entry.samples
+                .filter { $0.at >= window.start && $0.at <= window.end }
+                .sorted { $0.at < $1.at }
         }
     }
 
-    /// Fills one bar bottom-up, one segment per bucket that reported, each
-    /// sized by its share of the refresh's total. Buckets with no reading
-    /// draw nothing. Segments are clipped to the rounded bar outline so a
-    /// stacked bar keeps the same silhouette as a plain one.
-    private func drawStackedBar(_ sample: UsageConsumptionStackedSample, in rect: NSRect, radius: CGFloat) {
-        let total = sample.total
-        guard total > 0 else { return }
-        let outline = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-        NSGraphicsContext.saveGraphicsState()
-        outline.addClip()
-        var top = rect.maxY
-        for (index, amount) in sample.amounts.enumerated() {
-            guard let amount, amount > 0 else { continue }
-            let segmentHeight = rect.height * CGFloat(amount / total)
-            let color = index < seriesColors.count ? seriesColors[index] : barColor
-            color.setFill()
-            NSBezierPath(rect: NSRect(x: rect.minX, y: top - segmentHeight, width: rect.width, height: segmentHeight)).fill()
-            top -= segmentHeight
+    private var plotHeight: CGFloat { max(0, bounds.height - Self.axisHeight) }
+    private var plotMinX: CGFloat { Self.plotInsetX }
+    private var plotWidth: CGFloat { max(1, bounds.width - Self.plotInsetX * 2) }
+
+    private func x(for date: Date, in window: (start: Date, end: Date)) -> CGFloat {
+        let fraction = date.timeIntervalSince(window.start) / Self.windowDuration
+        return plotMinX + CGFloat(min(max(fraction, 0), 1)) * plotWidth
+    }
+
+    private func y(for amount: Double, peak: Double) -> CGFloat {
+        let bottom = plotHeight - Self.bottomInset
+        let top = Self.topInset
+        guard peak > 0 else { return bottom }
+        return bottom - CGFloat(min(max(amount, 0) / peak, 1)) * (bottom - top)
+    }
+
+    /// Series gaps wider than this are left unconnected, so an unmeasured
+    /// stretch is never drawn as if it had been measured.
+    private static func gapThreshold(_ samples: [UsageConsumptionSample]) -> TimeInterval {
+        let gaps = zip(samples, samples.dropFirst())
+            .map { $1.at.timeIntervalSince($0.at) }
+            .sorted()
+        guard !gaps.isEmpty else { return minimumGapThreshold }
+        return max(minimumGapThreshold, gaps[gaps.count / 2] * 4)
+    }
+
+    // MARK: - Drawing
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard bounds.width > 0, plotHeight > 0 else { return }
+        let window = currentWindow()
+        let visible = visibleSeries(in: window)
+        let plot = NSRect(x: 0, y: 0, width: bounds.width, height: plotHeight)
+        let labelColor = NSColor.secondaryLabelColor.withAlphaComponent(0.8)
+        let axisAttributes: [NSAttributedString.Key: Any] = [
+            .font: Self.axisFont,
+            .foregroundColor: labelColor
+        ]
+
+        drawTimeAxis(window: window, attributes: axisAttributes)
+
+        let allSamples = visible.flatMap { $0 }
+        guard let firstRecord = allSamples.map(\.at).min(),
+              let peak = allSamples.map(\.amount).max() else {
+            drawCentered("기록 없음", in: plot, attributes: axisAttributes)
+            return
         }
-        NSGraphicsContext.restoreGraphicsState()
+
+        // Stretch before the first recorded sample: shaded, not zero.
+        let firstX = x(for: firstRecord, in: window)
+        if firstX - plotMinX > 1 {
+            let unmeasured = NSRect(x: plotMinX, y: 0, width: firstX - plotMinX, height: plotHeight)
+            NSColor.labelColor.withAlphaComponent(0.05).setFill()
+            NSBezierPath(rect: unmeasured).fill()
+            if unmeasured.width >= 46 {
+                drawCentered("기록 없음", in: unmeasured, attributes: axisAttributes)
+            }
+        }
+
+        // Peak reference line with its unit, so the vertical scale is the
+        // actual per-refresh consumption rather than a normalised 100%.
+        let peakY = y(for: peak, peak: peak)
+        let peakLine = NSBezierPath()
+        peakLine.move(to: NSPoint(x: plotMinX, y: peakY))
+        peakLine.line(to: NSPoint(x: plotMinX + plotWidth, y: peakY))
+        peakLine.lineWidth = 0.5
+        peakLine.setLineDash([2, 2], count: 2, phase: 0)
+        NSColor.labelColor.withAlphaComponent(0.18).setStroke()
+        peakLine.stroke()
+        if peak > 0 {
+            let peakText = "갱신당 최대 \(UsageConsumptionCore.amountTitle(peak, unit: unitSuffix))"
+            (peakText as NSString).draw(at: NSPoint(x: plotMinX + 1, y: 0), withAttributes: axisAttributes)
+        }
+
+        for (index, samples) in visible.enumerated() {
+            guard !samples.isEmpty else { continue }
+            let color = index < series.count ? series[index].color : barColor
+            let threshold = Self.gapThreshold(samples)
+            let path = NSBezierPath()
+            path.lineWidth = 1.4
+            path.lineJoinStyle = .round
+            path.lineCapStyle = .round
+            var previous: UsageConsumptionSample?
+            for sample in samples {
+                let point = NSPoint(x: x(for: sample.at, in: window), y: y(for: sample.amount, peak: peak))
+                if let previous, sample.at.timeIntervalSince(previous.at) <= threshold {
+                    path.line(to: point)
+                } else {
+                    path.move(to: point)
+                }
+                previous = sample
+            }
+            color.setStroke()
+            path.stroke()
+            color.setFill()
+            for sample in samples {
+                let point = NSPoint(x: x(for: sample.at, in: window), y: y(for: sample.amount, peak: peak))
+                let isHovered = sample.at == hoveredDate
+                let radius: CGFloat = isHovered ? 2.8 : 1.6
+                NSBezierPath(ovalIn: NSRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)).fill()
+            }
+        }
+
+        if let hoveredDate {
+            let hoverX = x(for: hoveredDate, in: window)
+            NSColor.labelColor.withAlphaComponent(0.25).setFill()
+            NSBezierPath(rect: NSRect(x: hoverX - 0.5, y: 0, width: 1, height: plotHeight)).fill()
+        }
+    }
+
+    private func drawCentered(_ text: String, in rect: NSRect, attributes: [NSAttributedString.Key: Any]) {
+        let string = text as NSString
+        let size = string.size(withAttributes: attributes)
+        string.draw(
+            at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
+            withAttributes: attributes
+        )
+    }
+
+    /// 24시간 전 / 12시간 전 / 현재, placed at the real window positions.
+    private func drawTimeAxis(window: (start: Date, end: Date), attributes: [NSAttributedString.Key: Any]) {
+        let labelY = plotHeight + 1
+        let start = "24시간 전" as NSString
+        let middle = "12시간 전" as NSString
+        let end = "현재" as NSString
+        start.draw(at: NSPoint(x: plotMinX, y: labelY), withAttributes: attributes)
+        let middleSize = middle.size(withAttributes: attributes)
+        middle.draw(
+            at: NSPoint(x: bounds.midX - middleSize.width / 2, y: labelY),
+            withAttributes: attributes
+        )
+        let endSize = end.size(withAttributes: attributes)
+        end.draw(
+            at: NSPoint(x: plotMinX + plotWidth - endSize.width, y: labelY),
+            withAttributes: attributes
+        )
+        NSColor.labelColor.withAlphaComponent(0.25).setFill()
+        for tickX in [plotMinX, bounds.midX, plotMinX + plotWidth] {
+            NSBezierPath(rect: NSRect(x: tickX - 0.5, y: plotHeight, width: 1, height: 2)).fill()
+        }
     }
 
     // MARK: - Hover
@@ -514,35 +627,43 @@ private final class UsageHistoryBarView: NSView {
         ))
     }
 
-    /// Slot under a point in this view's coordinates, or nil if outside.
-    private func slot(at point: NSPoint) -> Int? {
-        guard bounds.contains(point) else { return nil }
-        let slots = max(slotCount, samples.count)
-        guard slots > 0, bounds.width > 0 else { return nil }
-        let totalGap = Self.barGap * CGFloat(max(0, slots - 1))
-        let barWidth = max(1, (bounds.width - totalGap) / CGFloat(slots))
-        let step = barWidth + Self.barGap
-        let index = Int(floor(point.x / step))
-        return (0..<slots).contains(index) ? index : nil
+    /// Timestamp of the recorded sample nearest the pointer in time-position,
+    /// or nil when no sample lies within `hoverRadius` points.
+    private func sampleDate(at point: NSPoint) -> Date? {
+        guard bounds.contains(point), point.y <= plotHeight else { return nil }
+        let window = currentWindow()
+        var best: (date: Date, distance: CGFloat)?
+        for sample in visibleSeries(in: window).flatMap({ $0 }) {
+            let distance = abs(x(for: sample.at, in: window) - point.x)
+            if distance <= Self.hoverRadius, distance < (best?.distance ?? .greatestFiniteMagnitude) {
+                best = (sample.at, distance)
+            }
+        }
+        return best?.date
     }
 
-    private func updateHover(to slot: Int?) {
-        guard slot != hoveredSlot else { return }
-        hoveredSlot = slot
-        let sample = slot
-            .flatMap { UsageConsumptionCore.sampleIndex(forSlot: $0, sampleCount: samples.count) }
-            .map { samples[$0] }
-        toolTip = sample.map { hoverTitle(for: $0) }
+    private func stackedSample(at date: Date) -> UsageConsumptionStackedSample {
+        UsageConsumptionStackedSample(
+            at: date,
+            amounts: series.map { entry in entry.samples.first(where: { $0.at == date })?.amount }
+        )
+    }
+
+    private func updateHover(to date: Date?) {
+        guard date != hoveredDate else { return }
+        hoveredDate = date
+        let sample = date.map { stackedSample(at: $0) }
+        toolTip = sample.map { hoverTitle(for: $0) } ?? coverageDescription
         needsDisplay = true
         onHover?(sample)
     }
 
     override func mouseMoved(with event: NSEvent) {
-        updateHover(to: slot(at: convert(event.locationInWindow, from: nil)))
+        updateHover(to: sampleDate(at: convert(event.locationInWindow, from: nil)))
     }
 
     override func mouseEntered(with event: NSEvent) {
-        updateHover(to: slot(at: convert(event.locationInWindow, from: nil)))
+        updateHover(to: sampleDate(at: convert(event.locationInWindow, from: nil)))
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -1422,119 +1543,410 @@ private final class UsageQuotaGroupView: NSView {
 
 /// One column of the panel: a title, an optional primary quota ring, a
 /// stack of metric rows, and an aligned account/refresh footer.
-private final class UsageColumnView: NSView {
-    private static let titleHeight: CGFloat = 16
-    private static let titleGap: CGFloat = 6
-    private static let quotaDiameter: CGFloat = 54
-    private static let quotaLineWidth: CGFloat = 5
-    private static let quotaGroupGap: CGFloat = 6
-    private static let quotaCaptionHeight: CGFloat = 14
-    private static let quotaCaptionGap: CGFloat = 3
-    private static let rowGap: CGFloat = 0
-    private static let rowsTopGap: CGFloat = 8
-    private static let singleLineRowHeight: CGFloat = 26
-    private static let detailRowHeight: CGFloat = 38
-    private static let statusTopGap: CGFloat = 8
-    private static let statusLineHeight: CGFloat = 15
-
-    private let titleLabel: NSTextField = {
-        let field = NSTextField(labelWithString: "")
-        field.font = .systemFont(ofSize: 13, weight: .regular)
-        return field
-    }()
-    private let titleMarkView = ProviderTitleMarkView()
+/// One extra ring + percent + caption cell, laid out like the plain ring
+/// row's cells.
+private final class UsageSupplementalQuotaView: NSView {
     private let ringView = UsageRingView()
     private let percentLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .monospacedDigitSystemFont(ofSize: 14, weight: .regular)
-        field.alignment = .center
-        field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
-        return field
-    }()
-    private let quotaCaptionLabel: NSTextField = {
-        let field = NSTextField(wrappingLabelWithString: "")
-        field.font = .systemFont(ofSize: 10, weight: .medium)
-        field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byClipping
-        field.alignment = .center
-        return field
-    }()
-    private let secondaryRingView = UsageRingView()
-    private let secondaryPercentLabel: NSTextField = {
-        let field = NSTextField(labelWithString: "")
         field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         field.alignment = .center
-        field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
         return field
     }()
-    private let secondaryQuotaCaptionLabel: NSTextField = {
+    private let captionLabel: NSTextField = {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
-        field.textColor = .secondaryLabelColor
         field.lineBreakMode = .byClipping
         field.alignment = .center
         return field
     }()
-    private let tertiaryRingView = UsageRingView()
-    private let tertiaryPercentLabel: NSTextField = {
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(ringView)
+        addSubview(percentLabel)
+        addSubview(captionLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(
+        _ quota: UsagePanelQuota,
+        width: CGFloat,
+        diameter: CGFloat,
+        lineWidth: CGFloat,
+        captionGap: CGFloat,
+        captionHeight: CGFloat,
+        theme: UsagePanelTheme
+    ) {
+        ringView.progressColor = quota.color
+        ringView.trackColor = quota.fraction <= 0
+            ? quota.color.withAlphaComponent(0.55)
+            : quota.color.withAlphaComponent(0.18)
+        ringView.fraction = quota.fraction
+        ringView.lineWidth = lineWidth
+        ringView.setAccessibilityElement(true)
+        ringView.setAccessibilityLabel(quota.caption)
+        ringView.setAccessibilityValue(quota.accessibilityValue)
+        percentLabel.stringValue = quota.percentText
+        percentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
+        captionLabel.stringValue = quota.caption
+        captionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        let ringX = (width - diameter) / 2
+        ringView.frame = NSRect(x: ringX, y: 0, width: diameter, height: diameter)
+        percentLabel.frame = NSRect(x: ringX, y: (diameter - 16) / 2, width: diameter, height: 16)
+        captionLabel.frame = NSRect(x: 0, y: diameter + captionGap, width: width, height: captionHeight)
+    }
+}
+
+/// Short thin horizontal progress bar replacing bulky radial ring gauges.
+final class UsageHorizontalMeterView: NSView {
+    var fraction: Double = 0 { didSet { needsDisplay = true } }
+    var barColor: NSColor = BKStyleTokens.barGreen { didSet { needsDisplay = true } }
+    var trackColor: NSColor = BKStyleTokens.barTrack { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let radius = bounds.height / 2
+        let trackPath = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
+        trackColor.setFill()
+        trackPath.fill()
+
+        let clamped = min(max(fraction, 0), 1)
+        guard clamped > 0 else { return }
+        let fillWidth = max(bounds.height, bounds.width * CGFloat(clamped))
+        let fillRect = NSRect(x: bounds.minX, y: bounds.minY, width: fillWidth, height: bounds.height)
+        let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius)
+        barColor.setFill()
+        fillPath.fill()
+    }
+}
+
+/// Compact row for one Gemini account ('본계정', '부계정', '세 번째')
+/// Columns: [Identity ~72pt] | [Session Remaining ~132pt] | [Week Remaining ~132pt]
+private final class GeminiAccountRowView: NSView {
+    private let titleLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-        field.alignment = .center
-        field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
-        return field
-    }()
-    private let tertiaryQuotaCaptionLabel: NSTextField = {
-        let field = NSTextField(wrappingLabelWithString: "")
-        field.font = .systemFont(ofSize: 10, weight: .medium)
-        field.textColor = .secondaryLabelColor
+        field.font = .systemFont(ofSize: 11.5, weight: .semibold)
         field.lineBreakMode = .byClipping
-        field.alignment = .center
         return field
     }()
-    private let quaternaryRingView = UsageRingView()
-    private let quaternaryPercentLabel: NSTextField = {
+    private let emailLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        field.alignment = .center
-        field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
-        return field
-    }()
-    private let quaternaryQuotaCaptionLabel: NSTextField = {
-        let field = NSTextField(wrappingLabelWithString: "")
-        field.font = .systemFont(ofSize: 10, weight: .medium)
+        field.font = .systemFont(ofSize: 10.5, weight: .regular)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byClipping
-        field.alignment = .center
+        field.lineBreakMode = .byTruncatingTail
         return field
     }()
+    private let sessionTitleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "세션")
+        field.font = .systemFont(ofSize: 11, weight: .medium)
+        field.textColor = .secondaryLabelColor
+        return field
+    }()
+    private let sessionValueLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "—")
+        field.font = .monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+        field.alignment = .right
+        return field
+    }()
+    private let sessionMeter = UsageHorizontalMeterView()
+    private let sessionResetLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10.5, weight: .regular)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }()
+    private let weekTitleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "주간")
+        field.font = .systemFont(ofSize: 11, weight: .medium)
+        field.textColor = .secondaryLabelColor
+        return field
+    }()
+    private let weekValueLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "—")
+        field.font = .monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+        field.alignment = .right
+        return field
+    }()
+    private let weekMeter = UsageHorizontalMeterView()
+    private let weekResetLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10.5, weight: .regular)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }()
+    private let dividerLine = NSView()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(titleLabel)
+        addSubview(emailLabel)
+        addSubview(sessionTitleLabel)
+        addSubview(sessionValueLabel)
+        addSubview(sessionMeter)
+        addSubview(sessionResetLabel)
+        addSubview(weekTitleLabel)
+        addSubview(weekValueLabel)
+        addSubview(weekMeter)
+        addSubview(weekResetLabel)
+        addSubview(dividerLine)
+        dividerLine.wantsLayer = true
+        dividerLine.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.25).cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(
+        accountTitle: String,
+        email: String,
+        sessionPercent: String,
+        sessionFraction: Double,
+        sessionReset: String,
+        weekPercent: String,
+        weekFraction: Double,
+        weekReset: String,
+        width: CGFloat,
+        theme: UsagePanelTheme,
+        showsDivider: Bool
+    ) {
+        titleLabel.stringValue = accountTitle
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
+        emailLabel.stringValue = email
+        emailLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+
+        sessionValueLabel.stringValue = sessionPercent
+        sessionValueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
+        sessionMeter.fraction = sessionFraction
+        let isSessionLow = sessionFraction <= 0.15 && sessionFraction > 0
+        sessionMeter.barColor = isSessionLow ? BKStyleTokens.barCoral : BKStyleTokens.barBlue
+        sessionResetLabel.stringValue = sessionReset
+        sessionResetLabel.textColor = isSessionLow ? BKStyleTokens.barCoral : (theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor)
+
+        weekValueLabel.stringValue = weekPercent
+        weekValueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
+        weekMeter.fraction = weekFraction
+        let isWeekLow = weekFraction <= 0.15 && weekFraction > 0
+        weekMeter.barColor = isWeekLow ? BKStyleTokens.barCoral : BKStyleTokens.barGreen
+        weekResetLabel.stringValue = weekReset
+        weekResetLabel.textColor = isWeekLow ? BKStyleTokens.barCoral : (theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor)
+
+        dividerLine.isHidden = !showsDivider
+        if theme == .bk {
+            dividerLine.layer?.backgroundColor = BKStyleTokens.chromeLine.withAlphaComponent(0.35).cgColor
+        }
+
+        let idWidth: CGFloat = 76
+        let col1X: CGFloat = 4
+        let col2X = col1X + idWidth + 8
+        let meterWidth: CGFloat = max(100, (width - col2X - 8) / 2)
+        let col3X = col2X + meterWidth + 8
+
+        titleLabel.frame = NSRect(x: col1X, y: 1, width: idWidth, height: 16)
+        emailLabel.frame = NSRect(x: col1X, y: 18, width: idWidth, height: 14)
+
+        sessionTitleLabel.frame = NSRect(x: col2X, y: 1, width: 28, height: 15)
+        sessionValueLabel.frame = NSRect(x: col2X + 28, y: 1, width: meterWidth - 28, height: 15)
+        sessionMeter.frame = NSRect(x: col2X, y: 17, width: meterWidth, height: 4)
+        sessionResetLabel.frame = NSRect(x: col2X, y: 23, width: meterWidth, height: 13)
+
+        weekTitleLabel.frame = NSRect(x: col3X, y: 1, width: 28, height: 15)
+        weekValueLabel.frame = NSRect(x: col3X + 28, y: 1, width: meterWidth - 28, height: 15)
+        weekMeter.frame = NSRect(x: col3X, y: 17, width: meterWidth, height: 4)
+        weekResetLabel.frame = NSRect(x: col3X, y: 23, width: meterWidth, height: 13)
+
+        dividerLine.frame = NSRect(x: col1X, y: 37, width: max(0, width - 8), height: 1)
+    }
+}
+
+/// Compact metric block for Claude (session, Fable, week stack)
+private final class ClaudeMetricBlockView: NSView {
+    private let titleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 11.5, weight: .medium)
+        return field
+    }()
+    private let valueLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+        field.alignment = .right
+        return field
+    }()
+    private let meter = UsageHorizontalMeterView()
+    private let resetLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10.5, weight: .regular)
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(titleLabel)
+        addSubview(valueLabel)
+        addSubview(meter)
+        addSubview(resetLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(title: String, value: String, fraction: Double, reset: String, width: CGFloat, theme: UsagePanelTheme) {
+        titleLabel.stringValue = title
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        valueLabel.stringValue = value
+        valueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
+        let isLow = fraction <= 0.15 && fraction > 0
+        meter.fraction = fraction
+        meter.barColor = isLow ? BKStyleTokens.barCoral : BKStyleTokens.barGreen
+        resetLabel.stringValue = isLow ? "\(reset) · 소진 임박" : reset
+        resetLabel.textColor = isLow ? BKStyleTokens.barCoral : (theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor)
+
+        let inset: CGFloat = 4
+        let meterW = max(0, width - inset * 2)
+        titleLabel.frame = NSRect(x: inset, y: 0, width: 60, height: 16)
+        valueLabel.frame = NSRect(x: inset + 60, y: 0, width: max(0, meterW - 60), height: 16)
+        meter.frame = NSRect(x: inset, y: 17, width: meterW, height: 4)
+        resetLabel.frame = NSRect(x: inset, y: 23, width: meterW, height: 13)
+    }
+}
+
+/// Compact metric block for Codex
+private final class CodexMetricBlockView: NSView {
+    private let titleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 11.5, weight: .medium)
+        return field
+    }()
+    private let valueLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .bold)
+        field.alignment = .right
+        return field
+    }()
+    private let meter = UsageHorizontalMeterView()
+    private let resetLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10.5, weight: .regular)
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(titleLabel)
+        addSubview(valueLabel)
+        addSubview(meter)
+        addSubview(resetLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(title: String, value: String, fraction: Double, reset: String, width: CGFloat, theme: UsagePanelTheme) {
+        titleLabel.stringValue = title
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        valueLabel.stringValue = value
+        valueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
+        let isLow = fraction <= 0.15 && fraction > 0
+        meter.fraction = fraction
+        meter.barColor = isLow ? BKStyleTokens.barCoral : BKStyleTokens.barGreen
+        resetLabel.stringValue = reset
+        resetLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+
+        let inset: CGFloat = 4
+        let meterW = max(0, width - inset * 2)
+        titleLabel.frame = NSRect(x: inset, y: 0, width: 70, height: 16)
+        valueLabel.frame = NSRect(x: inset + 70, y: 0, width: max(0, meterW - 70), height: 16)
+        meter.frame = NSRect(x: inset, y: 17, width: meterW, height: 4)
+        resetLabel.frame = NSRect(x: inset, y: 23, width: meterW, height: 13)
+    }
+}
+
+/// One provider column in the compact 3-provider dashboard
+private final class UsageColumnView: NSView {
+    private static let titleHeight: CGFloat = 18
+    private static let titleGap: CGFloat = 6
+    private static let statusTopGap: CGFloat = 6
+    private static let statusLineHeight: CGFloat = 14
+
+    private let titleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 13, weight: .semibold)
+        return field
+    }()
+    private let titleMarkView = ProviderTitleMarkView()
+    private let badgeView = UsageInUseBadgeView()
+
+    // Codex views
+    private let codexBlock = CodexMetricBlockView()
+    private let codexCreditsLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 11, weight: .regular)
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }()
+    private let codexResetCreditsLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 10, weight: .regular)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }()
+
+    // Claude views
+    private let claudeSessionBlock = ClaudeMetricBlockView()
+    private let claudeFableBlock = ClaudeMetricBlockView()
+    private let claudeWeekBlock = ClaudeMetricBlockView()
+
+    // Gemini views (3 compact account rows)
+    private let geminiRow0 = GeminiAccountRowView()
+    private let geminiRow1 = GeminiAccountRowView()
+    private let geminiRow2 = GeminiAccountRowView()
+
+    // Footers
     private let accountLabel: NSTextField = {
         let field = NSTextField(wrappingLabelWithString: "")
-        field.font = .systemFont(ofSize: 11)
+        field.font = .systemFont(ofSize: 10.5)
         field.textColor = .secondaryLabelColor
         field.lineBreakMode = .byWordWrapping
         return field
     }()
     private let refreshLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .systemFont(ofSize: 11)
+        field.font = .systemFont(ofSize: 10)
         field.textColor = .secondaryLabelColor
         field.lineBreakMode = .byClipping
         return field
     }()
     private let statusLabel: NSTextField = {
         let field = NSTextField(wrappingLabelWithString: "")
-        field.font = .systemFont(ofSize: 11, weight: .medium)
+        field.font = .systemFont(ofSize: 10.5, weight: .medium)
         return field
     }()
 
-    private var rowViews: [UsageMetricRowView] = []
-    private var groupViews: [UsageQuotaGroupView] = []
-    private var sectionHeaderViews: [UsageSectionHeaderView] = []
     private var accountLineCount = 0
     private var hasRefreshLine = false
     private var statusLineCount = 0
-
-    private static let quotaGroupSectionGap: CGFloat = 10
 
     override var isFlipped: Bool { true }
 
@@ -1542,18 +1954,20 @@ private final class UsageColumnView: NSView {
         super.init(frame: frameRect)
         addSubview(titleMarkView)
         addSubview(titleLabel)
-        addSubview(ringView)
-        addSubview(percentLabel)
-        addSubview(quotaCaptionLabel)
-        addSubview(secondaryRingView)
-        addSubview(secondaryPercentLabel)
-        addSubview(secondaryQuotaCaptionLabel)
-        addSubview(tertiaryRingView)
-        addSubview(tertiaryPercentLabel)
-        addSubview(tertiaryQuotaCaptionLabel)
-        addSubview(quaternaryRingView)
-        addSubview(quaternaryPercentLabel)
-        addSubview(quaternaryQuotaCaptionLabel)
+        addSubview(badgeView)
+
+        addSubview(codexBlock)
+        addSubview(codexCreditsLabel)
+        addSubview(codexResetCreditsLabel)
+
+        addSubview(claudeSessionBlock)
+        addSubview(claudeFableBlock)
+        addSubview(claudeWeekBlock)
+
+        addSubview(geminiRow0)
+        addSubview(geminiRow1)
+        addSubview(geminiRow2)
+
         addSubview(accountLabel)
         addSubview(refreshLabel)
         addSubview(statusLabel)
@@ -1563,250 +1977,217 @@ private final class UsageColumnView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Lays out the column immediately using the given fixed width and
-    /// returns the body height. The caller then gives all columns one shared
-    /// footer origin so account and refresh information align horizontally.
     @discardableResult
     func apply(_ column: UsagePanelColumn, width: CGFloat, theme: UsagePanelTheme) -> CGFloat {
         titleLabel.stringValue = column.title
-        titleLabel.textColor = column.accentColor
-        quotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
-        secondaryQuotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
-        tertiaryQuotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
-        quaternaryQuotaCaptionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : column.accentColor
         accountLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
-        refreshLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        refreshLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+
         titleMarkView.style = ProviderTitleMarkView.Style(providerTitle: column.title)
-        titleMarkView.frame = NSRect(x: 0, y: 1, width: 14, height: 14)
-        titleLabel.frame = NSRect(x: 20, y: 0, width: max(0, width - 20), height: Self.titleHeight)
+        titleMarkView.frame = NSRect(x: 2, y: 2, width: 14, height: 14)
+        titleLabel.frame = NSRect(x: 22, y: 0, width: 70, height: Self.titleHeight)
 
-        var y: CGFloat = Self.titleHeight
+        let isGemini = column.title.contains("Gemini") || width > 300
+        let isClaude = column.title.contains("Claude")
+        let isCodex = column.title.contains("Codex") || (!isGemini && !isClaude)
 
-        syncGroupViews(column.quotaGroups.count)
-        if !column.quotaGroups.isEmpty {
-            hidePlainQuotaViews()
-            y += Self.titleGap
-            if groupViews.count == 2 {
-                // Shares the plain ring grid's gap so the two groups' four
-                // rings land on the same equal-width slots as Codex/Claude.
-                let gap: CGFloat = Self.quotaGroupGap
-                let groupWidth = (width - gap) / 2
-                let heights = groupViews.enumerated().map { index, groupView in
-                    groupView.apply(column.quotaGroups[index], width: groupWidth, theme: theme)
-                }
-                let groupHeight = heights.max() ?? 0
-                for (index, groupView) in groupViews.enumerated() {
-                    groupView.frame = NSRect(
-                        x: CGFloat(index) * (groupWidth + gap),
-                        y: y,
-                        width: groupWidth,
-                        height: groupHeight
-                    )
-                }
-                y += groupHeight
-            } else {
-                for (index, groupView) in groupViews.enumerated() {
-                    if index > 0 { y += Self.quotaGroupSectionGap }
-                    let height = groupView.apply(column.quotaGroups[index], width: width, theme: theme)
-                    groupView.frame = NSRect(x: 0, y: y, width: width, height: height)
-                    y += height
-                }
+        // Plan / mode badge
+        var badgeText: String? = nil
+        if isCodex {
+            if let plan = column.allRows.first(where: { $0.label == "요금제" })?.value {
+                badgeText = plan.replacingOccurrences(of: "ChatGPT ", with: "")
             }
-        } else if let quota = column.quota {
-            y += Self.titleGap
-            let showsRing = quota.displayStyle == .ring
-            ringView.isHidden = !showsRing
-            percentLabel.isHidden = false
-            quotaCaptionLabel.isHidden = false
-            ringView.progressColor = quota.color
-            ringView.trackColor = quota.fraction <= 0
-                ? quota.color.withAlphaComponent(0.55)
-                : quota.color.withAlphaComponent(0.18)
-            ringView.fraction = quota.fraction
-            ringView.gradientColors = column.primaryQuotaGradientColors
-            percentLabel.stringValue = quota.percentText
-            quotaCaptionLabel.stringValue = quota.caption
-            ringView.setAccessibilityElement(showsRing)
-            ringView.setAccessibilityLabel(quota.caption)
-            ringView.setAccessibilityValue(quota.accessibilityValue)
-
-            // Codex, Claude, and Gemini share one ring grid: identical
-            // diameter, stroke, vertical origin, and caption baseline. Only
-            // the number of equal-width groups differs by provider.
-            let quotaCount = 1
-                + (column.secondaryQuota == nil ? 0 : 1)
-                + (column.tertiaryQuota == nil ? 0 : 1)
-                + (column.quaternaryQuota == nil ? 0 : 1)
-            let groupWidth = (
-                width - Self.quotaGroupGap * CGFloat(max(0, quotaCount - 1))
-            ) / CGFloat(quotaCount)
-            let diameter = Self.quotaDiameter
-            let lineWidth = Self.quotaLineWidth
-            ringView.lineWidth = lineWidth
-            percentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-            let primaryRingX = (groupWidth - diameter) / 2
-            ringView.frame = NSRect(x: primaryRingX, y: y, width: diameter, height: diameter)
-            if quota.displayStyle == .prominentValue {
-                percentLabel.font = .monospacedDigitSystemFont(ofSize: 24, weight: .bold)
-                percentLabel.textColor = quota.color
-                percentLabel.frame = NSRect(x: 0, y: y + (diameter - 30) / 2, width: groupWidth, height: 30)
-            } else {
-                percentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
-                percentLabel.frame = NSRect(x: primaryRingX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
+        } else if isClaude {
+            if let plan = column.allRows.first(where: { $0.label == "요금제" })?.value {
+                badgeText = plan.replacingOccurrences(of: "Claude ", with: "")
             }
-            quotaCaptionLabel.frame = NSRect(
-                x: 0,
-                y: y + diameter + Self.quotaCaptionGap,
-                width: groupWidth,
-                height: Self.quotaCaptionHeight
-            )
-
-            if let secondaryQuota = column.secondaryQuota {
-                secondaryRingView.isHidden = false
-                secondaryPercentLabel.isHidden = false
-                secondaryQuotaCaptionLabel.isHidden = false
-                secondaryRingView.progressColor = secondaryQuota.color
-                secondaryRingView.trackColor = secondaryQuota.fraction <= 0
-                    ? secondaryQuota.color.withAlphaComponent(0.55)
-                    : secondaryQuota.color.withAlphaComponent(0.18)
-                secondaryRingView.fraction = secondaryQuota.fraction
-                secondaryRingView.gradientColors = column.secondaryQuotaGradientColors
-                secondaryRingView.lineWidth = lineWidth
-                secondaryPercentLabel.stringValue = secondaryQuota.percentText
-                secondaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-                secondaryPercentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
-                secondaryQuotaCaptionLabel.stringValue = secondaryQuota.caption
-                secondaryRingView.setAccessibilityElement(true)
-                secondaryRingView.setAccessibilityLabel(secondaryQuota.caption)
-                secondaryRingView.setAccessibilityValue(secondaryQuota.accessibilityValue)
-
-                let secondaryGroupX = groupWidth + Self.quotaGroupGap
-                let ringX = secondaryGroupX + (groupWidth - diameter) / 2
-                secondaryRingView.frame = NSRect(x: ringX, y: y, width: diameter, height: diameter)
-                secondaryPercentLabel.frame = NSRect(x: ringX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
-                secondaryQuotaCaptionLabel.frame = NSRect(
-                    x: secondaryGroupX,
-                    y: y + diameter + Self.quotaCaptionGap,
-                    width: groupWidth,
-                    height: Self.quotaCaptionHeight
-                )
+        } else if isGemini {
+            if let bt = column.quotaGroups.first?.badgeText {
+                badgeText = bt
+            } else if column.accountLines.contains(where: { $0.contains("놀이터") }) {
+                badgeText = "놀이터"
             } else {
-                secondaryRingView.isHidden = true
-                secondaryPercentLabel.isHidden = true
-                secondaryQuotaCaptionLabel.isHidden = true
+                badgeText = "CLI"
             }
-
-            if let tertiaryQuota = column.tertiaryQuota {
-                tertiaryRingView.isHidden = false
-                tertiaryPercentLabel.isHidden = false
-                tertiaryQuotaCaptionLabel.isHidden = false
-                tertiaryRingView.progressColor = tertiaryQuota.color
-                tertiaryRingView.trackColor = tertiaryQuota.fraction <= 0
-                    ? tertiaryQuota.color.withAlphaComponent(0.55)
-                    : tertiaryQuota.color.withAlphaComponent(0.18)
-                tertiaryRingView.fraction = tertiaryQuota.fraction
-                tertiaryRingView.lineWidth = lineWidth
-                tertiaryPercentLabel.stringValue = tertiaryQuota.percentText
-                tertiaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-                tertiaryPercentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
-                tertiaryQuotaCaptionLabel.stringValue = tertiaryQuota.caption
-                tertiaryRingView.setAccessibilityElement(true)
-                tertiaryRingView.setAccessibilityLabel(tertiaryQuota.caption)
-                tertiaryRingView.setAccessibilityValue(tertiaryQuota.accessibilityValue)
-
-                let tertiaryGroupX = groupWidth * 2 + Self.quotaGroupGap * 2
-                let ringX = tertiaryGroupX + (groupWidth - diameter) / 2
-                tertiaryRingView.frame = NSRect(x: ringX, y: y, width: diameter, height: diameter)
-                tertiaryPercentLabel.frame = NSRect(x: ringX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
-                tertiaryQuotaCaptionLabel.frame = NSRect(
-                    x: tertiaryGroupX,
-                    y: y + diameter + Self.quotaCaptionGap,
-                    width: groupWidth,
-                    height: Self.quotaCaptionHeight
-                )
-            } else {
-                tertiaryRingView.isHidden = true
-                tertiaryPercentLabel.isHidden = true
-                tertiaryQuotaCaptionLabel.isHidden = true
-            }
-
-            if let quaternaryQuota = column.quaternaryQuota {
-                quaternaryRingView.isHidden = false
-                quaternaryPercentLabel.isHidden = false
-                quaternaryQuotaCaptionLabel.isHidden = false
-                quaternaryRingView.progressColor = quaternaryQuota.color
-                quaternaryRingView.trackColor = quaternaryQuota.fraction <= 0
-                    ? quaternaryQuota.color.withAlphaComponent(0.55)
-                    : quaternaryQuota.color.withAlphaComponent(0.18)
-                quaternaryRingView.fraction = quaternaryQuota.fraction
-                quaternaryRingView.lineWidth = lineWidth
-                quaternaryPercentLabel.stringValue = quaternaryQuota.percentText
-                quaternaryPercentLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-                quaternaryPercentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
-                quaternaryQuotaCaptionLabel.stringValue = quaternaryQuota.caption
-                quaternaryRingView.setAccessibilityElement(true)
-                quaternaryRingView.setAccessibilityLabel(quaternaryQuota.caption)
-                quaternaryRingView.setAccessibilityValue(quaternaryQuota.accessibilityValue)
-
-                let quaternaryGroupX = groupWidth * 3 + Self.quotaGroupGap * 3
-                let ringX = quaternaryGroupX + (groupWidth - diameter) / 2
-                quaternaryRingView.frame = NSRect(x: ringX, y: y, width: diameter, height: diameter)
-                quaternaryPercentLabel.frame = NSRect(x: ringX, y: y + (diameter - 16) / 2, width: diameter, height: 16)
-                quaternaryQuotaCaptionLabel.frame = NSRect(
-                    x: quaternaryGroupX,
-                    y: y + diameter + Self.quotaCaptionGap,
-                    width: groupWidth,
-                    height: Self.quotaCaptionHeight
-                )
-            } else {
-                quaternaryRingView.isHidden = true
-                quaternaryPercentLabel.isHidden = true
-                quaternaryQuotaCaptionLabel.isHidden = true
-            }
-
-            y += diameter + Self.quotaCaptionGap + Self.quotaCaptionHeight
+        }
+        if let badge = badgeText, !badge.isEmpty {
+            badgeView.isHidden = false
+            let badgeWidth = badgeView.apply(text: badge, theme: theme)
+            badgeView.frame = NSRect(x: width - badgeWidth - 4, y: 1, width: badgeWidth, height: 15)
         } else {
-            hidePlainQuotaViews()
+            badgeView.isHidden = true
         }
 
-        let allRows = column.allRows
-        syncRows(allRows)
-        let titledGroupCount = column.rowGroups.filter { $0.title != nil && !$0.rows.isEmpty }.count
-        syncSectionHeaders(titledGroupCount)
-        if !allRows.isEmpty {
-            y += Self.rowsTopGap
-            var rowIndex = 0
-            var headerIndex = 0
-            for group in column.rowGroups where !group.rows.isEmpty {
-                if let groupTitle = group.title {
-                    let headerView = sectionHeaderViews[headerIndex]
-                    headerIndex += 1
-                    headerView.apply(title: groupTitle, glyph: group.glyph, theme: theme, width: width)
-                    headerView.frame = NSRect(x: 0, y: y, width: width, height: UsageSectionHeaderView.viewHeight)
-                    y += UsageSectionHeaderView.viewHeight
-                }
-                for row in group.rows {
-                    let rowView = rowViews[rowIndex]
-                    rowIndex += 1
-                    let height = row.detail.map {
-                        Self.detailRowHeight + CGFloat($0.components(separatedBy: "\n").count - 1) * UsageMetricRowView.detailLineHeight
-                            + ($0.contains("\n") ? 4 : 0)
-                    } ?? Self.singleLineRowHeight
-                    rowView.apply(row, width: width, height: height, theme: theme)
-                    rowView.frame = NSRect(x: 0, y: y, width: width, height: height)
-                    y += height + Self.rowGap
-                }
+        var y: CGFloat = Self.titleHeight + Self.titleGap
+
+        // Hide all provider groups first
+        codexBlock.isHidden = true
+        codexCreditsLabel.isHidden = true
+        codexResetCreditsLabel.isHidden = true
+        claudeSessionBlock.isHidden = true
+        claudeFableBlock.isHidden = true
+        claudeWeekBlock.isHidden = true
+        geminiRow0.isHidden = true
+        geminiRow1.isHidden = true
+        geminiRow2.isHidden = true
+
+        if isGemini {
+            geminiRow0.isHidden = false
+            geminiRow1.isHidden = false
+            geminiRow2.isHidden = false
+
+            // Account 0 (본계정)
+            let email0 = Self.extractSnippet(from: column.accountLines.first(where: { $0.contains("본") }) ?? column.accountLines.first, defaultLabel: "본계정")
+            let sessionReset0 = column.allRows.first(where: { $0.label.contains("본 세션") || $0.label == "C세션 초기화" })?.value ?? ""
+            let weekReset0 = column.allRows.first(where: { $0.label.contains("본 주간") || $0.label == "C주간 초기화" })?.value ?? ""
+            geminiRow0.apply(
+                accountTitle: "본계정",
+                email: email0,
+                sessionPercent: column.quota?.percentText ?? "—",
+                sessionFraction: column.quota?.fraction ?? 0,
+                sessionReset: sessionReset0,
+                weekPercent: column.secondaryQuota?.percentText ?? "—",
+                weekFraction: column.secondaryQuota?.fraction ?? 0,
+                weekReset: weekReset0,
+                width: width,
+                theme: theme,
+                showsDivider: true
+            )
+            geminiRow0.frame = NSRect(x: 0, y: y, width: width, height: 38)
+            y += 39
+
+            // Account 1 (부계정)
+            let email1 = Self.extractSnippet(from: column.accountLines.first(where: { $0.contains("부") }) ?? (column.accountLines.count > 1 ? column.accountLines[1] : nil), defaultLabel: "부계정")
+            let sessionReset1 = column.allRows.first(where: { $0.label.contains("부 세션") || $0.label == "O세션 초기화" })?.value ?? ""
+            let weekReset1 = column.allRows.first(where: { $0.label.contains("부 주간") || $0.label == "O주간 초기화" })?.value ?? ""
+            geminiRow1.apply(
+                accountTitle: "부계정",
+                email: email1,
+                sessionPercent: column.tertiaryQuota?.percentText ?? "—",
+                sessionFraction: column.tertiaryQuota?.fraction ?? 0,
+                sessionReset: sessionReset1,
+                weekPercent: column.quaternaryQuota?.percentText ?? "—",
+                weekFraction: column.quaternaryQuota?.fraction ?? 0,
+                weekReset: weekReset1,
+                width: width,
+                theme: theme,
+                showsDivider: true
+            )
+            geminiRow1.frame = NSRect(x: 0, y: y, width: width, height: 38)
+            y += 39
+
+            // Account 2 (세 번째)
+            let email2 = Self.extractSnippet(from: column.accountLines.first(where: { $0.hasPrefix("세 번째") }), defaultLabel: "세 번째")
+            let session3 = column.supplementalQuotas.first
+            let week3 = column.supplementalQuotas.count > 1 ? column.supplementalQuotas[1] : nil
+            let sessionReset2 = column.allRows.first(where: { $0.label.contains("3 세션") })?.value ?? ""
+            let weekReset2 = column.allRows.first(where: { $0.label.contains("3 주간") })?.value ?? ""
+            let hasThird = session3 != nil || column.accountLines.contains(where: { $0.hasPrefix("세 번째") })
+            geminiRow2.apply(
+                accountTitle: "세 번째",
+                email: email2,
+                sessionPercent: session3?.percentText ?? (hasThird ? "—" : "미등록"),
+                sessionFraction: session3?.fraction ?? 0,
+                sessionReset: sessionReset2,
+                weekPercent: week3?.percentText ?? (hasThird ? "—" : "미등록"),
+                weekFraction: week3?.fraction ?? 0,
+                weekReset: weekReset2,
+                width: width,
+                theme: theme,
+                showsDivider: false
+            )
+            geminiRow2.frame = NSRect(x: 0, y: y, width: width, height: 38)
+            y += 39
+
+        } else if isClaude {
+            claudeSessionBlock.isHidden = false
+            claudeWeekBlock.isHidden = false
+
+            let hasFable = column.tertiaryQuota != nil
+            claudeFableBlock.isHidden = !hasFable
+
+            let sessionReset = column.allRows.first(where: { $0.label.contains("세션 초기화") })?.value ?? ""
+            claudeSessionBlock.apply(
+                title: "세션",
+                value: column.quota?.percentText ?? "—",
+                fraction: column.quota?.fraction ?? 0,
+                reset: sessionReset,
+                width: width,
+                theme: theme
+            )
+            claudeSessionBlock.frame = NSRect(x: 0, y: y, width: width, height: 35)
+            y += 36
+
+            if hasFable {
+                let fableReset = column.allRows.first(where: { $0.label.contains("Fable 초기화") })?.value ?? ""
+                claudeFableBlock.apply(
+                    title: "Fable",
+                    value: column.secondaryQuota?.percentText ?? "—",
+                    fraction: column.secondaryQuota?.fraction ?? 0,
+                    reset: fableReset,
+                    width: width,
+                    theme: theme
+                )
+                claudeFableBlock.frame = NSRect(x: 0, y: y, width: width, height: 35)
+                y += 36
+            }
+
+            let weekQuota = column.tertiaryQuota ?? column.secondaryQuota
+            let weekReset = column.allRows.first(where: { $0.label.contains("주간 초기화") })?.value ?? ""
+            claudeWeekBlock.apply(
+                title: "주간",
+                value: weekQuota?.percentText ?? "—",
+                fraction: weekQuota?.fraction ?? 0,
+                reset: weekReset,
+                width: width,
+                theme: theme
+            )
+            claudeWeekBlock.frame = NSRect(x: 0, y: y, width: width, height: 35)
+            y += 36
+
+        } else {
+            // Codex
+            codexBlock.isHidden = false
+            let weekReset = column.allRows.first(where: { $0.label.contains("주간 초기화") })?.value ?? ""
+            let codexCaption = column.quota?.caption ?? "주간 남음"
+            let codexValue = column.quota?.percentText ?? "—"
+            let codexFraction = column.quota?.fraction ?? 0
+            codexBlock.apply(
+                title: codexCaption,
+                value: codexValue,
+                fraction: codexFraction,
+                reset: weekReset,
+                width: width,
+                theme: theme
+            )
+            codexBlock.frame = NSRect(x: 0, y: y, width: width, height: 35)
+            y += 36
+
+            if let creditRow = column.allRows.first(where: { $0.label.contains("남은 크레딧") }) {
+                codexCreditsLabel.isHidden = false
+                codexCreditsLabel.stringValue = "\(creditRow.label): \(creditRow.value)"
+                codexCreditsLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+                codexCreditsLabel.frame = NSRect(x: 4, y: y, width: max(0, width - 8), height: 16)
+                y += 18
+            }
+            if let resetCreditRow = column.allRows.first(where: { $0.label == "초기화" }) {
+                codexResetCreditsLabel.isHidden = false
+                codexResetCreditsLabel.stringValue = "\(resetCreditRow.label): \(resetCreditRow.value)"
+                codexResetCreditsLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .tertiaryLabelColor
+                codexResetCreditsLabel.frame = NSRect(x: 4, y: y, width: max(0, width - 8), height: 16)
+                y += 18
             }
         }
 
-        accountLabel.stringValue = column.accountLines.joined(separator: "\n")
-        // Reserve the wrapped height, not just the number of explicit newlines.
+        // Footer lines calculation
+        accountLabel.stringValue = isGemini ? "" : column.accountLines.joined(separator: "\n")
         let footerTextWidth = max(1, width - 16)
         let accountTextHeight = accountLabel.cell?.cellSize(forBounds:
             NSRect(x: 0, y: 0, width: footerTextWidth, height: .greatestFiniteMagnitude)).height ?? 0
-        accountLineCount = column.accountLines.isEmpty ? 0 : max(column.accountLines.count,
+        accountLineCount = (isGemini || column.accountLines.isEmpty) ? 0 : max(column.accountLines.count,
             Int(ceil(accountTextHeight / Self.statusLineHeight)))
-        accountLabel.isHidden = column.accountLines.isEmpty
+        accountLabel.isHidden = accountLineCount == 0
         hasRefreshLine = column.refreshLine != nil
         refreshLabel.stringValue = column.refreshLine ?? ""
         refreshLabel.isHidden = column.refreshLine == nil
@@ -1815,39 +2196,24 @@ private final class UsageColumnView: NSView {
         statusLabel.textColor = column.statusColor
         statusLabel.isHidden = column.statusLines.isEmpty
 
-        var accessibilityParts = [column.title]
-        if !column.quotaGroups.isEmpty {
-            for group in column.quotaGroups {
-                accessibilityParts.append(group.title)
-                if let badgeText = group.badgeText { accessibilityParts.append(badgeText) }
-                accessibilityParts.append(contentsOf: group.quotas.map(\.accessibilityValue))
-                if let statusLine = group.statusLine { accessibilityParts.append(statusLine) }
-            }
-        } else {
-            if let quota = column.quota {
-                accessibilityParts.append(quota.accessibilityValue)
-            }
-            if let secondaryQuota = column.secondaryQuota {
-                accessibilityParts.append(secondaryQuota.accessibilityValue)
-            }
-            if let tertiaryQuota = column.tertiaryQuota {
-                accessibilityParts.append(tertiaryQuota.accessibilityValue)
-            }
-            if let quaternaryQuota = column.quaternaryQuota {
-                accessibilityParts.append(quaternaryQuota.accessibilityValue)
-            }
-        }
-        accessibilityParts.append(contentsOf: allRows.map(\.accessibilityLabel))
-        accessibilityParts.append(contentsOf: column.accountLines)
-        if let refreshLine = column.refreshLine {
-            accessibilityParts.append(refreshLine)
-        }
-        accessibilityParts.append(contentsOf: column.statusLines)
-        let accessibilitySummary = accessibilityParts.joined(separator: ", ")
         setAccessibilityElement(true)
-        setAccessibilityLabel(accessibilitySummary)
-
+        setAccessibilityLabel("\(column.title) 사용량")
         return y
+    }
+
+    private static func extractSnippet(from text: String?, defaultLabel: String) -> String {
+        guard let text, !text.isEmpty else { return defaultLabel }
+        var cleaned = text
+        for prefix in ["본계정 ", "부계정 ", "세 번째 계정 ", "세 번째 ", "계정 "] {
+            if cleaned.hasPrefix(prefix) {
+                cleaned = String(cleaned.dropFirst(prefix.count))
+                break
+            }
+        }
+        if cleaned.lowercased().hasSuffix("@gmail.com") {
+            cleaned = String(cleaned.dropLast(10))
+        }
+        return cleaned.isEmpty ? defaultLabel : cleaned
     }
 
     func footerCapacities() -> (account: Int, refresh: Int, status: Int) {
@@ -1868,7 +2234,7 @@ private final class UsageColumnView: NSView {
     ) {
         guard accountCapacity + refreshCapacity + statusCapacity > 0 else { return }
         var y = top + Self.statusTopGap
-        let textInset: CGFloat = 8
+        let textInset: CGFloat = 4
         let textWidth = max(0, width - textInset * 2)
         let accountHeight = CGFloat(accountLineCount) * Self.statusLineHeight
         let accountOffset = CGFloat(max(0, accountCapacity - accountLineCount)) * Self.statusLineHeight
@@ -1879,54 +2245,6 @@ private final class UsageColumnView: NSView {
         let statusHeight = CGFloat(statusLineCount) * Self.statusLineHeight
         statusLabel.frame = NSRect(x: textInset, y: y, width: textWidth, height: statusHeight)
     }
-
-    private func syncRows(_ rows: [UsagePanelRow]) {
-        while rowViews.count < rows.count {
-            let rowView = UsageMetricRowView()
-            addSubview(rowView)
-            rowViews.append(rowView)
-        }
-        while rowViews.count > rows.count {
-            rowViews.removeLast().removeFromSuperview()
-        }
-    }
-
-    private func syncGroupViews(_ count: Int) {
-        while groupViews.count < count {
-            let groupView = UsageQuotaGroupView()
-            addSubview(groupView)
-            groupViews.append(groupView)
-        }
-        while groupViews.count > count {
-            groupViews.removeLast().removeFromSuperview()
-        }
-    }
-
-    private func syncSectionHeaders(_ count: Int) {
-        while sectionHeaderViews.count < count {
-            let headerView = UsageSectionHeaderView()
-            addSubview(headerView)
-            sectionHeaderViews.append(headerView)
-        }
-        while sectionHeaderViews.count > count {
-            sectionHeaderViews.removeLast().removeFromSuperview()
-        }
-    }
-
-    private func hidePlainQuotaViews() {
-        ringView.isHidden = true
-        percentLabel.isHidden = true
-        quotaCaptionLabel.isHidden = true
-        secondaryRingView.isHidden = true
-        secondaryPercentLabel.isHidden = true
-        secondaryQuotaCaptionLabel.isHidden = true
-        tertiaryRingView.isHidden = true
-        tertiaryPercentLabel.isHidden = true
-        tertiaryQuotaCaptionLabel.isHidden = true
-        quaternaryRingView.isHidden = true
-        quaternaryPercentLabel.isHidden = true
-        quaternaryQuotaCaptionLabel.isHidden = true
-    }
 }
 
 /// Shared column geometry for every fixed-width row in the usage menu
@@ -1934,22 +2252,33 @@ private final class UsageColumnView: NSView {
 /// so their three columns and two dividers always land at the same x
 /// positions and the menu reads as one object end to end.
 enum UsagePanelLayout {
-    static let columnWidth: CGFloat = 178
-    static let columnGap: CGFloat = 12
-    static let sidePadding: CGFloat = 12
-    static let controlRowHeight: CGFloat = 30
-    static let controlVerticalInset: CGFloat = 3
+    static let columnWidths: [CGFloat] = [185, 205, 370]
+    static func columnWidth(for index: Int) -> CGFloat {
+        guard index >= 0 && index < columnWidths.count else { return 185 }
+        return columnWidths[index]
+    }
+    static var columnWidth: CGFloat { columnWidths[0] }
+    static let columnGap: CGFloat = 10
+    static let sidePadding: CGFloat = 10
+    static let controlRowHeight: CGFloat = 28
+    static let controlVerticalInset: CGFloat = 2
     static let columnCount = 3
-    static let viewWidth: CGFloat = sidePadding * 2 + columnWidth * CGFloat(columnCount) + columnGap * CGFloat(columnCount - 1)
+    static let viewWidth: CGFloat = sidePadding * 2 + columnWidths.reduce(0, +) + columnGap * CGFloat(columnCount - 1)
 
     /// Leading x of each provider column, left to right.
-    static let columnX: [CGFloat] = (0..<columnCount).map { index in
-        sidePadding + CGFloat(index) * (columnWidth + columnGap)
-    }
+    static let columnX: [CGFloat] = {
+        var xs: [CGFloat] = []
+        var cur = sidePadding
+        for w in columnWidths {
+            xs.append(cur)
+            cur += w + columnGap
+        }
+        return xs
+    }()
 
     /// x of the hairline divider between column `index` and `index + 1`.
     static func dividerX(after index: Int) -> CGFloat {
-        columnX[index] + columnWidth + columnGap / 2
+        columnX[index] + columnWidths[index] + columnGap / 2
     }
 }
 
@@ -2053,7 +2382,6 @@ final class PanelBackgroundView: NSVisualEffectView {
 /// `UsagePanelModel.grok` but is not rendered while its column is hidden.
 @MainActor
 final class SplitUsagePanelView: NSView {
-    private let columnWidth = UsagePanelLayout.columnWidth
     private let topPadding: CGFloat = 8
     private let bottomPadding: CGFloat = 8
 
@@ -2091,12 +2419,13 @@ final class SplitUsagePanelView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard appliedTheme == .bk, appliedContentHeight > 0 else { return }
-        for x in UsagePanelLayout.columnX {
+        for (index, x) in UsagePanelLayout.columnX.enumerated() {
+            let width = UsagePanelLayout.columnWidth(for: index)
             BKStyleTokens.drawCard(
                 in: NSRect(
                     x: x - 4,
                     y: topPadding - 3,
-                    width: columnWidth + 8,
+                    width: width + 8,
                     height: appliedContentHeight + 6
                 ),
                 radius: 9
@@ -2110,8 +2439,9 @@ final class SplitUsagePanelView: NSView {
         let columnViews = [codexColumnView, claudeColumnView, geminiColumnView]
         let columns = [model.codex, model.claude, model.gemini]
 
-        let bodyHeights = zip(columnViews, columns).map { view, column in
-            view.apply(column, width: columnWidth, theme: theme)
+        let bodyHeights = zip(columnViews.indices, zip(columnViews, columns)).map { index, pair in
+            let (view, column) = pair
+            return view.apply(column, width: UsagePanelLayout.columnWidth(for: index), theme: theme)
         }
         let bodyHeight = max(bodyHeights.max() ?? 1, 1)
 
@@ -2126,18 +2456,16 @@ final class SplitUsagePanelView: NSView {
         )
         let contentHeight = bodyHeight + footerHeight
 
-        for columnView in columnViews {
+        for (index, columnView) in columnViews.enumerated() {
+            let colWidth = UsagePanelLayout.columnWidth(for: index)
             columnView.layoutFooter(
                 top: bodyHeight,
-                width: columnWidth,
+                width: colWidth,
                 accountCapacity: accountCapacity,
                 refreshCapacity: refreshCapacity,
                 statusCapacity: statusCapacity
             )
-        }
-
-        for (index, columnView) in columnViews.enumerated() {
-            columnView.frame = NSRect(x: UsagePanelLayout.columnX[index], y: topPadding, width: columnWidth, height: contentHeight)
+            columnView.frame = NSRect(x: UsagePanelLayout.columnX[index], y: topPadding, width: colWidth, height: contentHeight)
         }
         // BK Style separates columns with enamel cards, so the hairline
         // dividers only appear in the 기본 theme.
@@ -2163,40 +2491,42 @@ final class SplitUsagePanelView: NSView {
 
 /// Full-width per-refresh consumption chart, hosted as its own NSMenuItem
 /// directly above the usage-page buttons. Its column geometry deliberately
-/// matches `SplitUsagePanelView` so each strip lines up under the Codex and
-/// Claude columns it belongs to.
+/// matches `SplitUsagePanelView` so each strip lines up under the Codex,
+/// Claude, and Gemini columns it belongs to.
 @MainActor
 final class UsageHistoryChartView: NSView {
-    // Column geometry comes from the shared `UsagePanelLayout` on purpose:
-    // the visible strips must sit exactly under their provider columns
-    // columns above them, and the inner dividers must line up with that
-    // panel's dividers. That alignment is what makes the whole menu read as
-    // one object.
     private static let viewWidth: CGFloat = UsagePanelLayout.viewWidth
-    private static let columnWidth: CGFloat = UsagePanelLayout.columnWidth
 
-    /// The card is inset from the strips, not the other way round, so the bars
-    /// keep their column alignment while the card frames them.
     private static let cardInset: CGFloat = UsagePanelLayout.sidePadding
     private static let columnContentInset: CGFloat = 6
-    private static let cardTop: CGFloat = 5
-    private static let cardPadding: CGFloat = 8
-    private static let cardCornerRadius: CGFloat = 10
+    private static let cardTop: CGFloat = 4
+    private static let cardPadding: CGFloat = 6
+    private static let cardCornerRadius: CGFloat = 8
 
+    private static let titleHeight: CGFloat = 14
+    private static let titleGap: CGFloat = 3
     private static let captionHeight: CGFloat = 13
-    private static let captionGap: CGFloat = 4
-    private static let barsHeight: CGFloat = 56
-    private static let bottomPadding: CGFloat = 5
+    private static let captionGap: CGFloat = 3
+    private static let barsHeight: CGFloat = 46
+    private static let axisHeight: CGFloat = UsageHistoryBarView.axisHeight
+    private static let bottomPadding: CGFloat = 4
     private static let dotDiameter: CGFloat = 6
-    private static let dotTextGap: CGFloat = 10
+    private static let dotTextGap: CGFloat = 8
 
-    private static let contentTop = cardTop + cardPadding
+    private static let contentTop = cardTop + cardPadding + titleHeight + titleGap
     private static let barsTop = contentTop + captionHeight + captionGap
     private static let baselineY = barsTop + barsHeight
     private static let cardHeight =
-        cardPadding + captionHeight + captionGap + barsHeight + cardPadding
+        cardPadding + titleHeight + titleGap + captionHeight + captionGap + barsHeight + axisHeight + cardPadding
 
     static let viewHeight: CGFloat = cardTop + cardHeight + bottomPadding
+
+    private let sectionTitleLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "최근 24시간 사용량")
+        field.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        field.textColor = .secondaryLabelColor
+        return field
+    }()
 
     private let codexCaption = UsageHistoryChartView.makeCaption()
     private let claudeCaption = UsageHistoryChartView.makeCaption()
@@ -2216,6 +2546,7 @@ final class UsageHistoryChartView: NSView {
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: Self.viewWidth, height: Self.viewHeight))
+        addSubview(sectionTitleLabel)
         addSubview(codexCaption)
         addSubview(codexBars)
         addSubview(claudeCaption)
@@ -2225,6 +2556,13 @@ final class UsageHistoryChartView: NSView {
         addSubview(grokCaption)
         addSubview(grokBars)
         setAccessibilityElement(false)
+
+        sectionTitleLabel.frame = NSRect(
+            x: Self.cardInset + 8,
+            y: Self.cardTop + 4,
+            width: 200,
+            height: Self.titleHeight
+        )
 
         codexBars.onHover = { [weak self] sample in
             guard let self else { return }
@@ -2251,57 +2589,101 @@ final class UsageHistoryChartView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        // The card. A single low-contrast surface with a hairline edge is
-        // enough to read the three strips as one panel; a heavier box would
-        // compete with the usage panel directly above it.
+        let theme = UsagePanelThemeStore.current
+        sectionTitleLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+
         let card = NSRect(
             x: Self.cardInset,
             y: Self.cardTop,
             width: bounds.width - Self.cardInset * 2,
             height: Self.cardHeight
         )
-        let cardPath = NSBezierPath(
-            roundedRect: card,
-            xRadius: Self.cardCornerRadius,
-            yRadius: Self.cardCornerRadius
-        )
-        NSColor.labelColor.withAlphaComponent(0.045).setFill()
-        cardPath.fill()
-        NSColor.separatorColor.setStroke()
-        cardPath.lineWidth = 1
-        cardPath.stroke()
+        if theme == .bk {
+            BKStyleTokens.drawCard(in: card, radius: Self.cardCornerRadius)
+        } else {
+            let cardPath = NSBezierPath(
+                roundedRect: card,
+                xRadius: Self.cardCornerRadius,
+                yRadius: Self.cardCornerRadius
+            )
+            NSColor.labelColor.withAlphaComponent(0.045).setFill()
+            cardPath.fill()
+            NSColor.separatorColor.setStroke()
+            cardPath.lineWidth = 1
+            cardPath.stroke()
+        }
 
         // Dividers between columns, at the same x as the usage panel's.
-        NSColor.separatorColor.setFill()
+        let dividerColor = theme == .bk ? BKStyleTokens.chromeLine.withAlphaComponent(0.4) : NSColor.separatorColor
+        dividerColor.setFill()
         for index in 0..<(UsagePanelLayout.columnCount - 1) {
             NSBezierPath(rect: NSRect(
                 x: UsagePanelLayout.dividerX(after: index),
                 y: Self.contentTop,
                 width: 1,
-                height: Self.baselineY - Self.contentTop
+                height: Self.baselineY + Self.axisHeight - Self.contentTop
             )).fill()
         }
 
         // A recessive floor under each strip, so the bars read as sitting on an
         // axis rather than floating.
-        NSColor.separatorColor.withAlphaComponent(0.6).setFill()
-        for x in UsagePanelLayout.columnX {
+        let floorColor = theme == .bk ? BKStyleTokens.chromeLine.withAlphaComponent(0.5) : NSColor.separatorColor.withAlphaComponent(0.6)
+        floorColor.setFill()
+        for (index, x) in UsagePanelLayout.columnX.enumerated() {
+            let colWidth = UsagePanelLayout.columnWidth(for: index)
             NSBezierPath(rect: NSRect(
                 x: x + Self.columnContentInset,
                 y: Self.baselineY,
-                width: Self.columnWidth - Self.columnContentInset * 2,
+                width: colWidth - Self.columnContentInset * 2,
                 height: 1
             )).fill()
         }
 
-        // Identity marks. The caption text itself stays in secondary ink —
-        // the mark carries the series colour so the label never has to.
-        // A column stacking more than one bucket (Codex + Spark, Claude +
-        // Fable) shows those colours side by side as a legend, the same way
-        // Gemini's four brand colors are drawn instead of one dot.
+        // Identity marks.
         drawSeriesMark(for: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset, visible: !codexCaption.isHidden)
         drawSeriesMark(for: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset, visible: !claudeCaption.isHidden)
-        drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
+        if geminiBars.seriesLabels.contains(where: { !$0.isEmpty }) {
+            drawSeriesLegend(for: geminiBars, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
+        } else {
+            drawGradientMark(colors: UsageBrandColors.geminiGradient, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, visible: !geminiCaption.isHidden)
+        }
+    }
+
+    private static let legendFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+    private static let legendItemGap: CGFloat = 6
+
+    /// Width of the labelled legend (dot + series label per item).
+    private static func legendWidth(labels: [String]) -> CGFloat {
+        labels.reduce(0) { total, label in
+            let text = (label as NSString).size(withAttributes: [.font: legendFont]).width
+            return total + dotDiameter + 2 + ceil(text) + legendItemGap
+        }
+    }
+
+    private func drawSeriesLegend(for bars: UsageHistoryBarView, x: CGFloat, visible: Bool) {
+        guard visible, !bars.seriesColors.isEmpty else { return }
+        let dotY = Self.contentTop + (Self.captionHeight - Self.dotDiameter) / 2
+        var currentX = x
+        for (color, label) in zip(bars.seriesColors, bars.seriesLabels) {
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(
+                x: currentX,
+                y: dotY,
+                width: Self.dotDiameter,
+                height: Self.dotDiameter
+            )).fill()
+            currentX += Self.dotDiameter + 2
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: Self.legendFont,
+                .foregroundColor: color
+            ]
+            let size = (label as NSString).size(withAttributes: attributes)
+            (label as NSString).draw(
+                at: NSPoint(x: currentX, y: Self.contentTop + (Self.captionHeight - size.height) / 2),
+                withAttributes: attributes
+            )
+            currentX += ceil(size.width) + Self.legendItemGap
+        }
     }
 
     private func drawSeriesMark(for bars: UsageHistoryBarView, x: CGFloat, visible: Bool) {
@@ -2364,12 +2746,12 @@ final class UsageHistoryChartView: NSView {
         claudeBaseCaption = claude?.caption ?? ""
         geminiBaseCaption = gemini?.caption ?? ""
         grokBaseCaption = grok?.caption ?? ""
-        let codexShown = configure(codex, caption: codexCaption, bars: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset)
-        let claudeShown = configure(claude, caption: claudeCaption, bars: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset)
-        let geminiShown = configure(gemini, caption: geminiCaption, bars: geminiBars, x: UsagePanelLayout.columnX[2] + Self.columnContentInset)
+        let codexShown = configure(codex, caption: codexCaption, bars: codexBars, x: UsagePanelLayout.columnX[0] + Self.columnContentInset, width: UsagePanelLayout.columnWidth(for: 0), labeledLegend: false)
+        let claudeShown = configure(claude, caption: claudeCaption, bars: claudeBars, x: UsagePanelLayout.columnX[1] + Self.columnContentInset, width: UsagePanelLayout.columnWidth(for: 1), labeledLegend: false)
+        let geminiShown = configure(gemini, caption: geminiCaption, bars: geminiBars, x: UsagePanelLayout.columnX[2] + Self.columnContentInset, width: UsagePanelLayout.columnWidth(for: 2), labeledLegend: true)
         // Grok samples keep arriving, but the strip stays hidden while the
         // provider has no visible column of its own.
-        _ = configure(nil, caption: grokCaption, bars: grokBars, x: 0)
+        _ = configure(nil, caption: grokCaption, bars: grokBars, x: 0, width: 0, labeledLegend: false)
         let anyShown = codexShown || claudeShown || geminiShown
         needsDisplay = true
         return anyShown
@@ -2379,7 +2761,9 @@ final class UsageHistoryChartView: NSView {
         _ strip: UsageHistoryStrip?,
         caption: NSTextField,
         bars: UsageHistoryBarView,
-        x: CGFloat
+        x: CGFloat,
+        width: CGFloat,
+        labeledLegend: Bool
     ) -> Bool {
         guard let strip else {
             caption.isHidden = true
@@ -2389,32 +2773,29 @@ final class UsageHistoryChartView: NSView {
         caption.isHidden = false
         bars.isHidden = false
         caption.stringValue = strip.caption
-        // Shifted right to clear the identity dot drawn at `x`.
+        let showsLabels = labeledLegend && strip.series.contains { !$0.label.isEmpty }
+        let leadingGap = showsLabels
+            ? Self.legendWidth(labels: strip.series.map(\.label)) + 2
+            : (strip.series.count > 1 ? CGFloat(strip.series.count) * 8 + 4 : Self.dotTextGap)
         caption.frame = NSRect(
-            x: x + Self.dotTextGap,
+            x: x + leadingGap,
             y: Self.contentTop,
-            width: max(0, Self.columnWidth - Self.columnContentInset * 2 - Self.dotTextGap),
+            width: max(0, width - Self.columnContentInset * 2 - leadingGap),
             height: Self.captionHeight
         )
-        bars.seriesLabels = strip.series.map(\.label)
-        bars.seriesColors = strip.series.map(\.color)
-        bars.samples = UsageConsumptionCore.stackedSamples(
-            strip.series.map(\.samples),
-            capacity: strip.slotCount
-        )
-        bars.slotCount = strip.slotCount
         bars.unitSuffix = strip.unitSuffix
         bars.barColor = strip.color
+        bars.series = strip.series
         bars.frame = NSRect(
             x: x,
             y: Self.barsTop,
-            width: Self.columnWidth - Self.columnContentInset * 2,
-            height: Self.barsHeight
+            width: max(0, width - Self.columnContentInset * 2),
+            height: Self.barsHeight + Self.axisHeight
         )
         bars.setAccessibilityElement(true)
         bars.setAccessibilityRole(.image)
         bars.setAccessibilityLabel(strip.caption)
-        bars.setAccessibilityValue(strip.accessibilityValue)
+        bars.setAccessibilityValue("\(strip.accessibilityValue) · \(bars.coverageDescription)")
         return true
     }
 }
@@ -2473,9 +2854,6 @@ final class ThemeControlButton: RolloverButton {
 final class UsagePanelHeaderView: NSView {
     static let viewHeight: CGFloat = 34
 
-    var onRefresh: (() -> Void)?
-    var onSelectTheme: ((UsagePanelTheme) -> Void)?
-
     private let wellView = BKIconWellView()
     private let titleLabel: NSTextField = {
         let field = NSTextField(labelWithString: "CCMB")
@@ -2491,7 +2869,7 @@ final class UsagePanelHeaderView: NSView {
         return field
     }()
     private let refreshButton: RolloverButton = {
-        let button = RolloverButton(title: "새로 고침", target: nil, action: nil)
+        let button = RolloverButton(title: "새로고침", target: nil, action: nil)
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = .systemFont(ofSize: 11)
@@ -2505,6 +2883,18 @@ final class UsagePanelHeaderView: NSView {
         button.font = .systemFont(ofSize: 11)
         return button
     }()
+    private let settingsButton: RolloverButton = {
+        let button = RolloverButton(title: "설정 ▾", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 11)
+        button.setAccessibilityLabel("설정 및 추가 기능 펼치기/접기")
+        return button
+    }()
+
+    var onRefresh: (() -> Void)?
+    var onSelectTheme: ((UsagePanelTheme) -> Void)?
+    var onToggleSettings: (() -> Void)?
 
     override var isFlipped: Bool { true }
 
@@ -2516,8 +2906,11 @@ final class UsagePanelHeaderView: NSView {
         addSubview(updatedLabel)
         addSubview(refreshButton)
         addSubview(themeButton)
+        addSubview(settingsButton)
         refreshButton.target = self
         refreshButton.action = #selector(refreshTapped)
+        settingsButton.target = self
+        settingsButton.action = #selector(settingsTapped)
         themeButton.onSelect = { [weak self] theme in
             self?.onSelectTheme?(theme)
             self?.applyThemeState()
@@ -2535,6 +2928,10 @@ final class UsagePanelHeaderView: NSView {
         updatedLabel.stringValue = text
     }
 
+    func setSettingsExpanded(_ expanded: Bool) {
+        settingsButton.title = expanded ? "설정 ▴" : "설정 ▾"
+    }
+
     /// Re-reads the stored theme into the well/labels/theme control, e.g.
     /// after the theme was changed from a different panel instance.
     func applyThemeState() {
@@ -2548,19 +2945,26 @@ final class UsagePanelHeaderView: NSView {
         onRefresh?()
     }
 
+    @objc private func settingsTapped() {
+        onToggleSettings?()
+    }
+
     private func layoutContent() {
         let sidePadding = UsagePanelLayout.sidePadding
-        let themeWidth: CGFloat = 110
-        let refreshWidth: CGFloat = 78
+        let settingsWidth: CGFloat = 64
+        let themeWidth: CGFloat = 90
+        let refreshWidth: CGFloat = 70
         let buttonHeight: CGFloat = 22
         let buttonY = (Self.viewHeight - buttonHeight) / 2
         wellView.frame = NSRect(x: sidePadding, y: (Self.viewHeight - 18) / 2, width: 18, height: 18)
-        titleLabel.frame = NSRect(x: sidePadding + 25, y: (Self.viewHeight - 16) / 2, width: 60, height: 16)
-        let themeX = bounds.width - sidePadding - themeWidth
+        titleLabel.frame = NSRect(x: sidePadding + 24, y: (Self.viewHeight - 16) / 2, width: 50, height: 16)
+        let settingsX = bounds.width - sidePadding - settingsWidth
+        settingsButton.frame = NSRect(x: settingsX, y: buttonY, width: settingsWidth, height: buttonHeight)
+        let themeX = settingsX - 6 - themeWidth
         themeButton.frame = NSRect(x: themeX, y: buttonY, width: themeWidth, height: buttonHeight)
         let refreshX = themeX - 6 - refreshWidth
         refreshButton.frame = NSRect(x: refreshX, y: buttonY, width: refreshWidth, height: buttonHeight)
-        let updatedX = sidePadding + 25 + 60 + 6
+        let updatedX = sidePadding + 24 + 50 + 6
         updatedLabel.frame = NSRect(
             x: updatedX,
             y: (Self.viewHeight - 14) / 2,
@@ -2607,6 +3011,16 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     /// the background never fades what's drawn on top of it.
     private let contentContainer = NSView()
     private var hasPositionedWindow = false
+    private var isSettingsExpanded = false
+    private var lastModel: UsagePanelModel?
+    private var lastCodexHistory: UsageHistoryStrip?
+    private var lastClaudeHistory: UsageHistoryStrip?
+    private var lastGeminiHistory: UsageHistoryStrip?
+    private var lastGrokHistory: UsageHistoryStrip?
+    private var lastCodexRefreshInterval: Int = 0
+    private var lastClaudeRefreshInterval: Int = 0
+    private var lastGeminiRefreshInterval: Int = 0
+    private var lastGrokRefreshInterval: Int = 0
     /// Children use the panel's fixed natural coordinate system. Resizing the
     /// container's frame while preserving these bounds scales the complete UI
     /// (drawing, hit testing and tracking areas) instead of growing empty space.
@@ -2709,6 +3123,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         contentContainer.addSubview(headerView)
         headerView.onRefresh = { [weak self] in self?.onRefreshAll?() }
         headerView.onSelectTheme = { [weak self] theme in self?.onThemeChange?(theme) }
+        headerView.onToggleSettings = { [weak self] in self?.toggleSettings() }
         contentContainer.addSubview(usageView)
         contentContainer.addSubview(refreshIntervalControlsView)
         contentContainer.addSubview(historyView)
@@ -2760,6 +3175,24 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         fatalError("init(coder:) has not been implemented")
     }
 
+    private func toggleSettings() {
+        isSettingsExpanded.toggle()
+        headerView.setSettingsExpanded(isSettingsExpanded)
+        if let model = lastModel {
+            apply(
+                model: model,
+                codexHistory: lastCodexHistory,
+                claudeHistory: lastClaudeHistory,
+                geminiHistory: lastGeminiHistory,
+                grokHistory: lastGrokHistory,
+                codexRefreshInterval: lastCodexRefreshInterval,
+                claudeRefreshInterval: lastClaudeRefreshInterval,
+                geminiRefreshInterval: lastGeminiRefreshInterval,
+                grokRefreshInterval: lastGrokRefreshInterval
+            )
+        }
+    }
+
     func apply(
         model: UsagePanelModel,
         codexHistory: UsageHistoryStrip?,
@@ -2771,6 +3204,16 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         geminiRefreshInterval: Int,
         grokRefreshInterval: Int
     ) {
+        lastModel = model
+        lastCodexHistory = codexHistory
+        lastClaudeHistory = claudeHistory
+        lastGeminiHistory = geminiHistory
+        lastGrokHistory = grokHistory
+        lastCodexRefreshInterval = codexRefreshInterval
+        lastClaudeRefreshInterval = claudeRefreshInterval
+        lastGeminiRefreshInterval = geminiRefreshInterval
+        lastGrokRefreshInterval = grokRefreshInterval
+
         usageView.apply(model)
         let showsHistory = historyView.apply(
             codex: codexHistory,
@@ -2786,42 +3229,52 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
             grok: grokRefreshInterval
         )
 
+        let showsSettings = isSettingsExpanded
+        refreshIntervalControlsView.isHidden = !showsSettings
+        usagePageButtonsView.isHidden = !showsSettings
+        shareActionsView.isHidden = !showsSettings
+        updateVersionView.isHidden = !showsSettings
+        lifecycleActionsView.isHidden = !showsSettings
+
         let historyHeight = showsHistory ? historyView.frame.height : 0
         let historyGap = showsHistory ? Self.sectionGap : 0
-        let buttonsHeight = usagePageButtonsView.frame.height
-        let shareHeight = shareActionsView.frame.height
-        let controlsHeight = refreshIntervalControlsView.frame.height
-        let versionHeight = updateVersionView.frame.height
-        let lifecycleHeight = lifecycleActionsView.frame.height
+        let buttonsHeight = showsSettings ? usagePageButtonsView.frame.height : 0
+        let shareHeight = showsSettings ? shareActionsView.frame.height : 0
+        let controlsHeight = showsSettings ? refreshIntervalControlsView.frame.height : 0
+        let versionHeight = showsSettings ? updateVersionView.frame.height : 0
+        let lifecycleHeight = showsSettings ? lifecycleActionsView.frame.height : 0
+        let settingsGaps = showsSettings ? (Self.sectionGap * 5) : 0
+
         headerView.applyThemeState()
+        headerView.setSettingsExpanded(showsSettings)
         let headerHeight = UsagePanelHeaderView.viewHeight
         let contentHeight = Self.topPadding + Self.bottomPadding
             + headerHeight
             + usageView.frame.height
-            + Self.sectionGap + controlsHeight
             + historyGap + historyHeight
-            + Self.sectionGap + buttonsHeight
-            + Self.sectionGap + shareHeight
-            + Self.sectionGap + versionHeight
-            + Self.sectionGap + lifecycleHeight
+            + settingsGaps
+            + controlsHeight
+            + buttonsHeight
+            + shareHeight
+            + versionHeight
+            + lifecycleHeight
         let contentWidth = UsagePanelLayout.viewWidth + Self.horizontalPadding * 2
 
-        // Stacked bottom-up so the top-down reading order matches the status
-        // menu exactly: header, usage panel, refresh controls, history,
-        // usage-page buttons, primary settings, lifecycle/support actions.
         var y = Self.bottomPadding
-        lifecycleActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += lifecycleHeight + Self.sectionGap
-        updateVersionView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += versionHeight + Self.sectionGap
-        shareActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += shareHeight + Self.sectionGap
-        usagePageButtonsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += buttonsHeight + Self.sectionGap
+        if showsSettings {
+            lifecycleActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+            y += lifecycleHeight + Self.sectionGap
+            updateVersionView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+            y += versionHeight + Self.sectionGap
+            shareActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+            y += shareHeight + Self.sectionGap
+            usagePageButtonsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+            y += buttonsHeight + Self.sectionGap
+            refreshIntervalControlsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+            y += controlsHeight + Self.sectionGap
+        }
         historyView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
         y += historyHeight + historyGap
-        refreshIntervalControlsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += controlsHeight + Self.sectionGap
         usageView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
         y += usageView.frame.height
         headerView.frame = NSRect(
@@ -2880,6 +3333,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     func applyHeaderState(lastUpdatedText: String) {
         headerView.setLastUpdatedText(lastUpdatedText)
         headerView.applyThemeState()
+        headerView.setSettingsExpanded(isSettingsExpanded)
     }
 
     func show() {
@@ -3219,7 +3673,7 @@ final class UsagePageButtonsView: NSView {
         let buttons = [codexButton, claudeButton, geminiButton]
 
         for (index, button) in buttons.enumerated() {
-            button.frame = NSRect(x: UsagePanelLayout.columnX[index], y: y, width: UsagePanelLayout.columnWidth, height: buttonHeight)
+            button.frame = NSRect(x: UsagePanelLayout.columnX[index], y: y, width: UsagePanelLayout.columnWidth(for: index), height: buttonHeight)
         }
         for (index, divider) in dividers.enumerated() {
             divider.frame = NSRect(x: UsagePanelLayout.dividerX(after: index), y: 5, width: 1, height: Self.viewHeight - 10)
@@ -3404,7 +3858,7 @@ final class RefreshIntervalControlsView: NSView {
             button.frame = NSRect(
                 x: UsagePanelLayout.columnX[index],
                 y: inset,
-                width: UsagePanelLayout.columnWidth,
+                width: UsagePanelLayout.columnWidth(for: index),
                 height: Self.viewHeight - inset * 2
             )
         }
@@ -3466,7 +3920,7 @@ final class MenuActionRowView: NSView {
                 button.frame = NSRect(
                     x: UsagePanelLayout.columnX[index],
                     y: verticalInset,
-                    width: UsagePanelLayout.columnWidth,
+                    width: UsagePanelLayout.columnWidth(for: index),
                     height: Self.viewHeight - verticalInset * 2
                 )
             }
@@ -3561,24 +4015,27 @@ final class LifecycleActionsRowView: NSView {
     private func layoutButtons() {
         let inset = UsagePanelLayout.controlVerticalInset
         let buttonHeight = Self.viewHeight - inset * 2
-        let columnWidth = UsagePanelLayout.columnWidth
-        launchButton.frame = NSRect(x: UsagePanelLayout.columnX[0], y: inset, width: columnWidth, height: buttonHeight)
+        let col0Width = UsagePanelLayout.columnWidth(for: 0)
+        let col1Width = UsagePanelLayout.columnWidth(for: 1)
+        let col2Width = UsagePanelLayout.columnWidth(for: 2)
+        launchButton.frame = NSRect(x: UsagePanelLayout.columnX[0], y: inset, width: col0Width, height: buttonHeight)
 
         let supportX = UsagePanelLayout.columnX[1]
-        let halfWidth = (columnWidth - Self.innerGap) / 2
-        diagnosticButton.frame = NSRect(x: supportX, y: inset, width: halfWidth, height: buttonHeight)
+        let halfWidth1 = (col1Width - Self.innerGap) / 2
+        diagnosticButton.frame = NSRect(x: supportX, y: inset, width: halfWidth1, height: buttonHeight)
         githubButton.frame = NSRect(
-            x: supportX + halfWidth + Self.innerGap,
+            x: supportX + halfWidth1 + Self.innerGap,
             y: inset,
-            width: halfWidth,
+            width: halfWidth1,
             height: buttonHeight
         )
         let lifecycleX = UsagePanelLayout.columnX[2]
-        restartButton.frame = NSRect(x: lifecycleX, y: inset, width: halfWidth, height: buttonHeight)
+        let halfWidth2 = (col2Width - Self.innerGap) / 2
+        restartButton.frame = NSRect(x: lifecycleX, y: inset, width: halfWidth2, height: buttonHeight)
         quitButton.frame = NSRect(
-            x: lifecycleX + halfWidth + Self.innerGap,
+            x: lifecycleX + halfWidth2 + Self.innerGap,
             y: inset,
-            width: halfWidth,
+            width: halfWidth2,
             height: buttonHeight
         )
 
@@ -3591,13 +4048,13 @@ final class LifecycleActionsRowView: NSView {
             )
         }
         supportDivider.frame = NSRect(
-            x: supportX + columnWidth / 2,
+            x: supportX + col1Width / 2,
             y: 7,
             width: 1,
             height: Self.viewHeight - 14
         )
         lifecycleDivider.frame = NSRect(
-            x: lifecycleX + columnWidth / 2,
+            x: lifecycleX + col2Width / 2,
             y: 7,
             width: 1,
             height: Self.viewHeight - 14
@@ -3699,17 +4156,20 @@ final class VersionOpacityRowView: NSView {
 
     private func layoutSubviews() {
         let verticalInset = Self.cellInset
+        let col0Width = UsagePanelLayout.columnWidth(for: 0)
+        let col1Width = UsagePanelLayout.columnWidth(for: 1)
+        let col2Width = UsagePanelLayout.columnWidth(for: 2)
         alwaysViewButton.frame = NSRect(
             x: UsagePanelLayout.columnX[0],
             y: verticalInset,
-            width: UsagePanelLayout.columnWidth,
+            width: col0Width,
             height: Self.viewHeight - verticalInset * 2
         )
         let updateX = UsagePanelLayout.columnX[1]
         updateButton.frame = NSRect(
             x: updateX,
             y: verticalInset,
-            width: UsagePanelLayout.columnWidth,
+            width: col1Width,
             height: Self.viewHeight - verticalInset * 2
         )
         let opacityX = UsagePanelLayout.columnX[2]
@@ -3719,7 +4179,7 @@ final class VersionOpacityRowView: NSView {
         let valueWidth: CGFloat = 38
         let labelWidth: CGFloat = 42
         let controlGap: CGFloat = 6
-        let valueX = opacityX + UsagePanelLayout.columnWidth - 8 - valueWidth
+        let valueX = opacityX + col2Width - 8 - valueWidth
         let sliderX = contentX + labelWidth + controlGap
         let sliderWidth = valueX - controlGap - sliderX
         opacityLabel.frame = NSRect(x: contentX, y: textY, width: labelWidth, height: 16)
