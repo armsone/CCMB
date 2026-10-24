@@ -3,6 +3,25 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.4.0</title>
+            <pubDate>Sat, 24 Oct 2026 22:37:44 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.4.0</link>
+            <sparkle:version>202610242134</sparkle:version>
+            <sparkle:shortVersionString>2.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.4.0
+
+- 사용량 창을 밝고 좁은 대시보드로 바꿨습니다. Codex, Claude, Gemini 본계정·부계정·세 번째 계정을 다섯 장의 카드로 위아래에 표시합니다.
+- 카드마다 최근 24시간 사용량을 선과 면 그래프로 함께 보여 주며, 30분 단위 소비량을 사용하고 수집되지 않은 구간은 비워 둡니다.
+- 남은 사용량을 먼저 보여 주고, 세션·주간 한도와 초기화 시각을 함께 표시합니다.
+- 메뉴 막대에 두 Gemini 계정의 남은 비율을 표시하고, 숫자는 서비스 색으로 % 기호 없이 작게 보여 줍니다.
+- 초기화 시각 표기를 오늘·내일·모레와 날짜로 통일했습니다.
+
+확인 범위: Developer ID 서명·공증(staple)·Gatekeeper 검사와 이 Mac의 데이터 유지 교체 설치·실행을 확인했습니다.
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.4.0/CCMB-2.4.0.zip" length="3509596" type="application/octet-stream" sparkle:edSignature="oj6nuAYkPePXeDI+WahCuC0QOIF92HLLLZuOU5oz3H0q6PHLsVFmfHPeorq55qJr+T8w/om+fHPX3NJDWQPyCw=="/>
+        </item>
+        <item>
             <title>2.1.15</title>
             <pubDate>Fri, 16 Oct 2026 20:15:56 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.1.15</link>
@@ -37,22 +56,6 @@
 검증: v2.0.33 소스 대조, 실제 NAS 응답을 운영 화면 생성 코드와 AppKit 뷰로 렌더링, 누락 정보/조회 실패 상태 확인, 렌더 검증 2항목 통과. 설치 창 자체의 자동 픽셀 캡처는 도구 시간 초과로 확인하지 못했습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.1.6/CCMB-2.1.6.zip" length="3167293" type="application/octet-stream" sparkle:edSignature="/C5vqlAQ6yksTxvaohbJmvq2k0Omotufj4v9iORi/T2QmOCDmXBmvLn7VEM8yjlsUbqdt92F64iB5Uf8DoMUAw=="/>
-        </item>
-        <item>
-            <title>2.1.5</title>
-            <pubDate>Fri, 16 Oct 2026 17:29:18 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.1.5</link>
-            <sparkle:version>202610161726</sparkle:version>
-            <sparkle:shortVersionString>2.1.5</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.1.5
-
-- 기존 세 카드와 정보 구성을 복원하고 새로 늘어난 정보 행과 반복되는 NAS 안내를 정리했습니다.
-- NAS 데이터와 현재 선택된 Gemini 계정 표시는 유지합니다.
-- 사용하지 않은 구간의 이동하는 초기화 시각과 초 단위 오차로 빠른 갱신이 계속되던 문제를 수정했습니다.
-- 기존 사용량·초기화 횟수·크레딧·추가 사용량 정보를 유지합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.1.5/CCMB-2.1.5.zip" length="3149244" type="application/octet-stream" sparkle:edSignature="xZ9VdXpsKAl4yleJ2EqqR8frGmI5OETsu2HPiY1H0KMUJnbm990s1TV9paQm6b4EzUTnq/6Z2v6OXU42ecw5Dw=="/>
         </item>
         <item>
             <title>2.0.34</title>
