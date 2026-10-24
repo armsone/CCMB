@@ -2359,6 +2359,33 @@ struct NASHistoryV2: Equatable {
 
     let generatedAt: Date
     let series: [String: NASHistorySeries]
+    /// Only the 24-hour (schemaVersion 3) envelope carries a window; a v2
+    /// read (newest 40 points, about two hours) has none.
+    let window: NASHistoryWindow?
+
+    init(generatedAt: Date, series: [String: NASHistorySeries], window: NASHistoryWindow? = nil) {
+        self.generatedAt = generatedAt
+        self.series = series
+        self.window = window
+    }
+}
+
+/// What the NAS says about its own trailing window, so the chart can draw
+/// gaps exactly where the NAS records one and report coverage honestly.
+struct NASHistoryWindow: Equatable {
+    let seconds: TimeInterval
+    let start: Date
+    /// Consecutive points further apart than this are not connected.
+    let gapSeconds: TimeInterval
+    let coverage: [String: NASHistoryCoverage]
+}
+
+struct NASHistoryCoverage: Equatable {
+    let firstAt: Date?
+    let lastAt: Date?
+    /// True only when the series' first point reaches (almost) back to the
+    /// start of the 24-hour window.
+    let spansWindow: Bool
 }
 
 /// What the `--history-json` helper produced.
@@ -2393,6 +2420,9 @@ enum NASHistoryV2Core {
     static func parse(object: [String: Any], now: Date = Date()) -> NASHistoryV2? {
         // The SSH helper adds `ok: true` to a successful read; nothing else
         // may appear beside the four fixed root keys.
+        if NASJSON.integer(object["schemaVersion"]) == 3 {
+            return NASHistoryV3Core.parse(object: object, now: now)
+        }
         var keys = Set(object.keys)
         if keys.contains("ok") {
             guard NASJSON.bool(object["ok"]) == true else { return nil }
@@ -2438,6 +2468,7 @@ enum NASHistoryV2Core {
     /// helper's `ok` flag) for the NAS-only on-disk cache, so a relaunch can
     /// restore it through the same strict `parse`.
     static func encode(_ history: NASHistoryV2) -> Data? {
+        if history.window != nil { return NASHistoryV3Core.encode(history) }
         var series: [String: Any] = [:]
         for key in NASHistoryV2.seriesKeys + NASHistoryV2.optionalSeriesKeys {
             guard let value = history.series[key] else {
@@ -2519,7 +2550,15 @@ enum NASHistoryV2Core {
 enum NASHistoryV2Cache {
     static func apply(_ result: NASHistoryReadResult, previous: NASHistoryV2?) -> (history: NASHistoryV2?, failureLabel: String?) {
         switch result {
-        case .history(let history): return (history, nil)
+        case .history(let history):
+            // The v2 fallback only carries the newest 40 points. When the
+            // 24-hour read just failed, keep the 24-hour history already in
+            // hand (still marked stale by its own as-of time) instead of
+            // trading it for two hours.
+            if history.window == nil, let previous, previous.window != nil {
+                return (previous, "24시간 기록 읽기 실패")
+            }
+            return (history, nil)
         case .helperError(let error): return (previous, "이력 \(error.label)")
         case .invalid: return (previous, "NAS 이력 형식 확인 불가")
         }
@@ -2542,6 +2581,181 @@ enum NASHistoryChartCore {
 
     static func segmentCount(_ series: NASHistorySeries?) -> Int {
         Set(series?.points.map(\.segmentId) ?? []).count
+    }
+
+    /// Segment index of every sample `samples(_:unit:)` returns, in the same
+    /// order, so the chart can leave a line open where a baseline restarted.
+    static func segmentKeys(_ series: NASHistorySeries?, unit: NASHistoryUnit) -> [Int] {
+        guard let series else { return [] }
+        var indexes: [String: Int] = [:]
+        return series.points
+            .filter { $0.unit == unit }
+            .sorted { $0.at < $1.at }
+            .map { point in
+                if let index = indexes[point.segmentId] { return index }
+                let index = indexes.count
+                indexes[point.segmentId] = index
+                return index
+            }
+    }
+}
+
+/// Strict reader for the NAS 24-hour consumption history (schemaVersion 3,
+/// `ccmb-history-24h.py` / `CCMB-nas-consumption-history-v3.json`). It lives
+/// beside the v2 reader instead of replacing it: the v2 envelope stays the
+/// strict 40-point contract older apps parse. Points are compact
+/// `[atMs, consumed, segmentIndex]` rows; the result is the same
+/// `NASHistoryV2` value the chart already understands, plus the window the
+/// NAS reported. Any deviation rejects the whole envelope.
+enum NASHistoryV3Core {
+    static let maximumPointsPerSeries = 600
+    static let windowSeconds = 86_400
+    private static let rootKeys: Set<String> = [
+        "schemaVersion", "source", "generatedAt", "windowSeconds", "windowStart", "gapSeconds", "series"
+    ]
+    private static let entryKeys: Set<String> = ["unit", "identityGeneration", "segments", "points", "coverage"]
+    private static let coverageKeys: Set<String> = ["firstAt", "lastAt", "spansWindow"]
+
+    static func parse(object: [String: Any], now: Date = Date()) -> NASHistoryV2? {
+        var keys = Set(object.keys)
+        if keys.contains("ok") {
+            guard NASJSON.bool(object["ok"]) == true else { return nil }
+            keys.remove("ok")
+        }
+        guard keys == rootKeys,
+              NASJSON.integer(object["schemaVersion"]) == 3,
+              (object["source"] as? String) == "nas",
+              NASJSON.integer(object["windowSeconds"]) == windowSeconds,
+              let generatedAtMillis = NASJSON.integer(object["generatedAt"]), generatedAtMillis > 0,
+              NASJSON.integer(object["windowStart"]) == generatedAtMillis - windowSeconds * 1000,
+              let gapSeconds = NASJSON.integer(object["gapSeconds"]), (60...3_600).contains(gapSeconds),
+              Double(generatedAtMillis) / 1000 <= now.timeIntervalSince1970 + 300,
+              let rawSeries = object["series"] as? [String: Any]
+        else { return nil }
+        let required = Set(NASHistoryV2.seriesKeys)
+        let present = Set(rawSeries.keys)
+        guard required.isSubset(of: present),
+              present.subtracting(required).isSubset(of: Set(NASHistoryV2.optionalSeriesKeys))
+        else { return nil }
+
+        let windowStartMillis = generatedAtMillis - windowSeconds * 1000
+        var series: [String: NASHistorySeries] = [:]
+        var coverage: [String: NASHistoryCoverage] = [:]
+        for key in NASHistoryV2.seriesKeys + NASHistoryV2.optionalSeriesKeys where rawSeries[key] != nil {
+            guard let entry = parseEntry(
+                rawSeries[key], key: key, windowStart: windowStartMillis, generatedAt: generatedAtMillis
+            ) else { return nil }
+            series[key] = entry.series
+            coverage[key] = entry.coverage
+        }
+        return NASHistoryV2(
+            generatedAt: Date(timeIntervalSince1970: Double(generatedAtMillis) / 1000),
+            series: series,
+            window: NASHistoryWindow(
+                seconds: TimeInterval(windowSeconds),
+                start: Date(timeIntervalSince1970: Double(windowStartMillis) / 1000),
+                gapSeconds: TimeInterval(gapSeconds),
+                coverage: coverage
+            )
+        )
+    }
+
+    private static func parseEntry(
+        _ value: Any?, key: String, windowStart: Int, generatedAt: Int
+    ) -> (series: NASHistorySeries, coverage: NASHistoryCoverage)? {
+        guard let raw = value as? [String: Any], Set(raw.keys) == entryKeys,
+              (raw["unit"] as? String) == NASHistoryV2.unit(for: key).rawValue
+        else { return nil }
+        let identityGeneration: String?
+        if NASJSON.isNull(raw["identityGeneration"]) {
+            identityGeneration = nil
+        } else if let text = raw["identityGeneration"] as? String,
+                  !text.isEmpty, text.count <= NASHistoryV2Core.maximumIdentityGenerationLength {
+            identityGeneration = text
+        } else {
+            return nil
+        }
+        guard let segments = raw["segments"] as? [Any], segments.count <= maximumPointsPerSeries,
+              let segmentIDs = segments.map({ $0 as? String }) as? [String],
+              segmentIDs.allSatisfy(NASHistoryV2Core.isValidSegmentID),
+              let rawPoints = raw["points"] as? [Any], rawPoints.count <= maximumPointsPerSeries
+        else { return nil }
+        let unit = NASHistoryV2.unit(for: key)
+        var points: [NASHistoryPoint] = []
+        points.reserveCapacity(rawPoints.count)
+        var previous = 0
+        for rawPoint in rawPoints {
+            guard let row = rawPoint as? [Any], row.count == 3,
+                  let at = NASJSON.integer(row[0]), at > previous, at >= windowStart, at <= generatedAt,
+                  let consumed = NASJSON.number(row[1]), consumed >= 0,
+                  let segment = NASJSON.integer(row[2]), segment >= 0, segment < segmentIDs.count
+            else { return nil }
+            previous = at
+            points.append(NASHistoryPoint(
+                at: Date(timeIntervalSince1970: Double(at) / 1000),
+                consumed: consumed,
+                unit: unit,
+                segmentId: segmentIDs[segment]
+            ))
+        }
+        guard let rawCoverage = raw["coverage"] as? [String: Any], Set(rawCoverage.keys) == coverageKeys,
+              let spansWindow = NASJSON.bool(rawCoverage["spansWindow"])
+        else { return nil }
+        let first = points.first?.at
+        let last = points.last?.at
+        func matches(_ value: Any?, _ expected: Date?) -> Bool {
+            guard let expected else { return NASJSON.isNull(value) }
+            return NASJSON.integer(value) == Int((expected.timeIntervalSince1970 * 1000).rounded())
+        }
+        guard matches(rawCoverage["firstAt"], first), matches(rawCoverage["lastAt"], last) else { return nil }
+        return (
+            NASHistorySeries(identityGeneration: identityGeneration, points: points),
+            NASHistoryCoverage(firstAt: first, lastAt: last, spansWindow: spansWindow)
+        )
+    }
+
+    /// Re-serializes a parsed 24-hour history in the exact v3 shape for the
+    /// NAS-only on-disk cache, so a relaunch restores it through `parse`.
+    static func encode(_ history: NASHistoryV2) -> Data? {
+        guard let window = history.window else { return nil }
+        func millis(_ date: Date) -> Int { Int((date.timeIntervalSince1970 * 1000).rounded()) }
+        var series: [String: Any] = [:]
+        for key in NASHistoryV2.seriesKeys + NASHistoryV2.optionalSeriesKeys {
+            guard let value = history.series[key], let cover = window.coverage[key] else {
+                if NASHistoryV2.optionalSeriesKeys.contains(key) { continue }
+                return nil
+            }
+            var segments: [String] = []
+            var indexes: [String: Int] = [:]
+            let rows = value.points.map { point -> [Any] in
+                if indexes[point.segmentId] == nil {
+                    indexes[point.segmentId] = segments.count
+                    segments.append(point.segmentId)
+                }
+                return [millis(point.at), point.consumed, indexes[point.segmentId] ?? 0]
+            }
+            series[key] = [
+                "unit": NASHistoryV2.unit(for: key).rawValue,
+                "identityGeneration": value.identityGeneration.map { $0 as Any } ?? NSNull(),
+                "segments": segments,
+                "points": rows,
+                "coverage": [
+                    "firstAt": cover.firstAt.map { millis($0) as Any } ?? NSNull(),
+                    "lastAt": cover.lastAt.map { millis($0) as Any } ?? NSNull(),
+                    "spansWindow": cover.spansWindow,
+                ],
+            ]
+        }
+        let root: [String: Any] = [
+            "schemaVersion": 3,
+            "source": "nas",
+            "generatedAt": millis(history.generatedAt),
+            "windowSeconds": Int(window.seconds),
+            "windowStart": millis(window.start),
+            "gapSeconds": Int(window.gapSeconds),
+            "series": series,
+        ]
+        return try? JSONSerialization.data(withJSONObject: root)
     }
 }
 

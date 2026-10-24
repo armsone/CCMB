@@ -14,6 +14,9 @@ enum NASConfig {
     static let sshAlias = "hanstree-dev"
     static let remoteCommand = "python3 /workspace/web-app/usage.py --snapshot-json"
     static let remoteHistoryCommand = "python3 /workspace/web-app/usage.py --history-json"
+    /// 24-hour history (schemaVersion 3). A separate fixed command so the
+    /// strict 40-point v2 command above keeps working for older apps.
+    static let remoteHistory24hCommand = "python3 /workspace/web-app/ccmb-history-24h.py"
 
     /// Batch mode (never prompts), strict host key checking against the
     /// existing known_hosts entry, no agent/X11/port forwarding of any kind,
@@ -414,10 +417,32 @@ struct NASSnapshotClient {
     /// Runs the history helper and classifies the result. A structured
     /// `{ok:false,error:{code,message}}` body (the helper exits 1 for it) is
     /// reported as that error — never as an empty history.
+    ///
+    /// The 24-hour (v3) helper is asked first. When the NAS does not have it
+    /// or it reports anything but a history, the strict v2 helper (newest 40
+    /// points, about two hours) answers instead — shown as partial coverage,
+    /// never padded. A failed SSH connection is not retried on the second
+    /// command.
     func fetchHistory() async throws -> NASHistoryReadResult {
-        let output = try await runChecked(NASConfig.remoteHistoryCommand)
+        if let wide = try await fetchHistory(command: NASConfig.remoteHistory24hCommand),
+           case .history = wide {
+            return wide
+        }
+        guard let narrow = try await fetchHistory(command: NASConfig.remoteHistoryCommand) else {
+            throw NASFetchError.emptyResponse
+        }
+        return narrow
+    }
+
+    /// `nil` only when a non-255 failure left nothing to classify, which the
+    /// 24-hour attempt treats as "try the v2 helper".
+    private func fetchHistory(command: String) async throws -> NASHistoryReadResult? {
+        let output = try await runChecked(command)
         if output.exitStatus == 255 { throw NASFetchError.connectionFailed }
-        if output.exitStatus != 0, output.stdout.isEmpty { throw NASFetchError.remoteExit(output.exitStatus) }
+        if output.exitStatus != 0, output.stdout.isEmpty {
+            if command == NASConfig.remoteHistory24hCommand { return nil }
+            throw NASFetchError.remoteExit(output.exitStatus)
+        }
         return NASHistoryV2Core.interpret(stdout: output.stdout, exitStatus: output.exitStatus)
     }
 

@@ -2943,7 +2943,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 let (history, failureLabel) = NASHistoryV2Cache.apply(result, previous: self.lastNASHistory)
                 self.lastNASHistory = history
                 self.lastNASHistoryFetchFailureLabel = failureLabel
-                if case .history(let fresh) = result, let data = NASHistoryV2Core.encode(fresh) {
+                if failureLabel == nil, case .history = result, let current = history,
+                   let data = NASHistoryV2Core.encode(current) {
                     UserDefaults.standard.set(data, forKey: Self.nasHistoryV2DefaultsKey)
                 }
                 if let failureLabel {
@@ -3312,9 +3313,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let usesCredits = nasState.codexSnapshot.map(Self.codexChartsCredits) ?? false
         let key = usesCredits ? "codexCredits" : "codex"
         let unit = usesCredits ? " 크레딧" : "%"
-        let series = [UsageHistorySeries(
+        let series = [nasSeries(
             label: usesCredits ? "크레딧" : "주간",
-            samples: NASHistoryChartCore.samples(history.series[key], unit: NASHistoryV2.unit(for: key)),
+            history.series[key],
+            unit: NASHistoryV2.unit(for: key),
             color: UsageBrandColors.codex
         )]
         return nasStrip(series: series, unit: unit)
@@ -3323,46 +3325,65 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func nasClaudeHistoryStrip() -> UsageHistoryStrip? {
         guard let history = lastNASHistory else { return nil }
         let series = [
-            UsageHistorySeries(
-                label: "주간",
-                samples: NASHistoryChartCore.samples(history.series["claude"], unit: .percent),
-                color: UsageBrandColors.claude
-            ),
-            UsageHistorySeries(
-                label: "Fable",
-                samples: NASHistoryChartCore.samples(history.series["claudeFable"], unit: .percent),
-                color: UsageBrandColors.claudeFable
-            )
+            nasSeries(label: "주간", history.series["claude"], unit: .percent, color: UsageBrandColors.claude),
+            nasSeries(label: "Fable", history.series["claudeFable"], unit: .percent, color: UsageBrandColors.claudeFable)
         ]
         return nasStrip(series: series, unit: "%")
     }
 
-    /// NAS consumption points are used as-is, with each account kept separate.
+    /// NAS consumption points are used as-is, with each account kept separate
+    /// and drawn as its own line (blue / cyan / teal) in the one Gemini chart.
     private func nasGeminiHistoryStrip() -> UsageHistoryStrip? {
         guard let history = lastNASHistory else { return nil }
         let series: [UsageHistorySeries] = [
-            (NASServiceID.gemini, "본", UsageBrandColors.geminiGradient[0]),
-            (.gemini2, "부", UsageBrandColors.geminiGradient[2]),
-            (.gemini3, "세", UsageBrandColors.geminiThirdAccount)
+            (NASServiceID.gemini, "본", UsageTrendPalette.geminiMain),
+            (.gemini2, "부", UsageTrendPalette.geminiSecond),
+            (.gemini3, "세", UsageTrendPalette.geminiThird)
         ].compactMap { id, label, color in
             guard let entry = nasState.slot(id).lastGood else { return nil }
             let raw = history.series[id.rawValue]
             if let expected = entry.historyIdentity, raw?.identityGeneration != expected { return nil }
             if entry.historyIdentity == nil, entry.actualAccountRef != nil && entry.actualAccountRef != id.accountRef { return nil }
-            return UsageHistorySeries(label: label, samples: NASHistoryChartCore.samples(raw, unit: .percent), color: color)
+            return nasSeries(label: label, raw, unit: .percent, color: color)
         }
         return nasStrip(series: series, unit: "%")
+    }
+
+    /// One NAS series as a chart line: the real samples, the NAS's own gap
+    /// threshold (15 minutes unless the 24-hour envelope says otherwise) and
+    /// the baseline segment of every sample, so a line is never drawn across
+    /// a restarted baseline.
+    private func nasSeries(
+        label: String,
+        _ raw: NASHistorySeries?,
+        unit: NASHistoryUnit,
+        color: NSColor
+    ) -> UsageHistorySeries {
+        UsageHistorySeries(
+            label: label,
+            samples: NASHistoryChartCore.samples(raw, unit: unit),
+            color: color,
+            gapSeconds: lastNASHistory?.window?.gapSeconds ?? 900,
+            segmentKeys: NASHistoryChartCore.segmentKeys(raw, unit: unit)
+        )
     }
 
     private func nasStrip(series: [UsageHistorySeries], unit: String) -> UsageHistoryStrip {
         let texts = Self.stackedStripTexts(series: series, unit: unit)
         let failure = lastNASHistoryFetchFailureLabel.map { " · \($0)" } ?? ""
+        let asOf = lastNASHistory.map { Self.nasHistoryTimeFormatter.string(from: $0.generatedAt) }
+        // Only the 24-hour envelope reaches back a day; the older helper hands
+        // over just the newest 40 points, which the note says plainly.
+        let coverageNote = lastNASHistory?.window == nil ? "NAS 24시간 기록 미지원 · 최근 약 2시간" : nil
+        let sourceNote = ["NAS 기록 \(asOf ?? "—") 기준", coverageNote, lastNASHistoryFetchFailureLabel]
+            .compactMap { $0 }.joined(separator: " · ")
         return UsageHistoryStrip(
             caption: texts.caption,
             series: series,
             slotCount: UsageConsumptionTracker.defaultCapacity,
             unitSuffix: unit,
-            accessibilityValue: "NAS 기록 · \(texts.accessibilityValue)\(failure)"
+            accessibilityValue: "NAS 기록 · \(texts.accessibilityValue)\(failure)",
+            sourceNote: sourceNote
         )
     }
 
@@ -5377,6 +5398,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// legacy/unknown payload here simply fails `NASHistoryV2Core.parse`
     /// silently rather than corrupting that unrelated store.
     private static let nasHistoryV2DefaultsKey = "nasConsumptionHistoryV2"
+    private static let nasHistoryTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
     /// Last good NAS card values (sanitized v2 service entries), separate
     /// from every local cache.
     private static let nasServiceCacheDefaultsKey = "nasFourServiceCacheV1"
