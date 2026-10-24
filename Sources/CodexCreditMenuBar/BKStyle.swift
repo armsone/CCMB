@@ -80,24 +80,27 @@ enum BKStyleTokens {
     )
 
     /// Text colors for enamel surfaces.
-    /// Primary text #e9e7df, muted #9a988b.
+    /// Primary text #e9e7df, secondary #c2c0b3, muted #a8a699 (brightened so
+    /// captions stay legible on the #242422 enamel).
     static let bodyInk = dynamic(
         light: NSColor(srgbRed: 0.20, green: 0.21, blue: 0.23, alpha: 1),
         dark: NSColor(srgbRed: 0xE9 / 255.0, green: 0xE7 / 255.0, blue: 0xDF / 255.0, alpha: 1)
     )
     static let secondaryInk = dynamic(
         light: NSColor(srgbRed: 0.33, green: 0.34, blue: 0.36, alpha: 1),
-        dark: NSColor(srgbRed: 0x9A / 255.0, green: 0x98 / 255.0, blue: 0x8B / 255.0, alpha: 1)
+        dark: NSColor(srgbRed: 0xC2 / 255.0, green: 0xC0 / 255.0, blue: 0xB3 / 255.0, alpha: 1)
     )
     static let mutedInk = dynamic(
         light: NSColor(srgbRed: 0.45, green: 0.46, blue: 0.48, alpha: 1),
-        dark: NSColor(srgbRed: 0x76 / 255.0, green: 0x74 / 255.0, blue: 0x6B / 255.0, alpha: 1)
+        dark: NSColor(srgbRed: 0xA8 / 255.0, green: 0xA6 / 255.0, blue: 0x99 / 255.0, alpha: 1)
     )
 
     /// Restrained bar colors: green / coral / blue.
     static let barGreen = NSColor(srgbRed: 0x30 / 255.0, green: 0xA4 / 255.0, blue: 0x6C / 255.0, alpha: 1)
     static let barCoral = NSColor(srgbRed: 0xEB / 255.0, green: 0x63 / 255.0, blue: 0x4B / 255.0, alpha: 1)
     static let barBlue = NSColor(srgbRed: 0x4A / 255.0, green: 0x94 / 255.0, blue: 0xE8 / 255.0, alpha: 1)
+    /// Low-remaining warning, deliberately distinct from the coral Claude bar.
+    static let barLow = NSColor(srgbRed: 0xF2 / 255.0, green: 0xB6 / 255.0, blue: 0x3C / 255.0, alpha: 1)
     static let barTrack = dynamic(
         light: NSColor(white: 0, alpha: 0.08),
         dark: NSColor(white: 1, alpha: 0.08)

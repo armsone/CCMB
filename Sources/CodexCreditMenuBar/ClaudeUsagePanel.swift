@@ -496,7 +496,8 @@ private final class UsageHistoryBarView: NSView {
         let window = currentWindow()
         let visible = visibleSeries(in: window)
         let plot = NSRect(x: 0, y: 0, width: bounds.width, height: plotHeight)
-        let labelColor = NSColor.secondaryLabelColor.withAlphaComponent(0.8)
+        let isBK = UsagePanelThemeStore.current == .bk
+        let labelColor = isBK ? BKStyleTokens.secondaryInk : NSColor.secondaryLabelColor
         let axisAttributes: [NSAttributedString.Key: Any] = [
             .font: Self.axisFont,
             .foregroundColor: labelColor
@@ -517,8 +518,21 @@ private final class UsageHistoryBarView: NSView {
             let unmeasured = NSRect(x: plotMinX, y: 0, width: firstX - plotMinX, height: plotHeight)
             NSColor.labelColor.withAlphaComponent(0.05).setFill()
             NSBezierPath(rect: unmeasured).fill()
-            if unmeasured.width >= 46 {
-                drawCentered("기록 없음", in: unmeasured, attributes: axisAttributes)
+            // Small honest coverage note at the foot of the blank stretch; the
+            // stretch itself stays blank (no synthetic samples).
+            let noteAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 7.5, weight: .regular),
+                .foregroundColor: (isBK ? BKStyleTokens.mutedInk : NSColor.tertiaryLabelColor)
+            ]
+            let candidates = ["\(Self.coverageTimeFormatter.string(from: firstRecord)) 이전 기록 없음", "기록 없음"]
+            for note in candidates {
+                let size = (note as NSString).size(withAttributes: noteAttributes)
+                guard size.width + 6 <= unmeasured.width else { continue }
+                (note as NSString).draw(
+                    at: NSPoint(x: unmeasured.midX - size.width / 2, y: plotHeight - size.height - 2),
+                    withAttributes: noteAttributes
+                )
+                break
             }
         }
 
@@ -1230,9 +1244,14 @@ private final class UsageInUseBadgeView: NSView {
 
     /// Returns the width the badge needs at the standard 14pt height.
     @discardableResult
-    func apply(text: String, theme: UsagePanelTheme) -> CGFloat {
+    func apply(text: String, theme: UsagePanelTheme, neutral: Bool = false) -> CGFloat {
         label.stringValue = text
-        label.textColor = theme == .bk ? BKStyleTokens.signalRed : .controlAccentColor
+        if neutral {
+            // Informational tag (plan name): quiet ink, never the red accent.
+            label.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        } else {
+            label.textColor = theme == .bk ? BKStyleTokens.signalRed : .controlAccentColor
+        }
         let width = ceil(label.intrinsicContentSize.width) + 12
         label.frame = NSRect(x: 0, y: 1.5, width: width, height: 12)
         needsDisplay = true
@@ -1630,7 +1649,7 @@ final class UsageHorizontalMeterView: NSView {
 }
 
 /// Compact row for one Gemini account ('본계정', '부계정', '세 번째')
-/// Columns: [Identity ~72pt] | [Session Remaining ~132pt] | [Week Remaining ~132pt]
+/// Columns: [Identity + freshness ~64pt] | [Session remaining] | [Week remaining]
 private final class GeminiAccountRowView: NSView {
     private let titleLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
@@ -1640,14 +1659,20 @@ private final class GeminiAccountRowView: NSView {
     }()
     private let emailLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .systemFont(ofSize: 10.5, weight: .regular)
+        field.font = .systemFont(ofSize: 10, weight: .regular)
         field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byTruncatingMiddle
+        return field
+    }()
+    private let freshnessLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.font = .systemFont(ofSize: 9.5, weight: .regular)
         field.lineBreakMode = .byTruncatingTail
         return field
     }()
     private let sessionTitleLabel: NSTextField = {
-        let field = NSTextField(labelWithString: "세션")
-        field.font = .systemFont(ofSize: 11, weight: .medium)
+        let field = NSTextField(labelWithString: "세션 남음")
+        field.font = .systemFont(ofSize: 10.5, weight: .medium)
         field.textColor = .secondaryLabelColor
         return field
     }()
@@ -1660,14 +1685,14 @@ private final class GeminiAccountRowView: NSView {
     private let sessionMeter = UsageHorizontalMeterView()
     private let sessionResetLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .systemFont(ofSize: 10.5, weight: .regular)
+        field.font = .systemFont(ofSize: 10, weight: .regular)
         field.textColor = .secondaryLabelColor
         field.lineBreakMode = .byTruncatingTail
         return field
     }()
     private let weekTitleLabel: NSTextField = {
-        let field = NSTextField(labelWithString: "주간")
-        field.font = .systemFont(ofSize: 11, weight: .medium)
+        let field = NSTextField(labelWithString: "주간 남음")
+        field.font = .systemFont(ofSize: 10.5, weight: .medium)
         field.textColor = .secondaryLabelColor
         return field
     }()
@@ -1680,7 +1705,7 @@ private final class GeminiAccountRowView: NSView {
     private let weekMeter = UsageHorizontalMeterView()
     private let weekResetLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .systemFont(ofSize: 10.5, weight: .regular)
+        field.font = .systemFont(ofSize: 10, weight: .regular)
         field.textColor = .secondaryLabelColor
         field.lineBreakMode = .byTruncatingTail
         return field
@@ -1693,6 +1718,7 @@ private final class GeminiAccountRowView: NSView {
         super.init(frame: frameRect)
         addSubview(titleLabel)
         addSubview(emailLabel)
+        addSubview(freshnessLabel)
         addSubview(sessionTitleLabel)
         addSubview(sessionValueLabel)
         addSubview(sessionMeter)
@@ -1713,6 +1739,8 @@ private final class GeminiAccountRowView: NSView {
     func apply(
         accountTitle: String,
         email: String,
+        identityTip: String,
+        freshness: String?,
         sessionPercent: String,
         sessionFraction: Double,
         sessionReset: String,
@@ -1723,52 +1751,68 @@ private final class GeminiAccountRowView: NSView {
         theme: UsagePanelTheme,
         showsDivider: Bool
     ) {
+        let secondary = theme == .bk ? BKStyleTokens.secondaryInk : NSColor.secondaryLabelColor
+        let muted = theme == .bk ? BKStyleTokens.mutedInk : NSColor.secondaryLabelColor
         titleLabel.stringValue = accountTitle
         titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
         emailLabel.stringValue = email
-        emailLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+        emailLabel.textColor = secondary
+        freshnessLabel.stringValue = freshness ?? ""
+        freshnessLabel.textColor = muted
+        let identityDetail = [identityTip, freshness.map { "업데이트 \($0)" }]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        for field in [titleLabel, emailLabel, freshnessLabel] {
+            field.toolTip = identityDetail.isEmpty ? nil : identityDetail
+        }
 
-        sessionValueLabel.stringValue = sessionPercent
-        sessionValueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
-        sessionMeter.fraction = sessionFraction
-        let isSessionLow = sessionFraction <= 0.15 && sessionFraction > 0
-        sessionMeter.barColor = isSessionLow ? BKStyleTokens.barCoral : BKStyleTokens.barBlue
-        sessionResetLabel.stringValue = sessionReset
-        sessionResetLabel.textColor = isSessionLow ? BKStyleTokens.barCoral : (theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor)
-
-        weekValueLabel.stringValue = weekPercent
-        weekValueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
-        weekMeter.fraction = weekFraction
-        let isWeekLow = weekFraction <= 0.15 && weekFraction > 0
-        weekMeter.barColor = isWeekLow ? BKStyleTokens.barCoral : BKStyleTokens.barGreen
-        weekResetLabel.stringValue = weekReset
-        weekResetLabel.textColor = isWeekLow ? BKStyleTokens.barCoral : (theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor)
+        func style(
+            value: NSTextField, meter: UsageHorizontalMeterView, reset: NSTextField,
+            percent: String, fraction: Double, resetText: String, normalColor: NSColor
+        ) {
+            let isLow = fraction <= 0.15 && fraction > 0
+            value.stringValue = percent
+            value.textColor = isLow ? BKStyleTokens.barLow : (theme == .bk ? BKStyleTokens.bodyInk : .labelColor)
+            meter.fraction = fraction
+            meter.barColor = isLow ? BKStyleTokens.barLow : normalColor
+            let resetCaption = resetText.isEmpty ? "" : "초기화 \(resetText)"
+            reset.stringValue = isLow ? (resetCaption.isEmpty ? "소진 임박" : "소진 임박 · \(resetCaption)") : resetCaption
+            reset.textColor = isLow ? BKStyleTokens.barLow : secondary
+            reset.toolTip = reset.stringValue.isEmpty ? nil : reset.stringValue
+        }
+        style(value: sessionValueLabel, meter: sessionMeter, reset: sessionResetLabel,
+              percent: sessionPercent, fraction: sessionFraction, resetText: sessionReset, normalColor: BKStyleTokens.barBlue)
+        style(value: weekValueLabel, meter: weekMeter, reset: weekResetLabel,
+              percent: weekPercent, fraction: weekFraction, resetText: weekReset, normalColor: BKStyleTokens.barBlue)
+        sessionTitleLabel.textColor = secondary
+        weekTitleLabel.textColor = secondary
 
         dividerLine.isHidden = !showsDivider
         if theme == .bk {
             dividerLine.layer?.backgroundColor = BKStyleTokens.chromeLine.withAlphaComponent(0.35).cgColor
         }
 
-        let idWidth: CGFloat = 76
+        let idWidth: CGFloat = 64
         let col1X: CGFloat = 4
-        let col2X = col1X + idWidth + 8
-        let meterWidth: CGFloat = max(100, (width - col2X - 8) / 2)
-        let col3X = col2X + meterWidth + 8
+        let col2X = col1X + idWidth + 6
+        let meterWidth: CGFloat = max(90, (width - col2X - 6 - 4) / 2)
+        let col3X = col2X + meterWidth + 6
 
-        titleLabel.frame = NSRect(x: col1X, y: 1, width: idWidth, height: 16)
-        emailLabel.frame = NSRect(x: col1X, y: 18, width: idWidth, height: 14)
+        titleLabel.frame = NSRect(x: col1X, y: 1, width: idWidth, height: 14)
+        emailLabel.frame = NSRect(x: col1X, y: 15, width: idWidth, height: 13)
+        freshnessLabel.frame = NSRect(x: col1X, y: 27, width: idWidth, height: 12)
 
-        sessionTitleLabel.frame = NSRect(x: col2X, y: 1, width: 28, height: 15)
-        sessionValueLabel.frame = NSRect(x: col2X + 28, y: 1, width: meterWidth - 28, height: 15)
+        let titleWidth: CGFloat = 54
+        sessionTitleLabel.frame = NSRect(x: col2X, y: 1, width: titleWidth, height: 15)
+        sessionValueLabel.frame = NSRect(x: col2X + titleWidth, y: 1, width: meterWidth - titleWidth, height: 15)
         sessionMeter.frame = NSRect(x: col2X, y: 17, width: meterWidth, height: 4)
         sessionResetLabel.frame = NSRect(x: col2X, y: 23, width: meterWidth, height: 13)
 
-        weekTitleLabel.frame = NSRect(x: col3X, y: 1, width: 28, height: 15)
-        weekValueLabel.frame = NSRect(x: col3X + 28, y: 1, width: meterWidth - 28, height: 15)
+        weekTitleLabel.frame = NSRect(x: col3X, y: 1, width: titleWidth, height: 15)
+        weekValueLabel.frame = NSRect(x: col3X + titleWidth, y: 1, width: meterWidth - titleWidth, height: 15)
         weekMeter.frame = NSRect(x: col3X, y: 17, width: meterWidth, height: 4)
         weekResetLabel.frame = NSRect(x: col3X, y: 23, width: meterWidth, height: 13)
 
-        dividerLine.frame = NSRect(x: col1X, y: 37, width: max(0, width - 8), height: 1)
+        dividerLine.frame = NSRect(x: col1X, y: 39, width: max(0, width - 8), height: 1)
     }
 }
 
@@ -1813,15 +1857,18 @@ private final class ClaudeMetricBlockView: NSView {
         valueLabel.stringValue = value
         valueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
         let isLow = fraction <= 0.15 && fraction > 0
+        if isLow { valueLabel.textColor = BKStyleTokens.barLow }
         meter.fraction = fraction
-        meter.barColor = isLow ? BKStyleTokens.barCoral : BKStyleTokens.barGreen
-        resetLabel.stringValue = isLow ? "\(reset) · 소진 임박" : reset
-        resetLabel.textColor = isLow ? BKStyleTokens.barCoral : (theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor)
+        meter.barColor = isLow ? BKStyleTokens.barLow : BKStyleTokens.barCoral
+        let resetCaption = reset.isEmpty ? "" : "초기화 \(reset)"
+        resetLabel.stringValue = isLow ? (resetCaption.isEmpty ? "소진 임박" : "\(resetCaption) · 소진 임박") : resetCaption
+        resetLabel.textColor = isLow ? BKStyleTokens.barLow : (theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor)
+        resetLabel.toolTip = resetLabel.stringValue.isEmpty ? nil : resetLabel.stringValue
 
         let inset: CGFloat = 4
         let meterW = max(0, width - inset * 2)
-        titleLabel.frame = NSRect(x: inset, y: 0, width: 60, height: 16)
-        valueLabel.frame = NSRect(x: inset + 60, y: 0, width: max(0, meterW - 60), height: 16)
+        titleLabel.frame = NSRect(x: inset, y: 0, width: 70, height: 16)
+        valueLabel.frame = NSRect(x: inset + 70, y: 0, width: max(0, meterW - 70), height: 16)
         meter.frame = NSRect(x: inset, y: 17, width: meterW, height: 4)
         resetLabel.frame = NSRect(x: inset, y: 23, width: meterW, height: 13)
     }
@@ -1868,10 +1915,13 @@ private final class CodexMetricBlockView: NSView {
         valueLabel.stringValue = value
         valueLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : .labelColor
         let isLow = fraction <= 0.15 && fraction > 0
+        if isLow { valueLabel.textColor = BKStyleTokens.barLow }
         meter.fraction = fraction
-        meter.barColor = isLow ? BKStyleTokens.barCoral : BKStyleTokens.barGreen
-        resetLabel.stringValue = reset
-        resetLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+        meter.barColor = isLow ? BKStyleTokens.barLow : BKStyleTokens.barGreen
+        let resetCaption = reset.isEmpty ? "" : "초기화 \(reset)"
+        resetLabel.stringValue = isLow ? (resetCaption.isEmpty ? "소진 임박" : "\(resetCaption) · 소진 임박") : resetCaption
+        resetLabel.textColor = isLow ? BKStyleTokens.barLow : (theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor)
+        resetLabel.toolTip = resetLabel.stringValue.isEmpty ? nil : resetLabel.stringValue
 
         let inset: CGFloat = 4
         let meterW = max(0, width - inset * 2)
@@ -1907,7 +1957,7 @@ private final class UsageColumnView: NSView {
     }()
     private let codexResetCreditsLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .systemFont(ofSize: 10, weight: .regular)
+        field.font = .systemFont(ofSize: 10.5, weight: .regular)
         field.textColor = .secondaryLabelColor
         field.lineBreakMode = .byTruncatingTail
         return field
@@ -1926,9 +1976,9 @@ private final class UsageColumnView: NSView {
     // Footers
     private let accountLabel: NSTextField = {
         let field = NSTextField(wrappingLabelWithString: "")
-        field.font = .systemFont(ofSize: 10.5)
+        field.font = .systemFont(ofSize: 10)
         field.textColor = .secondaryLabelColor
-        field.lineBreakMode = .byWordWrapping
+        field.lineBreakMode = .byTruncatingMiddle
         return field
     }()
     private let refreshLabel: NSTextField = {
@@ -1988,32 +2038,28 @@ private final class UsageColumnView: NSView {
         titleMarkView.frame = NSRect(x: 2, y: 2, width: 14, height: 14)
         titleLabel.frame = NSRect(x: 22, y: 0, width: 70, height: Self.titleHeight)
 
-        let isGemini = column.title.contains("Gemini") || width > 300
+        let isGemini = column.title.contains("Gemini")
         let isClaude = column.title.contains("Claude")
         let isCodex = column.title.contains("Codex") || (!isGemini && !isClaude)
 
-        // Plan / mode badge
-        var badgeText: String? = nil
+        // Plan badge: neutral informational tag, shown only for a real plan
+        // name. Unknown/uncollected plans omit it rather than imply one.
+        func planValue(_ labels: [String], stripping prefix: String = "") -> String? {
+            guard let raw = column.allRows.first(where: { labels.contains($0.label) })?.value else { return nil }
+            let value = raw.replacingOccurrences(of: prefix, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return ["", "정보 없음", "NAS 미수집"].contains(value) ? nil : value
+        }
+        let badgeText: String?
         if isCodex {
-            if let plan = column.allRows.first(where: { $0.label == "요금제" })?.value {
-                badgeText = plan.replacingOccurrences(of: "ChatGPT ", with: "")
-            }
+            badgeText = planValue(["요금제"], stripping: "ChatGPT ")
         } else if isClaude {
-            if let plan = column.allRows.first(where: { $0.label == "요금제" })?.value {
-                badgeText = plan.replacingOccurrences(of: "Claude ", with: "")
-            }
-        } else if isGemini {
-            if let bt = column.quotaGroups.first?.badgeText {
-                badgeText = bt
-            } else if column.accountLines.contains(where: { $0.contains("놀이터") }) {
-                badgeText = "놀이터"
-            } else {
-                badgeText = "CLI"
-            }
+            badgeText = planValue(["요금제"], stripping: "Claude ")
+        } else {
+            badgeText = planValue(["본 요금제", "요금제"])
         }
         if let badge = badgeText, !badge.isEmpty {
             badgeView.isHidden = false
-            let badgeWidth = badgeView.apply(text: badge, theme: theme)
+            let badgeWidth = badgeView.apply(text: badge, theme: theme, neutral: true)
             badgeView.frame = NSRect(x: width - badgeWidth - 4, y: 1, width: badgeWidth, height: 15)
         } else {
             badgeView.isHidden = true
@@ -2037,6 +2083,9 @@ private final class UsageColumnView: NSView {
             geminiRow1.isHidden = false
             geminiRow2.isHidden = false
 
+            let freshness = Self.geminiFreshness(from: column.refreshLine)
+            let rowHeight = Self.geminiRowHeight
+
             // Account 0 (본계정)
             let email0 = Self.extractSnippet(from: column.accountLines.first(where: { $0.contains("본") }) ?? column.accountLines.first, defaultLabel: "본계정")
             let sessionReset0 = column.allRows.first(where: { $0.label.contains("본 세션") || $0.label == "C세션 초기화" })?.value ?? ""
@@ -2044,6 +2093,8 @@ private final class UsageColumnView: NSView {
             geminiRow0.apply(
                 accountTitle: "본계정",
                 email: email0,
+                identityTip: column.accountLines.first(where: { $0.contains("본") }) ?? column.accountLines.first ?? "",
+                freshness: freshness["본계정"],
                 sessionPercent: column.quota?.percentText ?? "—",
                 sessionFraction: column.quota?.fraction ?? 0,
                 sessionReset: sessionReset0,
@@ -2054,8 +2105,8 @@ private final class UsageColumnView: NSView {
                 theme: theme,
                 showsDivider: true
             )
-            geminiRow0.frame = NSRect(x: 0, y: y, width: width, height: 38)
-            y += 39
+            geminiRow0.frame = NSRect(x: 0, y: y, width: width, height: rowHeight)
+            y += rowHeight + 1
 
             // Account 1 (부계정)
             let email1 = Self.extractSnippet(from: column.accountLines.first(where: { $0.contains("부") }) ?? (column.accountLines.count > 1 ? column.accountLines[1] : nil), defaultLabel: "부계정")
@@ -2064,6 +2115,8 @@ private final class UsageColumnView: NSView {
             geminiRow1.apply(
                 accountTitle: "부계정",
                 email: email1,
+                identityTip: column.accountLines.first(where: { $0.contains("부") }) ?? (column.accountLines.count > 1 ? column.accountLines[1] : ""),
+                freshness: freshness["부계정"],
                 sessionPercent: column.tertiaryQuota?.percentText ?? "—",
                 sessionFraction: column.tertiaryQuota?.fraction ?? 0,
                 sessionReset: sessionReset1,
@@ -2074,8 +2127,8 @@ private final class UsageColumnView: NSView {
                 theme: theme,
                 showsDivider: true
             )
-            geminiRow1.frame = NSRect(x: 0, y: y, width: width, height: 38)
-            y += 39
+            geminiRow1.frame = NSRect(x: 0, y: y, width: width, height: rowHeight)
+            y += rowHeight + 1
 
             // Account 2 (세 번째)
             let email2 = Self.extractSnippet(from: column.accountLines.first(where: { $0.hasPrefix("세 번째") }), defaultLabel: "세 번째")
@@ -2087,6 +2140,8 @@ private final class UsageColumnView: NSView {
             geminiRow2.apply(
                 accountTitle: "세 번째",
                 email: email2,
+                identityTip: column.accountLines.first(where: { $0.hasPrefix("세 번째") }) ?? "",
+                freshness: freshness["세 번째 계정"],
                 sessionPercent: session3?.percentText ?? (hasThird ? "—" : "미등록"),
                 sessionFraction: session3?.fraction ?? 0,
                 sessionReset: sessionReset2,
@@ -2097,8 +2152,8 @@ private final class UsageColumnView: NSView {
                 theme: theme,
                 showsDivider: false
             )
-            geminiRow2.frame = NSRect(x: 0, y: y, width: width, height: 38)
-            y += 39
+            geminiRow2.frame = NSRect(x: 0, y: y, width: width, height: rowHeight)
+            y += rowHeight + 1
 
         } else if isClaude {
             claudeSessionBlock.isHidden = false
@@ -2109,7 +2164,7 @@ private final class UsageColumnView: NSView {
 
             let sessionReset = column.allRows.first(where: { $0.label.contains("세션 초기화") })?.value ?? ""
             claudeSessionBlock.apply(
-                title: "세션",
+                title: "세션 남음",
                 value: column.quota?.percentText ?? "—",
                 fraction: column.quota?.fraction ?? 0,
                 reset: sessionReset,
@@ -2122,7 +2177,7 @@ private final class UsageColumnView: NSView {
             if hasFable {
                 let fableReset = column.allRows.first(where: { $0.label.contains("Fable 초기화") })?.value ?? ""
                 claudeFableBlock.apply(
-                    title: "Fable",
+                    title: "Fable 남음",
                     value: column.secondaryQuota?.percentText ?? "—",
                     fraction: column.secondaryQuota?.fraction ?? 0,
                     reset: fableReset,
@@ -2136,7 +2191,7 @@ private final class UsageColumnView: NSView {
             let weekQuota = column.tertiaryQuota ?? column.secondaryQuota
             let weekReset = column.allRows.first(where: { $0.label.contains("주간 초기화") })?.value ?? ""
             claudeWeekBlock.apply(
-                title: "주간",
+                title: "주간 남음",
                 value: weekQuota?.percentText ?? "—",
                 fraction: weekQuota?.fraction ?? 0,
                 reset: weekReset,
@@ -2166,39 +2221,90 @@ private final class UsageColumnView: NSView {
 
             if let creditRow = column.allRows.first(where: { $0.label.contains("남은 크레딧") }) {
                 codexCreditsLabel.isHidden = false
-                codexCreditsLabel.stringValue = "\(creditRow.label): \(creditRow.value)"
+                codexCreditsLabel.stringValue = "\(creditRow.label): \(Self.groupedCredit(creditRow.value))"
+                codexCreditsLabel.toolTip = codexCreditsLabel.stringValue
                 codexCreditsLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
                 codexCreditsLabel.frame = NSRect(x: 4, y: y, width: max(0, width - 8), height: 16)
                 y += 18
             }
             if let resetCreditRow = column.allRows.first(where: { $0.label == "초기화" }) {
                 codexResetCreditsLabel.isHidden = false
-                codexResetCreditsLabel.stringValue = "\(resetCreditRow.label): \(resetCreditRow.value)"
-                codexResetCreditsLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .tertiaryLabelColor
+                // `초기화` carries reset_credits_available: usage reset vouchers,
+                // not a financial credit. Expiry detail stays in the tooltip.
+                codexResetCreditsLabel.stringValue = "초기화권 \(resetCreditRow.value)"
+                codexResetCreditsLabel.toolTip = [codexResetCreditsLabel.stringValue, resetCreditRow.detail]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+                codexResetCreditsLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
                 codexResetCreditsLabel.frame = NSRect(x: 4, y: y, width: max(0, width - 8), height: 16)
                 y += 18
             }
         }
 
-        // Footer lines calculation
-        accountLabel.stringValue = isGemini ? "" : column.accountLines.joined(separator: "\n")
-        let footerTextWidth = max(1, width - 16)
-        let accountTextHeight = accountLabel.cell?.cellSize(forBounds:
-            NSRect(x: 0, y: 0, width: footerTextWidth, height: .greatestFiniteMagnitude)).height ?? 0
-        accountLineCount = (isGemini || column.accountLines.isEmpty) ? 0 : max(column.accountLines.count,
-            Int(ceil(accountTextHeight / Self.statusLineHeight)))
+        // Footer lines. Full identity/status text stays available as tooltips
+        // while the visible lines stay short and single-purpose.
+        let footerTextWidth = max(1, width - 8)
+        let accountDisplayLines = isGemini ? [] : column.accountLines.map(Self.shortAccountLine)
+        accountLabel.stringValue = accountDisplayLines.joined(separator: "\n")
+        accountLabel.toolTip = accountDisplayLines.isEmpty ? nil : column.accountLines.joined(separator: "\n")
+        accountLineCount = accountDisplayLines.count
         accountLabel.isHidden = accountLineCount == 0
-        hasRefreshLine = column.refreshLine != nil
-        refreshLabel.stringValue = column.refreshLine ?? ""
-        refreshLabel.isHidden = column.refreshLine == nil
-        statusLineCount = column.statusLines.count
+        // Gemini shows each account's own freshness inside its row.
+        let showsFooterRefresh = column.refreshLine != nil
+            && !(isGemini && !Self.geminiFreshness(from: column.refreshLine).isEmpty)
+        hasRefreshLine = showsFooterRefresh
+        refreshLabel.stringValue = showsFooterRefresh ? (column.refreshLine ?? "") : ""
+        refreshLabel.toolTip = refreshLabel.stringValue.isEmpty ? nil : refreshLabel.stringValue
+        refreshLabel.isHidden = !showsFooterRefresh
         statusLabel.stringValue = column.statusLines.joined(separator: "\n")
         statusLabel.textColor = column.statusColor
+        statusLabel.toolTip = column.statusLines.isEmpty ? nil : column.statusLines.joined(separator: "\n")
         statusLabel.isHidden = column.statusLines.isEmpty
+        let statusTextHeight = statusLabel.cell?.cellSize(forBounds:
+            NSRect(x: 0, y: 0, width: footerTextWidth, height: .greatestFiniteMagnitude)).height ?? 0
+        statusLineCount = column.statusLines.isEmpty ? 0 : max(column.statusLines.count,
+            Int(ceil(statusTextHeight / Self.statusLineHeight)))
 
         setAccessibilityElement(true)
         setAccessibilityLabel("\(column.title) 사용량")
         return y
+    }
+
+    private static let geminiRowHeight: CGFloat = 40
+
+    /// Splits the Gemini refresh line ("본계정 4초 전 · 부계정 17초 전 · …")
+    /// into per-account freshness keyed by the account prefix. Empty when the
+    /// line does not use account prefixes (local CLI/online "C … · O …" form).
+    private static func geminiFreshness(from refreshLine: String?) -> [String: String] {
+        guard let refreshLine else { return [:] }
+        var result: [String: String] = [:]
+        for part in refreshLine.components(separatedBy: " · ") {
+            for prefix in ["본계정", "부계정", "세 번째 계정"] where part.hasPrefix(prefix + " ") {
+                result[prefix] = String(part.dropFirst(prefix.count + 1))
+            }
+        }
+        return result
+    }
+
+    /// Footer account text without the "계정 " lead-in (the value is already
+    /// recognisable as an identity); the full line stays in the tooltip.
+    private static func shortAccountLine(_ line: String) -> String {
+        guard line.hasPrefix("계정 "), line != "계정 정보 없음" else { return line }
+        return String(line.dropFirst(3))
+    }
+
+    /// Adds thousands separators to a numeric credit string while keeping its
+    /// own decimal digits; non-numeric text ("무제한", "정보 없음") passes through.
+    private static func groupedCredit(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let number = Double(trimmed) else { return text }
+        let decimals = trimmed.contains(".") ? 2 : 0
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = true
+        formatter.minimumFractionDigits = decimals
+        formatter.maximumFractionDigits = decimals
+        return formatter.string(from: NSNumber(value: number)) ?? text
     }
 
     private static func extractSnippet(from text: String?, defaultLabel: String) -> String {
@@ -2252,14 +2358,14 @@ private final class UsageColumnView: NSView {
 /// so their three columns and two dividers always land at the same x
 /// positions and the menu reads as one object end to end.
 enum UsagePanelLayout {
-    static let columnWidths: [CGFloat] = [185, 205, 370]
+    static let columnWidths: [CGFloat] = [150, 166, 304]
     static func columnWidth(for index: Int) -> CGFloat {
-        guard index >= 0 && index < columnWidths.count else { return 185 }
+        guard index >= 0 && index < columnWidths.count else { return 150 }
         return columnWidths[index]
     }
     static var columnWidth: CGFloat { columnWidths[0] }
-    static let columnGap: CGFloat = 10
-    static let sidePadding: CGFloat = 10
+    static let columnGap: CGFloat = 8
+    static let sidePadding: CGFloat = 8
     static let controlRowHeight: CGFloat = 28
     static let controlVerticalInset: CGFloat = 2
     static let columnCount = 3
@@ -2301,6 +2407,14 @@ class RolloverButton: NSButton {
     /// `contentTintColor` exactly as the caller configured it.
     var hoverTintColor: NSColor?
 
+    /// Enabled buttons always read at full strength; only a truly disabled
+    /// button is dimmed (on top of AppKit's own disabled rendering).
+    private var restingAlpha: CGFloat { isEnabled ? 1 : 0.5 }
+
+    override var isEnabled: Bool {
+        didSet { alphaValue = restingAlpha }
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil, hoverTrackingArea == nil else { return }
@@ -2312,7 +2426,7 @@ class RolloverButton: NSButton {
         )
         addTrackingArea(area)
         hoverTrackingArea = area
-        alphaValue = 0.50
+        alphaValue = restingAlpha
         restingTintColor = contentTintColor
     }
 
@@ -2341,7 +2455,7 @@ class RolloverButton: NSButton {
     }
 
     override func mouseExited(with event: NSEvent) {
-        alphaValue = 0.50
+        alphaValue = restingAlpha
         contentTintColor = restingTintColor
         bezelColor = nil
         if let restingAttributedTitle {
@@ -2357,6 +2471,11 @@ class RolloverButton: NSButton {
 /// charts, or buttons — only the material behind them.
 @MainActor
 final class PanelBackgroundView: NSVisualEffectView {
+    /// Dark charcoal wash used by BK Style so the window chrome matches the
+    /// enamel cards instead of inheriting the pale system popover material.
+    /// It lives inside this view, so `setOpacity` fades it with the material.
+    private let bkTintView = NSView()
+
     init(blendingMode: NSVisualEffectView.BlendingMode) {
         super.init(frame: .zero)
         material = .popover
@@ -2366,6 +2485,27 @@ final class PanelBackgroundView: NSVisualEffectView {
         layer?.cornerRadius = 10
         layer?.masksToBounds = true
         autoresizingMask = [.width, .height]
+        bkTintView.frame = bounds
+        bkTintView.autoresizingMask = [.width, .height]
+        bkTintView.wantsLayer = true
+        bkTintView.isHidden = true
+        addSubview(bkTintView)
+    }
+
+    func applyTheme(_ theme: UsagePanelTheme) {
+        if theme == .bk {
+            appearance = NSAppearance(named: .darkAqua)
+            material = .hudWindow
+            bkTintView.isHidden = false
+            let dark = NSAppearance(named: .darkAqua)
+            dark?.performAsCurrentDrawingAppearance {
+                bkTintView.layer?.backgroundColor = BKStyleTokens.panelBackground.withAlphaComponent(0.88).cgColor
+            }
+        } else {
+            appearance = nil
+            material = .popover
+            bkTintView.isHidden = true
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -2443,27 +2583,23 @@ final class SplitUsagePanelView: NSView {
             let (view, column) = pair
             return view.apply(column, width: UsagePanelLayout.columnWidth(for: index), theme: theme)
         }
-        let bodyHeight = max(bodyHeights.max() ?? 1, 1)
 
+        // Each footer sits directly under its own column's body (no pinned
+        // gap); the shared card height is the tallest body + footer.
         let footers = columnViews.map { $0.footerCapacities() }
-        let accountCapacity = footers.map { $0.account }.max() ?? 0
-        let refreshCapacity = footers.map { $0.refresh }.max() ?? 0
-        let statusCapacity = footers.map { $0.status }.max() ?? 0
-        let footerHeight = codexColumnView.footerHeight(
-            accountCapacity: accountCapacity,
-            refreshCapacity: refreshCapacity,
-            statusCapacity: statusCapacity
-        )
-        let contentHeight = bodyHeight + footerHeight
+        let footerHeights = footers.map {
+            codexColumnView.footerHeight(accountCapacity: $0.account, refreshCapacity: $0.refresh, statusCapacity: $0.status)
+        }
+        let contentHeight = max(zip(bodyHeights, footerHeights).map { $0 + $1 }.max() ?? 1, 1)
 
         for (index, columnView) in columnViews.enumerated() {
             let colWidth = UsagePanelLayout.columnWidth(for: index)
             columnView.layoutFooter(
-                top: bodyHeight,
+                top: bodyHeights[index],
                 width: colWidth,
-                accountCapacity: accountCapacity,
-                refreshCapacity: refreshCapacity,
-                statusCapacity: statusCapacity
+                accountCapacity: footers[index].account,
+                refreshCapacity: footers[index].refresh,
+                statusCapacity: footers[index].status
             )
             columnView.frame = NSRect(x: UsagePanelLayout.columnX[index], y: topPadding, width: colWidth, height: contentHeight)
         }
@@ -2591,6 +2727,9 @@ final class UsageHistoryChartView: NSView {
 
         let theme = UsagePanelThemeStore.current
         sectionTitleLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        for caption in [codexCaption, claudeCaption, geminiCaption, grokCaption] {
+            caption.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        }
 
         let card = NSRect(
             x: Self.cardInset,
@@ -2725,11 +2864,12 @@ final class UsageHistoryChartView: NSView {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
         field.textColor = .secondaryLabelColor
+        field.alignment = .right
         field.usesSingleLineMode = true
-        field.lineBreakMode = .byClipping
+        field.lineBreakMode = .byTruncatingTail
         field.maximumNumberOfLines = 1
         field.cell?.wraps = false
-        field.cell?.truncatesLastVisibleLine = false
+        field.cell?.truncatesLastVisibleLine = true
         return field
     }
 
@@ -2773,6 +2913,7 @@ final class UsageHistoryChartView: NSView {
         caption.isHidden = false
         bars.isHidden = false
         caption.stringValue = strip.caption
+        caption.toolTip = strip.caption
         let showsLabels = labeledLegend && strip.series.contains { !$0.label.isEmpty }
         let leadingGap = showsLabels
             ? Self.legendWidth(labels: strip.series.map(\.label)) + 2
@@ -2938,6 +3079,7 @@ final class UsagePanelHeaderView: NSView {
         let theme = UsagePanelThemeStore.current
         wellView.theme = theme
         titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
+        updatedLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
         themeButton.updateDisplay()
     }
 
@@ -3214,6 +3356,9 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         lastGeminiRefreshInterval = geminiRefreshInterval
         lastGrokRefreshInterval = grokRefreshInterval
 
+        let theme = UsagePanelThemeStore.current
+        window?.appearance = theme == .bk ? NSAppearance(named: .darkAqua) : nil
+        containerView.applyTheme(theme)
         usageView.apply(model)
         let showsHistory = historyView.apply(
             codex: codexHistory,
