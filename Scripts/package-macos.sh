@@ -4,9 +4,9 @@ set -euo pipefail
 APP_NAME="CCMB"
 EXECUTABLE_NAME="CodexCreditMenuBar"
 BUNDLE_ID="com.codex.creditmenubar"
-APP_VERSION="2.3.1"
-APP_BUILD="202610242014"
-APP_BUILD_STAMP="202610242014"
+APP_VERSION="2.4.0"
+APP_BUILD="202610242134"
+APP_BUILD_STAMP="202610242134"
 DEPLOYMENT_TARGET="12.0"
 ARM64_DEPLOYMENT_TARGET="12.0"
 ARM64_TRIPLE="arm64-apple-macosx$ARM64_DEPLOYMENT_TARGET"
@@ -510,6 +510,10 @@ swift "$ICON_TOOL" "$APP_PATH/Contents/Resources/$EXECUTABLE_NAME.icns"
 if [[ ! -f "$APP_PATH/Contents/Resources/$EXECUTABLE_NAME.icns" ]]; then
   printf 'error: icon generation failed.\n' >&2
   exit 1
+fi
+
+if [[ -f "$ROOT_DIR/Assets/GeminiLogo.png" ]]; then
+  cp "$ROOT_DIR/Assets/GeminiLogo.png" "$APP_PATH/Contents/Resources/GeminiLogo.png"
 fi
 
 APP_EXECUTABLE="$APP_PATH/Contents/MacOS/$EXECUTABLE_NAME"

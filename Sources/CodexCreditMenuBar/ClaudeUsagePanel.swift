@@ -2062,9 +2062,11 @@ final class PanelBackgroundView: NSVisualEffectView {
                 bkTintView.layer?.backgroundColor = BKStyleTokens.panelBackground.withAlphaComponent(0.88).cgColor
             }
         } else {
-            appearance = nil
+            appearance = NSAppearance(named: .aqua)
             material = .popover
-            bkTintView.isHidden = true
+            bkTintView.isHidden = false
+            // Pale ice blue background (#F0F9FD to #E9F6FE)
+            bkTintView.layer?.backgroundColor = NSColor(srgbRed: 0xF0 / 255.0, green: 0xF9 / 255.0, blue: 0xFD / 255.0, alpha: 0.96).cgColor
         }
     }
 
@@ -2258,10 +2260,10 @@ final class UsagePanelHeaderView: NSView {
         return button
     }()
     private let settingsButton: RolloverButton = {
-        let button = RolloverButton(title: "설정 ▾", target: nil, action: nil)
+        let button = RolloverButton(title: "•••", target: nil, action: nil)
         button.bezelStyle = .rounded
         button.controlSize = .small
-        button.font = .systemFont(ofSize: 11)
+        button.font = .systemFont(ofSize: 12, weight: .bold)
         button.setAccessibilityLabel("설정 및 추가 기능 펼치기/접기")
         return button
     }()
@@ -2306,7 +2308,7 @@ final class UsagePanelHeaderView: NSView {
     }
 
     func setSettingsExpanded(_ expanded: Bool) {
-        settingsButton.title = expanded ? "설정 ▴" : "설정 ▾"
+        settingsButton.title = expanded ? "•••" : "•••"
     }
 
     /// Re-reads the stored theme into the well/labels/theme control, e.g.
@@ -2329,9 +2331,9 @@ final class UsagePanelHeaderView: NSView {
 
     private func layoutContent() {
         let sidePadding = UsagePanelLayout.sidePadding
-        let settingsWidth: CGFloat = 64
-        let themeWidth: CGFloat = 90
-        let refreshWidth: CGFloat = 70
+        let settingsWidth: CGFloat = 36
+        let themeWidth: CGFloat = 86
+        let refreshWidth: CGFloat = 66
         let buttonHeight: CGFloat = 22
         let buttonY = (Self.viewHeight - buttonHeight) / 2
         wellView.frame = NSRect(x: sidePadding, y: (Self.viewHeight - 18) / 2, width: 18, height: 18)
@@ -2377,8 +2379,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     private static let contentScaleDefaultsKey = "pinnedUsagePanelContentScaleV2"
 
     private let headerView = UsagePanelHeaderView()
-    private let usageView = SplitUsagePanelView()
-    private let historyView = UsageHistoryChartView()
+    private let compactDashboardView = CompactDashboardView()
     private let usagePageButtonsView = UsagePageButtonsView()
     private let refreshIntervalControlsView = RefreshIntervalControlsView()
     private let shareActionsView = SingleActionRowView(title: "사용량 공유")
@@ -2506,9 +2507,8 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         headerView.onRefresh = { [weak self] in self?.onRefreshAll?() }
         headerView.onSelectTheme = { [weak self] theme in self?.onThemeChange?(theme) }
         headerView.onToggleSettings = { [weak self] in self?.toggleSettings() }
-        contentContainer.addSubview(usageView)
+        contentContainer.addSubview(compactDashboardView)
         contentContainer.addSubview(refreshIntervalControlsView)
-        contentContainer.addSubview(historyView)
         contentContainer.addSubview(usagePageButtonsView)
         contentContainer.addSubview(shareActionsView)
         contentContainer.addSubview(updateVersionView)
@@ -2597,16 +2597,14 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         lastGrokRefreshInterval = grokRefreshInterval
 
         let theme = UsagePanelThemeStore.current
-        window?.appearance = theme == .bk ? NSAppearance(named: .darkAqua) : nil
+        window?.appearance = theme == .bk ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
         containerView.applyTheme(theme)
-        usageView.apply(model)
-        let showsHistory = historyView.apply(
-            codex: codexHistory,
-            claude: claudeHistory,
-            gemini: geminiHistory,
-            grok: grokHistory
+        compactDashboardView.apply(
+            model: model,
+            codexHistory: codexHistory,
+            claudeHistory: claudeHistory,
+            geminiHistory: geminiHistory
         )
-        historyView.isHidden = !showsHistory
         refreshIntervalControlsView.apply(
             codex: codexRefreshInterval,
             claude: claudeRefreshInterval,
@@ -2621,8 +2619,6 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         updateVersionView.isHidden = !showsSettings
         lifecycleActionsView.isHidden = !showsSettings
 
-        let historyHeight = showsHistory ? historyView.frame.height : 0
-        let historyGap = showsHistory ? Self.sectionGap : 0
         let buttonsHeight = showsSettings ? usagePageButtonsView.frame.height : 0
         let shareHeight = showsSettings ? shareActionsView.frame.height : 0
         let controlsHeight = showsSettings ? refreshIntervalControlsView.frame.height : 0
@@ -2635,15 +2631,14 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         let headerHeight = UsagePanelHeaderView.viewHeight
         let contentHeight = Self.topPadding + Self.bottomPadding
             + headerHeight
-            + usageView.frame.height
-            + historyGap + historyHeight
+            + compactDashboardView.frame.height
             + settingsGaps
             + controlsHeight
             + buttonsHeight
             + shareHeight
             + versionHeight
             + lifecycleHeight
-        let contentWidth = UsagePanelLayout.viewWidth + Self.horizontalPadding * 2
+        let contentWidth = CompactDashboardView.viewWidth + Self.horizontalPadding * 2
 
         var y = Self.bottomPadding
         if showsSettings {
@@ -2658,14 +2653,12 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
             refreshIntervalControlsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
             y += controlsHeight + Self.sectionGap
         }
-        historyView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += historyHeight + historyGap
-        usageView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
-        y += usageView.frame.height
+        compactDashboardView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
+        y += compactDashboardView.frame.height
         headerView.frame = NSRect(
             x: Self.horizontalPadding,
             y: y,
-            width: UsagePanelLayout.viewWidth,
+            width: CompactDashboardView.viewWidth,
             height: headerHeight
         )
 

@@ -223,12 +223,30 @@ final class UsageTrendPlotView: NSView {
 
     // MARK: - Geometry
 
+    var customPlotHeight: CGFloat? {
+        didSet {
+            hoveredStart = nil
+            needsDisplay = true
+        }
+    }
+    var showsAxisLabels: Bool = true {
+        didSet { needsDisplay = true }
+    }
+
+    private var currentPlotHeight: CGFloat {
+        customPlotHeight ?? Self.plotHeight
+    }
+
     private var plot: NSRect {
-        NSRect(
-            x: Self.yAxisWidth,
-            y: Self.topInset,
-            width: max(1, bounds.width - Self.yAxisWidth - Self.rightInset),
-            height: max(1, bounds.height - Self.topInset - Self.axisHeight)
+        let axisH = showsAxisLabels ? Self.axisHeight : 10
+        let yAxisW = showsAxisLabels ? Self.yAxisWidth : 26
+        let topIn = showsAxisLabels ? Self.topInset : 4
+        let rightIn = showsAxisLabels ? Self.rightInset : 4
+        return NSRect(
+            x: yAxisW,
+            y: topIn,
+            width: max(1, bounds.width - yAxisW - rightIn),
+            height: max(1, bounds.height - topIn - axisH)
         )
     }
 
@@ -465,15 +483,19 @@ final class UsageTrendPlotView: NSView {
     private func drawGrid(in rect: NSRect, yMax: Double, attributes: [NSAttributedString.Key: Any]) {
         let isBK = UsagePanelThemeStore.current == .bk
         let gridColor = (isBK ? NSColor.white : NSColor.labelColor).withAlphaComponent(isBK ? 0.10 : 0.12)
+        let font = NSFont.systemFont(ofSize: showsAxisLabels ? 10 : 8.5, weight: .medium)
+        var tickAttributes = attributes
+        tickAttributes[.font] = font
         for step in 0...2 {
             let value = yMax * Double(step) / 2
             let lineY = y(for: value, yMax: yMax)
             gridColor.setFill()
             NSBezierPath(rect: NSRect(x: rect.minX, y: lineY - 0.5, width: rect.width, height: step == 0 ? 1 : 0.5)).fill()
             let label = tickTitle(value) as NSString
-            let size = label.size(withAttributes: attributes)
-            let labelY = min(max(lineY - size.height / 2, 0), bounds.height - Self.axisHeight - size.height + 2)
-            label.draw(at: NSPoint(x: rect.minX - 5 - size.width, y: labelY), withAttributes: attributes)
+            let size = label.size(withAttributes: tickAttributes)
+            let axisH = showsAxisLabels ? Self.axisHeight : 10
+            let labelY = min(max(lineY - size.height / 2, 0), bounds.height - axisH - size.height + 2)
+            label.draw(at: NSPoint(x: rect.minX - 4 - size.width, y: labelY), withAttributes: tickAttributes)
         }
         // Faint vertical guides at every 6 hours.
         for hours in [6.0, 12.0, 18.0] {
@@ -483,21 +505,36 @@ final class UsageTrendPlotView: NSView {
         }
     }
 
-    /// 현재 (left) … 24시간 전 (right), at the real window positions.
+    /// 현재/지금 (left) … 24시간 전 (right), at the real window positions.
     private func drawTimeAxis(in rect: NSRect, now: Date, attributes: [NSAttributedString.Key: Any]) {
-        let labelY = rect.maxY + 3
+        let labelY = rect.maxY + 2
+        let fontSize: CGFloat = showsAxisLabels ? 10 : 9
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        var fontAttributes = attributes
+        fontAttributes[.font] = font
+
+        if !showsAxisLabels {
+            // iPhone style compact labels: "지금" at left, "24시간 전" at right
+            let leftText = "지금" as NSString
+            let rightText = "24시간 전" as NSString
+            let rightSize = rightText.size(withAttributes: fontAttributes)
+            leftText.draw(at: NSPoint(x: rect.minX, y: labelY), withAttributes: fontAttributes)
+            rightText.draw(at: NSPoint(x: rect.maxX - rightSize.width, y: labelY), withAttributes: fontAttributes)
+            return
+        }
+
         let stops: [(hours: Double, text: String)] = [
-            (0, "현재"), (6, "6h"), (12, "12h"), (18, "18h"), (24, "24h")
+            (0, "지금"), (6, "6h"), (12, "12h"), (18, "18h"), (24, "24시간 전")
         ]
         for stop in stops {
             let tickX = rect.minX + CGFloat(stop.hours / 24) * rect.width
             let text = stop.text as NSString
-            let size = text.size(withAttributes: attributes)
+            let size = text.size(withAttributes: fontAttributes)
             var originX = tickX - size.width / 2
             if stop.hours == 0 { originX = rect.minX }
             if stop.hours == 24 { originX = rect.maxX - size.width }
             originX = min(max(originX, 0), bounds.width - size.width)
-            text.draw(at: NSPoint(x: originX, y: labelY), withAttributes: attributes)
+            text.draw(at: NSPoint(x: originX, y: labelY), withAttributes: fontAttributes)
         }
     }
 

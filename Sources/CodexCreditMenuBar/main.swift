@@ -2535,7 +2535,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
 
         if let resetsAt = snapshot.resetsAt {
-            setDetailTitle("\(Self.resetDateTimeTitle(resetsAt)) 초기화", for: resetItem)
+            setDetailTitle(Self.resetDateTimeTitle(resetsAt), for: resetItem)
             resetItem.toolTip = nil
         } else if let minutes = snapshot.windowDurationMinutes {
             setDetailTitle("사용량 창 \(minutes)분", for: resetItem)
@@ -3768,7 +3768,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             let expiryDetail = snapshot.resetCreditExpirations.isEmpty
                 ? (nasSlot != nil && resetCredits > 0 ? "만료 정보 없음" : nil)
                 : snapshot.resetCreditExpirations.map { "만료 \(Self.resetDateTimeTitle($0))" }.joined(separator: "\n")
-            creditRows.append(UsagePanelRow(label: "초기화", value: "\(resetCredits)개", detail: expiryDetail, detailAlignment: .right))
+            creditRows.append(UsagePanelRow(label: "리셋권", value: "\(resetCredits)개", detail: expiryDetail, detailAlignment: .right))
         } else if nasSlot != nil {
             creditRows.append(UsagePanelRow(label: "초기화", value: "NAS 미수집"))
         }
@@ -3969,7 +3969,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 status.lines.append("\(Self.resetDateTimeTitle(retryAt)) 이후 다시 조회")
             }
             if status.lines.isEmpty, let unavailable = claudeUnavailableState(from: snapshot, now: Date()) {
-                status = (["\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until)) 초기화"], .systemOrange)
+                status = (["\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until))"], .systemOrange)
             }
             return UsagePanelColumn(
                 title: "Claude",
@@ -4068,18 +4068,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             output.timeZone = timeZone
 
             func resetDateTitle(_ date: Date) -> String {
-                let calendar = Calendar.autoupdatingCurrent
-                if calendar.isDateInToday(date) {
-                    output.dateFormat = "HH:mm"
-                } else if calendar.isDateInTomorrow(date) {
-                    output.dateFormat = "'내일' HH:mm"
-                } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: now),
-                          calendar.isDate(date, inSameDayAs: dayAfterTomorrow) {
-                    output.dateFormat = "'모레' HH:mm"
-                } else {
-                    output.dateFormat = "M/d(EEEEE) HH:mm"
-                }
-                return output.string(from: date)
+                Self.resetDateTimeTitle(date)
             }
 
             let datedInput = DateFormatter()
@@ -5363,15 +5352,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private static func resetDateTimeTitle(_ date: Date) -> String {
         let calendar = Calendar.autoupdatingCurrent
-        if calendar.isDateInToday(date) {
+        let now = Date()
+        let dayDiff = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+        if dayDiff == 0 {
             resetDateTimeFormatter.dateFormat = "HH:mm"
-        } else if calendar.isDateInTomorrow(date) {
+        } else if dayDiff == 1 {
             resetDateTimeFormatter.dateFormat = "'내일' HH:mm"
-        } else if let dayAfterTomorrow = calendar.date(byAdding: .day, value: 2, to: Date()),
-                  calendar.isDate(date, inSameDayAs: dayAfterTomorrow) {
+        } else if dayDiff == 2 {
             resetDateTimeFormatter.dateFormat = "'모레' HH:mm"
         } else {
-            resetDateTimeFormatter.dateFormat = "M/d(EEEEE) HH:mm"
+            resetDateTimeFormatter.dateFormat = "MM/dd(E) HH:mm"
         }
         return resetDateTimeFormatter.string(from: date)
     }
