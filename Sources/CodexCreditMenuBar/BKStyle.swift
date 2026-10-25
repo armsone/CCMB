@@ -1,128 +1,265 @@
 import AppKit
 
-/// Selectable visual theme for the usage panel. `기본` preserves the
-/// pre-redesign translucent look; `BK Style` layers restrained modern
-/// skeuomorphism on the same layout: enamel card surfaces, glossy charcoal
-/// structure, thin chrome hairlines, and one structural signal-red accent.
-/// Every BK-specific color/gradient/well lives in `BKStyleTokens`, so the
-/// theme is fully reversible from this one file.
+/// Selectable visual theme for the usage panel based on Byungki-style themes.
+/// Requested themes and order: light, friday, jarvis, ultron.
 enum UsagePanelTheme: String, CaseIterable {
-    case classic
-    case bk
+    case light = "light"
+    case friday = "friday"
+    case jarvis = "jarvis"
+    case ultron = "ultron"
 
     var displayName: String {
         switch self {
-        case .classic: return "기본"
-        case .bk: return "BK Style"
+        case .light: return "라이트"
+        case .friday: return "프라이데이"
+        case .jarvis: return "자비스"
+        case .ultron: return "울트론"
         }
     }
+
+    var isDark: Bool {
+        switch self {
+        case .light, .friday: return false
+        case .jarvis, .ultron: return true
+        }
+    }
+
+    var nextTheme: UsagePanelTheme {
+        switch self {
+        case .light: return .friday
+        case .friday: return .jarvis
+        case .jarvis: return .ultron
+        case .ultron: return .light
+        }
+    }
+
+    var palette: BKThemePalette {
+        switch self {
+        case .light: return .light
+        case .friday: return .friday
+        case .jarvis: return .jarvis
+        case .ultron: return .ultron
+        }
+    }
+}
+
+/// Official Byungki-style palette token set
+struct BKThemePalette {
+    let bg: NSColor
+    let card: NSColor
+    let surface: NSColor
+    let surface2: NSColor
+    let text: NSColor
+    let text2: NSColor
+    let muted: NSColor
+    let border: NSColor
+    let border2: NSColor
+    let accent: NSColor
+    let accentStrong: NSColor
+    let accentSoft: NSColor
+    let onAccent: NSColor
+    let warn: NSColor
+    let warnSoft: NSColor
+    let warnInk: NSColor
+    let danger: NSColor
+    let dangerSoft: NSColor
+
+    private static func color(_ hex: UInt32) -> NSColor {
+        let r = CGFloat((hex >> 16) & 0xff) / 255.0
+        let g = CGFloat((hex >> 8) & 0xff) / 255.0
+        let b = CGFloat(hex & 0xff) / 255.0
+        return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+    }
+
+    static let light = BKThemePalette(
+        bg: color(0xf5f4f0),
+        card: color(0xfbfaf7),
+        surface: color(0xffffff),
+        surface2: color(0xecebe4),
+        text: color(0x1f211c),
+        text2: color(0x4a4c44),
+        muted: color(0x666860),
+        border: color(0xe2dfd5),
+        border2: color(0xd0cdc0),
+        accent: color(0x5c6b3c),
+        accentStrong: color(0x46532c),
+        accentSoft: color(0xe8ebdb),
+        onAccent: color(0xffffff),
+        warn: color(0x9c5415),
+        warnSoft: color(0xf7e9d8),
+        warnInk: color(0x6d3c10),
+        danger: color(0x9c3b2a),
+        dangerSoft: color(0xf6e3de)
+    )
+
+    static let friday = BKThemePalette(
+        bg: color(0xf7efe3),
+        card: color(0xfffaf1),
+        surface: color(0xfffdf8),
+        surface2: color(0xf0e2cc),
+        text: color(0x2a1f16),
+        text2: color(0x55422f),
+        muted: color(0x725b45),
+        border: color(0xe8d8c0),
+        border2: color(0xd3bb98),
+        accent: color(0x9a4a12),
+        accentStrong: color(0x743508),
+        accentSoft: color(0xf6dfc0),
+        onAccent: color(0xffffff),
+        warn: color(0x8a5a00),
+        warnSoft: color(0xf8e6b8),
+        warnInk: color(0x6d3c10),
+        danger: color(0xa3204a),
+        dangerSoft: color(0xf8dce4)
+    )
+
+    static let jarvis = BKThemePalette(
+        bg: color(0x071a33),
+        card: color(0x0c2748),
+        surface: color(0x11335d),
+        surface2: color(0x173f70),
+        text: color(0xe3edf7),
+        text2: color(0xb9cde3),
+        muted: color(0x93abc6),
+        border: color(0x1d4d7a),
+        border2: color(0x2b87b0),
+        accent: color(0x35c8f0),
+        accentStrong: color(0x8fe3fa),
+        accentSoft: color(0x0e3a5c),
+        onAccent: color(0x04202b),
+        warn: color(0xf0b45c),
+        warnSoft: color(0x3a2d16),
+        warnInk: color(0xf4cf94),
+        danger: color(0xf28b82),
+        dangerSoft: color(0x3d2126)
+    )
+
+    static let ultron = BKThemePalette(
+        bg: color(0x0f1012),
+        card: color(0x1a1b1e),
+        surface: color(0x222326),
+        surface2: color(0x2b2c30),
+        text: color(0xe6e7ea),
+        text2: color(0xb8bbc2),
+        muted: color(0x8e929b),
+        border: color(0x3a2a2e),
+        border2: color(0x8a2c3a),
+        accent: color(0xdc4057),
+        accentStrong: color(0xff7a88),
+        accentSoft: color(0x3a1519),
+        onAccent: color(0xffffff),
+        warn: color(0xe8a24f),
+        warnSoft: color(0x36291a),
+        warnInk: color(0xf2c27f),
+        danger: color(0xff9a9a),
+        dangerSoft: color(0x3e1f22)
+    )
 }
 
 enum UsagePanelThemeStore {
     static let defaultsKey = "usagePanelThemeV1"
 
-    /// BK Style is the default for this user-directed redesign; a stored
-    /// explicit choice (including `기본`) always wins afterward.
+    /// Migrates old stored strings safely to the 4 Byungki style themes:
+    /// - classic, daytime -> light
+    /// - bk, night, dark -> jarvis
+    /// - casual -> friday
+    /// - light -> light
+    /// - friday -> friday
+    /// - jarvis -> jarvis
+    /// - ultron -> ultron
+    /// - unknown/default -> light
+    static func migrate(raw: String?) -> UsagePanelTheme {
+        guard let raw = raw?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return .light
+        }
+        switch raw {
+        case "light", "라이트", "밝은":
+            return .light
+        case "friday", "프라이데이":
+            return .friday
+        case "jarvis", "자비스":
+            return .jarvis
+        case "ultron", "울트론":
+            return .ultron
+        case "classic", "daytime", "기본":
+            return .light
+        case "bk", "bk style", "night", "dark", "어두운", "중간", "medium":
+            return .jarvis
+        case "casual":
+            return .friday
+        default:
+            return .light
+        }
+    }
+
+    private static var _current: UsagePanelTheme = {
+        let stored = UserDefaults.standard.string(forKey: defaultsKey)
+        let theme = migrate(raw: stored)
+        // Persist immediately before first frame if migrated or missing
+        if stored != theme.rawValue {
+            UserDefaults.standard.set(theme.rawValue, forKey: defaultsKey)
+        }
+        return theme
+    }()
+
     static var current: UsagePanelTheme {
         get {
-            guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
-                  let theme = UsagePanelTheme(rawValue: raw)
-            else { return .bk }
-            return theme
+            return _current
         }
         set {
+            _current = newValue
             UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
         }
     }
 }
 
-/// Central BK Style material tokens. Colors are appearance-dynamic so the
-/// enamel/charcoal relationship holds in both light and dark mode without
-/// any view doing its own appearance checks.
+/// Central BK Style material tokens driven by the current theme palette.
 enum BKStyleTokens {
-    /// Signature structural accent. Used only for selected/active markers
-    /// (the "사용 중" tag, the selected theme), never as decoration.
-    static let signalRed = NSColor(srgbRed: 0xE4 / 255.0, green: 0x1E / 255.0, blue: 0x25 / 255.0, alpha: 1)
+    static var currentPalette: BKThemePalette { UsagePanelThemeStore.current.palette }
 
-    private static func dynamic(light: NSColor, dark: NSColor) -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-        }
-    }
+    /// Structural accent / signal color from theme palette
+    static var signalRed: NSColor { currentPalette.accent }
 
-    /// White enamel: the strongest surface, carrying the provider cards.
-    /// In BK Style dark mode, flat warm charcoal #242422.
-    static let enamelSurfaceTop = dynamic(
-        light: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.92),
-        dark: NSColor(srgbRed: 0x24 / 255.0, green: 0x24 / 255.0, blue: 0x22 / 255.0, alpha: 1)
-    )
-    static let enamelSurfaceBottom = dynamic(
-        light: NSColor(srgbRed: 0.955, green: 0.955, blue: 0.96, alpha: 0.92),
-        dark: NSColor(srgbRed: 0x20 / 255.0, green: 0x20 / 255.0, blue: 0x1E / 255.0, alpha: 1)
-    )
+    static var enamelSurfaceTop: NSColor { currentPalette.card }
+    static var enamelSurfaceBottom: NSColor { currentPalette.surface }
+    static var panelBackground: NSColor { currentPalette.bg }
+    static var wellFill: NSColor { currentPalette.surface2 }
 
-    /// Flat warm charcoal panel background #1c1c1a.
-    static let panelBackground = dynamic(
-        light: NSColor(white: 0.95, alpha: 1),
-        dark: NSColor(srgbRed: 0x1C / 255.0, green: 0x1C / 255.0, blue: 0x1A / 255.0, alpha: 1)
-    )
-
-    /// Slightly recessed surface used inside icon wells.
-    static let wellFill = dynamic(
-        light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.97, alpha: 1),
-        dark: NSColor(srgbRed: 0x28 / 255.0, green: 0x28 / 255.0, blue: 0x26 / 255.0, alpha: 1)
-    )
-
-    /// Technical structure ink: glyphs and group titles #e9e7df.
-    static let charcoalInk = dynamic(
-        light: NSColor(srgbRed: 0.19, green: 0.20, blue: 0.22, alpha: 1),
-        dark: NSColor(srgbRed: 0xE9 / 255.0, green: 0xE7 / 255.0, blue: 0xDF / 255.0, alpha: 1)
-    )
-
-    /// Text colors for enamel surfaces.
-    /// Primary text #e9e7df, secondary #c2c0b3, muted #a8a699 (brightened so
-    /// captions stay legible on the #242422 enamel).
-    static let bodyInk = dynamic(
-        light: NSColor(srgbRed: 0.20, green: 0.21, blue: 0.23, alpha: 1),
-        dark: NSColor(srgbRed: 0xE9 / 255.0, green: 0xE7 / 255.0, blue: 0xDF / 255.0, alpha: 1)
-    )
-    static let secondaryInk = dynamic(
-        light: NSColor(srgbRed: 0.33, green: 0.34, blue: 0.36, alpha: 1),
-        dark: NSColor(srgbRed: 0xC2 / 255.0, green: 0xC0 / 255.0, blue: 0xB3 / 255.0, alpha: 1)
-    )
-    static let mutedInk = dynamic(
-        light: NSColor(srgbRed: 0.45, green: 0.46, blue: 0.48, alpha: 1),
-        dark: NSColor(srgbRed: 0xA8 / 255.0, green: 0xA6 / 255.0, blue: 0x99 / 255.0, alpha: 1)
-    )
+    static var charcoalInk: NSColor { currentPalette.text }
+    static var bodyInk: NSColor { currentPalette.text }
+    static var secondaryInk: NSColor { currentPalette.text2 }
+    static var mutedInk: NSColor { currentPalette.muted }
 
     /// Restrained bar colors: green / coral / blue.
     static let barGreen = NSColor(srgbRed: 0x30 / 255.0, green: 0xA4 / 255.0, blue: 0x6C / 255.0, alpha: 1)
     static let barCoral = NSColor(srgbRed: 0xEB / 255.0, green: 0x63 / 255.0, blue: 0x4B / 255.0, alpha: 1)
     static let barBlue = NSColor(srgbRed: 0x4A / 255.0, green: 0x94 / 255.0, blue: 0xE8 / 255.0, alpha: 1)
-    /// Low-remaining warning, deliberately distinct from the coral Claude bar.
     static let barLow = NSColor(srgbRed: 0xF2 / 255.0, green: 0xB6 / 255.0, blue: 0x3C / 255.0, alpha: 1)
-    static let barTrack = dynamic(
-        light: NSColor(white: 0, alpha: 0.08),
-        dark: NSColor(white: 1, alpha: 0.08)
-    )
+    static var barTrack: NSColor { currentPalette.surface2 }
 
-    /// Borders #35342e.
-    static let chromeLine = dynamic(
-        light: NSColor(white: 0, alpha: 0.16),
-        dark: NSColor(srgbRed: 0x35 / 255.0, green: 0x34 / 255.0, blue: 0x2E / 255.0, alpha: 1)
-    )
-    static let chromeHighlight = dynamic(
-        light: NSColor(white: 1, alpha: 0.85),
-        dark: NSColor(white: 1, alpha: 0.05)
-    )
-    static let contactShadow = dynamic(
-        light: NSColor(white: 0, alpha: 0.10),
-        dark: NSColor(white: 0, alpha: 0.42)
-    )
+    static var chromeLine: NSColor { currentPalette.border }
+    static var chromeHighlight: NSColor { currentPalette.border2 }
 
-    /// One enamel card with a chrome rim, a controlled top highlight, and a
-    /// hairline contact shadow. Depth stays restrained: no oversized bevels,
-    /// no candy gloss.
+    /// Dark themes (Jarvis cyan / Ultron crimson) carry their identity in the
+    /// structural lines: card rims, top hairlines and header rule. Light and
+    /// Friday keep the plain chrome tokens.
+    static var isAccentTheme: Bool { UsagePanelThemeStore.current.isDark }
+    static var cardRim: NSColor { isAccentTheme ? currentPalette.border2 : currentPalette.border }
+    static var structureHairline: NSColor {
+        isAccentTheme ? currentPalette.accent.withAlphaComponent(0.55) : currentPalette.border2
+    }
+    /// Large canvas wash: blue under Jarvis, crimson-graphite under Ultron.
+    static var canvasWash: NSColor {
+        switch UsagePanelThemeStore.current {
+        case .jarvis: return NSColor(srgbRed: 0x0f / 255.0, green: 0x3a / 255.0, blue: 0x68 / 255.0, alpha: 1)
+        case .ultron: return NSColor(srgbRed: 0x2a / 255.0, green: 0x1a / 255.0, blue: 0x1e / 255.0, alpha: 1)
+        case .light, .friday: return currentPalette.surface2
+        }
+    }
+    static var contactShadow: NSColor {
+        UsagePanelThemeStore.current.isDark ? NSColor(white: 0, alpha: 0.42) : NSColor(white: 0, alpha: 0.10)
+    }
+
     static func drawCard(in rect: NSRect, radius: CGFloat) {
         guard rect.width > 2, rect.height > 2 else { return }
         let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
@@ -145,11 +282,11 @@ enum BKStyleTokens {
         // Top highlight kept inside the rim.
         NSGraphicsContext.saveGraphicsState()
         path.addClip()
-        chromeHighlight.setFill()
+        structureHairline.setFill()
         NSBezierPath(rect: NSRect(x: rect.minX + radius / 2, y: rect.minY + 0.5, width: rect.width - radius, height: 1)).fill()
         NSGraphicsContext.restoreGraphicsState()
 
-        chromeLine.setStroke()
+        cardRim.setStroke()
         path.lineWidth = 1
         path.stroke()
     }
@@ -165,7 +302,7 @@ enum BKStyleTokens {
         chromeHighlight.withAlphaComponent(0.5).setFill()
         NSBezierPath(rect: NSRect(x: rect.minX + 2, y: rect.minY + 0.5, width: rect.width - 4, height: 1)).fill()
         NSGraphicsContext.restoreGraphicsState()
-        chromeLine.setStroke()
+        cardRim.setStroke()
         path.lineWidth = 1
         path.stroke()
     }
@@ -193,7 +330,7 @@ enum BKIconGlyph {
 /// (기본 theme), always drawn in charcoal ink at one shared optical scale.
 final class BKIconWellView: NSView {
     var glyph: BKIconGlyph = .gauge { didSet { needsDisplay = true } }
-    var theme: UsagePanelTheme = .classic { didSet { needsDisplay = true } }
+    var theme: UsagePanelTheme = .light { didSet { needsDisplay = true } }
 
     override var isFlipped: Bool { true }
 
@@ -208,10 +345,8 @@ final class BKIconWellView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let wellRect = bounds.insetBy(dx: 0.5, dy: 0.5)
-        if theme == .bk {
-            BKStyleTokens.drawIconWell(in: wellRect)
-        }
-        let ink = theme == .bk ? BKStyleTokens.charcoalInk : NSColor.secondaryLabelColor
+        BKStyleTokens.drawIconWell(in: wellRect)
+        let ink = BKStyleTokens.charcoalInk
         drawGlyph(in: bounds.insetBy(dx: 3.5, dy: 3.5), ink: ink)
     }
 

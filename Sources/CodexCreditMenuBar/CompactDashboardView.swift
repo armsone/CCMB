@@ -2,14 +2,18 @@ import AppKit
 
 /// Color palette and style tokens for the iPhone-style light dashboard.
 enum CCMBDashPalette {
-    static let canvasTop = NSColor(srgbRed: 240 / 255.0, green: 249 / 255.0, blue: 253 / 255.0, alpha: 1.0)
-    static let canvasBottom = NSColor(srgbRed: 233 / 255.0, green: 246 / 255.0, blue: 254 / 255.0, alpha: 1.0)
-    static let cardBackground = NSColor.white
-    static let ink = NSColor(srgbRed: 0.04, green: 0.05, blue: 0.08, alpha: 1.0)
-    static let muted = NSColor(srgbRed: 0.345, green: 0.424, blue: 0.627, alpha: 1.0)
-    static let track = NSColor(srgbRed: 229 / 255.0, green: 233 / 255.0, blue: 238 / 255.0, alpha: 1.0)
-    static let divider = NSColor(srgbRed: 0.89, green: 0.91, blue: 0.945, alpha: 1.0)
-    static let codexIconBg = NSColor(srgbRed: 2 / 255.0, green: 23 / 255.0, blue: 44 / 255.0, alpha: 1.0)
+    static var canvasTop: NSColor { UsagePanelThemeStore.current.palette.bg }
+    static var canvasBottom: NSColor { BKStyleTokens.canvasWash }
+    static var cardBackground: NSColor { UsagePanelThemeStore.current.palette.card }
+    static var ink: NSColor { UsagePanelThemeStore.current.palette.text }
+    static var muted: NSColor { UsagePanelThemeStore.current.palette.muted }
+    static var track: NSColor { UsagePanelThemeStore.current.palette.surface2 }
+    static var divider: NSColor { UsagePanelThemeStore.current.palette.border }
+    static var codexIconBg: NSColor {
+        UsagePanelThemeStore.current.isDark
+            ? NSColor(srgbRed: 0x16 / 255.0, green: 0x23 / 255.0, blue: 0x37 / 255.0, alpha: 1.0)
+            : NSColor(srgbRed: 2 / 255.0, green: 23 / 255.0, blue: 44 / 255.0, alpha: 1.0)
+    }
 
     static let codex = NSColor(srgbRed: 16 / 255.0, green: 163 / 255.0, blue: 127 / 255.0, alpha: 1.0)
     static let claude = NSColor(srgbRed: 250 / 255.0, green: 96 / 255.0, blue: 50 / 255.0, alpha: 1.0)
@@ -118,28 +122,51 @@ final class CompactServiceIconView: NSView {
                 ray.stroke()
             }
 
-        case .gemini:
-            // User-supplied multicolor Gemini sparkle PNG identically on all three Gemini cards
+        case .gemini(let color):
+            NSColor.white.setFill()
+            bgPath.fill()
+
             if let image = CompactServiceIconView.geminiSparkleLogo {
-                let insetRatio: CGFloat = 0.08
-                let drawRect = bounds.insetBy(dx: bounds.width * insetRatio, dy: bounds.height * insetRatio)
+                NSGraphicsContext.saveGraphicsState()
+                bgPath.addClip()
+                let imgSize = image.size
+                let drawRect: NSRect
+                if imgSize.width > 0 && imgSize.height > 0 {
+                    let scale = min(bounds.width / imgSize.width, bounds.height / imgSize.height)
+                    let w = imgSize.width * scale
+                    let h = imgSize.height * scale
+                    drawRect = NSRect(
+                        x: bounds.minX + (bounds.width - w) / 2.0,
+                        y: bounds.minY + (bounds.height - h) / 2.0,
+                        width: w,
+                        height: h
+                    )
+                } else {
+                    drawRect = bounds
+                }
                 image.draw(in: drawRect, from: .zero, operation: .sourceOver, fraction: 1.0)
-            } else {
-                CCMBDashPalette.cardBackground.setFill()
-                bgPath.fill()
+                NSGraphicsContext.restoreGraphicsState()
             }
+
+            let strokeWidth: CGFloat = 1.5
+            let borderRect = bounds.insetBy(dx: strokeWidth / 2.0, dy: strokeWidth / 2.0)
+            let borderPath = NSBezierPath(
+                roundedRect: borderRect,
+                xRadius: max(0, radius - strokeWidth / 2.0),
+                yRadius: max(0, radius - strokeWidth / 2.0)
+            )
+            borderPath.lineWidth = strokeWidth
+            color.setStroke()
+            borderPath.stroke()
         }
     }
 
     private static let geminiSparkleLogo: NSImage? = {
-        // Try Bundle resources first
         if let bundleURL = Bundle.main.url(forResource: "GeminiLogo", withExtension: "png"),
            let image = NSImage(contentsOf: bundleURL) {
             return image
         }
-        // Fallback to local workspace Assets folder
-        let localPath = "/Users/armsone/git/CCMB-MacOS/Assets/GeminiLogo.png"
-        if let image = NSImage(contentsOfFile: localPath) {
+        if let image = NSImage(named: "GeminiLogo") {
             return image
         }
         return nil
@@ -154,12 +181,16 @@ final class CompactQuotaMetricColumnView: NSView {
         field.font = .systemFont(ofSize: 12)
         field.textColor = CCMBDashPalette.muted
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let valueField: NSTextField = {
         let field = NSTextField(labelWithString: "—")
         field.font = .monospacedDigitSystemFont(ofSize: 24, weight: .bold)
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let resetField: NSTextField = {
@@ -167,6 +198,8 @@ final class CompactQuotaMetricColumnView: NSView {
         field.font = .monospacedDigitSystemFont(ofSize: 9.5, weight: .regular)
         field.textColor = CCMBDashPalette.muted
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
         return field
     }()
 
@@ -190,12 +223,18 @@ final class CompactQuotaMetricColumnView: NSView {
         resetField.stringValue = reset
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        labelField.textColor = CCMBDashPalette.muted
+        resetField.textColor = CCMBDashPalette.muted
+        super.draw(dirtyRect)
+    }
+
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
         let w = bounds.width
-        labelField.frame = NSRect(x: 0, y: 0, width: w, height: 13)
-        valueField.frame = NSRect(x: 0, y: 13, width: w, height: 26)
-        resetField.frame = NSRect(x: 0, y: 39, width: w, height: 12)
+        labelField.frame = NSRect(x: 0, y: 0, width: w, height: 15)
+        valueField.frame = NSRect(x: 0, y: 15, width: w, height: 28)
+        resetField.frame = NSRect(x: 0, y: 43, width: w, height: 14)
     }
 }
 
@@ -208,12 +247,16 @@ class CompactAccountCardBaseView: NSView {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 18, weight: .bold)
         field.textColor = CCMBDashPalette.ink
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     let accountLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 12)
         field.textColor = CCMBDashPalette.muted
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
         return field
     }()
     let noticeLabel: NSTextField = {
@@ -224,6 +267,8 @@ class CompactAccountCardBaseView: NSView {
         return field
     }()
     let plotView = UsageTrendPlotView()
+
+    var hasNotice: Bool { !noticeLabel.isHidden && !(noticeLabel.stringValue.isEmpty) }
 
     override var isFlipped: Bool { true }
 
@@ -243,14 +288,34 @@ class CompactAccountCardBaseView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        titleLabel.textColor = CCMBDashPalette.ink
+        accountLabel.textColor = CCMBDashPalette.muted
+        if noticeLabel.textColor != .systemRed && noticeLabel.textColor != .systemOrange {
+            noticeLabel.textColor = CCMBDashPalette.muted
+        }
         super.draw(dirtyRect)
         let cardPath = NSBezierPath(roundedRect: bounds, xRadius: Self.cardRadius, yRadius: Self.cardRadius)
         CCMBDashPalette.cardBackground.setFill()
         cardPath.fill()
+        if BKStyleTokens.isAccentTheme {
+            NSGraphicsContext.saveGraphicsState()
+            cardPath.addClip()
+            BKStyleTokens.structureHairline.setFill()
+            NSBezierPath(rect: NSRect(
+                x: Self.cardRadius / 2,
+                y: 0.5,
+                width: bounds.width - Self.cardRadius,
+                height: 1
+            )).fill()
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        BKStyleTokens.cardRim.setStroke()
+        cardPath.lineWidth = 1
+        cardPath.stroke()
     }
 }
 
-/// Codex Card: 173pt target height.
+/// Codex Card: 139pt target height.
 /// Quota row (weekly % + bar), 3-col stats (토큰 integer / 리셋권 count / 만료 dates), 24h plot.
 @MainActor
 final class CompactCodexCardView: CompactAccountCardBaseView {
@@ -261,13 +326,17 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
         field.font = .systemFont(ofSize: 12)
         field.textColor = CCMBDashPalette.muted
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let tokenValue: NSTextField = {
         let field = NSTextField(labelWithString: "—")
-        field.font = .monospacedDigitSystemFont(ofSize: 20, weight: .bold)
+        field.font = .monospacedDigitSystemFont(ofSize: 16, weight: .bold)
         field.textColor = CCMBDashPalette.ink
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let voucherLabel: NSTextField = {
@@ -275,6 +344,8 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
         field.font = .systemFont(ofSize: 12)
         field.textColor = CCMBDashPalette.muted
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let voucherValue: NSTextField = {
@@ -282,6 +353,8 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
         field.font = .monospacedDigitSystemFont(ofSize: 20, weight: .bold)
         field.textColor = CCMBDashPalette.codex
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let expiryLabel: NSTextField = {
@@ -289,13 +362,18 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
         field.font = .systemFont(ofSize: 12)
         field.textColor = CCMBDashPalette.muted
         field.alignment = .center
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byClipping
         return field
     }()
     private let expiryValue: NSTextField = {
-        let field = NSTextField(wrappingLabelWithString: "—")
-        field.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        let field = NSTextField(labelWithString: "—")
+        field.font = .monospacedDigitSystemFont(ofSize: 8.5, weight: .regular)
         field.textColor = CCMBDashPalette.muted
         field.alignment = .center
+        field.maximumNumberOfLines = 2
+        field.lineBreakMode = .byClipping
+        field.usesSingleLineMode = false
         return field
     }()
     private let statDivider1 = NSView()
@@ -316,11 +394,22 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
         statDivider2.wantsLayer = true
         statDivider2.layer?.backgroundColor = CCMBDashPalette.divider.cgColor
 
-        [tokenLabel, tokenValue, voucherLabel, voucherValue, expiryLabel, expiryValue, statDivider1, statDivider2].forEach(addSubview)
+        [tokenLabel, tokenValue, voucherLabel, expiryValue, statDivider1, statDivider2].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        tokenLabel.textColor = CCMBDashPalette.muted
+        tokenValue.textColor = CCMBDashPalette.ink
+        voucherLabel.textColor = CCMBDashPalette.muted
+        expiryLabel.textColor = CCMBDashPalette.muted
+        expiryValue.textColor = CCMBDashPalette.muted
+        statDivider1.layer?.backgroundColor = CCMBDashPalette.divider.cgColor
+        statDivider2.layer?.backgroundColor = CCMBDashPalette.divider.cgColor
+        super.draw(dirtyRect)
     }
 
     func apply(column: UsagePanelColumn, historyStrip: UsageHistoryStrip?) {
@@ -373,6 +462,7 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
             voucherValue.stringValue = "—"
             expiryValue.stringValue = "없음"
         }
+        voucherLabel.stringValue = "리셋권 \(voucherValue.stringValue)"
 
         if !column.statusLines.isEmpty {
             noticeLabel.stringValue = column.statusLines.joined(separator: " · ")
@@ -392,35 +482,34 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
         let w = bounds.width
         let pad: CGFloat = 12
         iconView.frame = NSRect(x: pad, y: 10, width: 36, height: 36)
-        titleLabel.frame = NSRect(x: pad + 44, y: 10, width: 140, height: 20)
-        accountLabel.frame = NSRect(x: pad + 44, y: 30, width: 140, height: 14)
 
+        let blockW: CGFloat = 236
+        let blockX = w - pad - blockW
+        let colW = (blockW - 2) / 3.0
         let quotaW: CGFloat = 176
-        quotaColumn.frame = NSRect(x: w - pad - quotaW, y: 8, width: quotaW, height: 51)
-        quotaBar.frame = NSRect(x: w - pad - quotaW, y: 61, width: quotaW, height: 7)
 
-        // 3-column stats
-        let statsY: CGFloat = 72
-        let statColW = (w - pad * 2) / 3.0
-        tokenLabel.frame = NSRect(x: pad, y: statsY, width: statColW, height: 14)
-        tokenValue.frame = NSRect(x: pad, y: statsY + 14, width: statColW, height: 24)
+        let headerTextW = max(80, blockX - (pad + 44) - 8)
+        titleLabel.frame = NSRect(x: pad + 44, y: 8, width: headerTextW, height: 22)
+        accountLabel.frame = NSRect(x: pad + 44, y: 31, width: headerTextW, height: 16)
 
-        statDivider1.frame = NSRect(x: pad + statColW - 0.5, y: statsY + 2, width: 1, height: 34)
+        voucherLabel.frame = NSRect(x: blockX, y: 6, width: colW, height: 15)
+        expiryValue.frame = NSRect(x: blockX, y: 23, width: colW, height: 32)
+        statDivider1.frame = NSRect(x: blockX + colW, y: 10, width: 1, height: 48)
 
-        voucherLabel.frame = NSRect(x: pad + statColW, y: statsY, width: statColW, height: 14)
-        voucherValue.frame = NSRect(x: pad + statColW, y: statsY + 14, width: statColW, height: 24)
+        quotaColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 57)
+        statDivider2.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 48)
 
-        statDivider2.frame = NSRect(x: pad + statColW * 2 - 0.5, y: statsY + 2, width: 1, height: 34)
+        tokenLabel.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 15)
+        tokenValue.frame = NSRect(x: blockX + colW * 2 + 2, y: 23, width: colW, height: 28)
 
-        expiryLabel.frame = NSRect(x: pad + statColW * 2, y: statsY, width: statColW, height: 14)
-        expiryValue.frame = NSRect(x: pad + statColW * 2, y: statsY + 14, width: statColW, height: 26)
+        quotaBar.frame = NSRect(x: w - pad - quotaW, y: 66, width: quotaW, height: 7)
 
-        var plotY: CGFloat = 114
+        var plotY: CGFloat = 78
         if !noticeLabel.isHidden {
-            noticeLabel.frame = NSRect(x: pad, y: plotY, width: w - pad * 2, height: 14)
-            plotY += 16
+            noticeLabel.frame = NSRect(x: pad, y: plotY, width: w - pad * 2, height: 15)
+            plotY += 17
         }
-        plotView.frame = NSRect(x: 6, y: plotY, width: w - 12, height: bounds.height - plotY - 4)
+        plotView.frame = NSRect(x: 6, y: plotY, width: w - 12, height: max(1, bounds.height - plotY - 4))
     }
 }
 
@@ -447,11 +536,17 @@ final class CompactClaudeCardView: CompactAccountCardBaseView {
         divider2.layer?.backgroundColor = CCMBDashPalette.divider.cgColor
 
         quotaBar.tint = CCMBDashPalette.claude
-        [sessionColumn, divider1, weekColumn, divider2, fableColumn, quotaBar].forEach(addSubview)
+        [fableColumn, divider1, sessionColumn, divider2, weekColumn, quotaBar].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        divider1.layer?.backgroundColor = CCMBDashPalette.divider.cgColor
+        divider2.layer?.backgroundColor = CCMBDashPalette.divider.cgColor
+        super.draw(dirtyRect)
     }
 
     func apply(column: UsagePanelColumn, historyStrip: UsageHistoryStrip?) {
@@ -487,7 +582,7 @@ final class CompactClaudeCardView: CompactAccountCardBaseView {
             noticeLabel.isHidden = true
         }
 
-        let summary = "Claude 세션 남음 \(sessionPercent), 주간 \(weekPercent), 페이블 \(fablePercent)"
+        let summary = "Claude 페이블 남음 \(fablePercent), 세션 \(sessionPercent), 주간 \(weekPercent)"
         setAccessibilityLabel(summary)
         needsLayout = true
     }
@@ -497,30 +592,32 @@ final class CompactClaudeCardView: CompactAccountCardBaseView {
         let w = bounds.width
         let pad: CGFloat = 12
         iconView.frame = NSRect(x: pad, y: 10, width: 36, height: 36)
-        titleLabel.frame = NSRect(x: pad + 44, y: 10, width: 140, height: 20)
-        accountLabel.frame = NSRect(x: pad + 44, y: 30, width: 140, height: 14)
 
         let blockW: CGFloat = 236
         let blockX = w - pad - blockW
         let colW = (blockW - 2) / 3.0
 
-        sessionColumn.frame = NSRect(x: blockX, y: 8, width: colW, height: 51)
-        divider1.frame = NSRect(x: blockX + colW, y: 14, width: 1, height: 38)
+        let headerTextW = max(80, blockX - (pad + 44) - 8)
+        titleLabel.frame = NSRect(x: pad + 44, y: 8, width: headerTextW, height: 22)
+        accountLabel.frame = NSRect(x: pad + 44, y: 31, width: headerTextW, height: 16)
 
-        weekColumn.frame = NSRect(x: blockX + colW + 1, y: 8, width: colW, height: 51)
-        divider2.frame = NSRect(x: blockX + colW * 2 + 1, y: 14, width: 1, height: 38)
+        fableColumn.frame = NSRect(x: blockX, y: 6, width: colW, height: 57)
+        divider1.frame = NSRect(x: blockX + colW, y: 10, width: 1, height: 48)
 
-        fableColumn.frame = NSRect(x: blockX + colW * 2 + 2, y: 8, width: colW, height: 51)
+        sessionColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 57)
+        divider2.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 48)
+
+        weekColumn.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 57)
 
         let barW: CGFloat = 176
-        quotaBar.frame = NSRect(x: w - pad - barW, y: 61, width: barW, height: 7)
+        quotaBar.frame = NSRect(x: w - pad - barW, y: 66, width: barW, height: 7)
 
-        var plotY: CGFloat = 72
+        var plotY: CGFloat = 78
         if !noticeLabel.isHidden {
-            noticeLabel.frame = NSRect(x: pad, y: plotY, width: w - pad * 2, height: 14)
-            plotY += 16
+            noticeLabel.frame = NSRect(x: pad, y: plotY, width: w - pad * 2, height: 15)
+            plotY += 17
         }
-        plotView.frame = NSRect(x: 6, y: plotY, width: w - 12, height: bounds.height - plotY - 4)
+        plotView.frame = NSRect(x: 6, y: plotY, width: w - 12, height: max(1, bounds.height - plotY - 4))
     }
 }
 
@@ -594,25 +691,28 @@ final class CompactGeminiCardView: CompactAccountCardBaseView {
         let w = bounds.width
         let pad: CGFloat = 12
         iconView.frame = NSRect(x: pad, y: 10, width: 36, height: 36)
-        titleLabel.frame = NSRect(x: pad + 44, y: 10, width: 140, height: 20)
-        accountLabel.frame = NSRect(x: pad + 44, y: 30, width: 140, height: 14)
 
-        let blockW: CGFloat = 176
+        let blockW: CGFloat = 236
         let blockX = w - pad - blockW
-        let colW = (blockW - 1) / 2.0
+        let colW = (blockW - 2) / 3.0
 
-        sessionColumn.frame = NSRect(x: blockX, y: 8, width: colW, height: 51)
-        divider.frame = NSRect(x: blockX + colW, y: 14, width: 1, height: 38)
-        weekColumn.frame = NSRect(x: blockX + colW + 1, y: 8, width: colW, height: 51)
+        let headerTextW = max(80, blockX - (pad + 44) - 8)
+        titleLabel.frame = NSRect(x: pad + 44, y: 8, width: headerTextW, height: 22)
+        accountLabel.frame = NSRect(x: pad + 44, y: 31, width: headerTextW, height: 16)
 
-        quotaBar.frame = NSRect(x: blockX, y: 61, width: blockW, height: 7)
+        sessionColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 57)
+        divider.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 48)
+        weekColumn.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 57)
 
-        var plotY: CGFloat = 72
+        let barW: CGFloat = 176
+        quotaBar.frame = NSRect(x: w - pad - barW, y: 66, width: barW, height: 7)
+
+        var plotY: CGFloat = 78
         if !noticeLabel.isHidden {
-            noticeLabel.frame = NSRect(x: pad, y: plotY, width: w - pad * 2, height: 14)
-            plotY += 16
+            noticeLabel.frame = NSRect(x: pad, y: plotY, width: w - pad * 2, height: 15)
+            plotY += 17
         }
-        plotView.frame = NSRect(x: 6, y: plotY, width: w - 12, height: bounds.height - plotY - 4)
+        plotView.frame = NSRect(x: 6, y: plotY, width: w - 12, height: max(1, bounds.height - plotY - 4))
     }
 }
 
@@ -774,23 +874,25 @@ final class CompactDashboardView: NSView {
         let cardW = Self.viewWidth - Self.sidePadding * 2
         var y: CGFloat = 8
 
-        let codexH: CGFloat = 173
+        let codexH: CGFloat = codexCard.hasNotice ? 170 : 154
         codexCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: codexH)
         y += codexH + Self.cardGap
 
-        let claudeH: CGFloat = 139
+        let claudeH: CGFloat = claudeCard.hasNotice ? 170 : 154
         claudeCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: claudeH)
         y += claudeH + Self.cardGap
 
-        let geminiH: CGFloat = 132
-        geminiMainCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: geminiH)
-        y += geminiH + Self.cardGap
+        let geminiMainH: CGFloat = geminiMainCard.hasNotice ? 164 : 148
+        geminiMainCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: geminiMainH)
+        y += geminiMainH + Self.cardGap
 
-        geminiSecondCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: geminiH)
-        y += geminiH + Self.cardGap
+        let geminiSecondH: CGFloat = geminiSecondCard.hasNotice ? 164 : 148
+        geminiSecondCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: geminiSecondH)
+        y += geminiSecondH + Self.cardGap
 
-        geminiThirdCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: geminiH)
-        y += geminiH + 8
+        let geminiThirdH: CGFloat = geminiThirdCard.hasNotice ? 164 : 148
+        geminiThirdCard.frame = NSRect(x: Self.sidePadding, y: y, width: cardW, height: geminiThirdH)
+        y += geminiThirdH + 8
 
         frame = NSRect(x: 0, y: 0, width: Self.viewWidth, height: y)
         needsDisplay = true

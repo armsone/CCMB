@@ -703,15 +703,15 @@ private final class UsageMetricRowView: NSView {
 
     func apply(_ row: UsagePanelRow, width: CGFloat, height: CGFloat, theme: UsagePanelTheme) {
         labelField.stringValue = row.label
-        labelField.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        labelField.textColor = BKStyleTokens.secondaryInk
         valueField.stringValue = row.value
         valueField.isHidden = row.value.isEmpty
-        valueField.textColor = row.valueColor ?? (theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60))
+        valueField.textColor = row.valueColor ?? BKStyleTokens.bodyInk
         valueField.font = .systemFont(ofSize: 12, weight: row.isEmphasized ? .bold : .regular)
         let hasDetail = row.detail != nil
         detailField.stringValue = row.detail ?? ""
         detailField.isHidden = !hasDetail
-        detailField.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+        detailField.textColor = BKStyleTokens.mutedInk
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = row.detailAlignment
         paragraph.minimumLineHeight = Self.detailLineHeight
@@ -920,9 +920,9 @@ private final class UsageInUseBadgeView: NSView {
         label.stringValue = text
         if neutral {
             // Informational tag (plan name): quiet ink, never the red accent.
-            label.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+            label.textColor = BKStyleTokens.secondaryInk
         } else {
-            label.textColor = theme == .bk ? BKStyleTokens.signalRed : .controlAccentColor
+            label.textColor = BKStyleTokens.signalRed
         }
         let width = ceil(label.intrinsicContentSize.width) + 12
         label.frame = NSRect(x: 0, y: 1.5, width: width, height: 12)
@@ -979,7 +979,7 @@ private final class UsageSectionHeaderView: NSView {
         wellView.glyph = glyph
         wellView.theme = theme
         titleLabel.stringValue = title
-        titleLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        titleLabel.textColor = BKStyleTokens.secondaryInk
         wellView.frame = NSRect(x: 4, y: 3, width: 15, height: 15)
         titleLabel.frame = NSRect(x: 25, y: 4, width: max(0, width - 29), height: 13)
         setAccessibilityElement(true)
@@ -1089,11 +1089,11 @@ private final class UsageQuotaGroupView: NSView {
         wellView.glyph = group.glyph
         wellView.theme = theme
         titleLabel.stringValue = group.title
-        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
+        titleLabel.textColor = BKStyleTokens.charcoalInk
         contextLabel.stringValue = group.contextLabel ?? ""
         contextLabel.isHidden = group.contextLabel == nil
-        contextLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .tertiaryLabelColor
-        detailLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        contextLabel.textColor = BKStyleTokens.mutedInk
+        detailLabel.textColor = BKStyleTokens.secondaryInk
 
         var y: CGFloat = 0
         wellView.frame = NSRect(x: 0, y: y + 1, width: 15, height: 15)
@@ -1158,9 +1158,9 @@ private final class UsageQuotaGroupView: NSView {
                     ofSize: quota.percentText.count >= 4 ? 11 : 13,
                     weight: .regular
                 )
-                percentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
+                percentLabel.textColor = BKStyleTokens.bodyInk
                 captionLabel.stringValue = quota.caption
-                captionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+                captionLabel.textColor = BKStyleTokens.secondaryInk
                 ring.setAccessibilityElement(true)
                 ring.setAccessibilityLabel("\(group.title) \(quota.caption)")
                 ring.setAccessibilityValue(quota.accessibilityValue)
@@ -1284,9 +1284,9 @@ private final class UsageSupplementalQuotaView: NSView {
         ringView.setAccessibilityLabel(quota.caption)
         ringView.setAccessibilityValue(quota.accessibilityValue)
         percentLabel.stringValue = quota.percentText
-        percentLabel.textColor = theme == .bk ? BKStyleTokens.bodyInk : NSColor.labelColor.withAlphaComponent(0.60)
+        percentLabel.textColor = BKStyleTokens.bodyInk
         captionLabel.stringValue = quota.caption
-        captionLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        captionLabel.textColor = BKStyleTokens.secondaryInk
         let ringX = (width - diameter) / 2
         ringView.frame = NSRect(x: ringX, y: 0, width: diameter, height: diameter)
         percentLabel.frame = NSRect(x: ringX, y: (diameter - 16) / 2, width: diameter, height: 16)
@@ -1390,9 +1390,8 @@ private final class CapacityBlockView: NSView {
         width: CGFloat,
         theme: UsagePanelTheme
     ) {
-        let isBK = theme == .bk
-        let primary = isBK ? BKStyleTokens.bodyInk : NSColor.labelColor
-        let secondary = isBK ? BKStyleTokens.secondaryInk : NSColor.secondaryLabelColor
+        let primary = BKStyleTokens.bodyInk
+        let secondary = BKStyleTokens.secondaryInk
         let remaining = Self.percentValue(remainingText).map { min(max($0, 0), 100) }
         let isLow = remaining.map { $0 <= 15 && $0 > 0 } ?? false
 
@@ -1412,7 +1411,7 @@ private final class CapacityBlockView: NSView {
         usedLabel.textColor = secondary
         meter.fraction = (used ?? 0) / 100
         meter.barColor = color
-        meter.trackColor = isBK ? BKStyleTokens.barTrack : NSColor.labelColor.withAlphaComponent(0.1)
+        meter.trackColor = BKStyleTokens.barTrack
 
         let summary = remaining.map { "\(title) 남음 \(Self.percentText($0)), 사용 \(Self.percentText(100 - $0))" }
             ?? "\(title) 정보 없음"
@@ -1475,7 +1474,7 @@ private final class GeminiAccountRowView: NSView {
         showsDivider: Bool
     ) {
         titleLabel.stringValue = accountTitle
-        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
+        titleLabel.textColor = BKStyleTokens.charcoalInk
         dotView.layer?.backgroundColor = color.cgColor
         for view in [dotView, titleLabel] { view.toolTip = identityTip.isEmpty ? nil : identityTip }
         dotView.setAccessibilityElement(false)
@@ -1496,9 +1495,7 @@ private final class GeminiAccountRowView: NSView {
         weekBlock.frame = NSRect(x: blockX + blockWidth + gap, y: 0, width: blockWidth, height: CapacityBlockView.height)
 
         dividerLine.isHidden = !showsDivider
-        dividerLine.layer?.backgroundColor = (theme == .bk
-            ? BKStyleTokens.chromeLine.withAlphaComponent(0.35)
-            : NSColor.separatorColor.withAlphaComponent(0.25)).cgColor
+        dividerLine.layer?.backgroundColor = BKStyleTokens.chromeLine.withAlphaComponent(0.35).cgColor
         dividerLine.frame = NSRect(x: 0, y: Self.height - 2, width: width, height: 1)
     }
 }
@@ -1596,9 +1593,9 @@ private final class UsageColumnView: NSView {
     @discardableResult
     func apply(_ column: UsagePanelColumn, width: CGFloat, theme: UsagePanelTheme) -> CGFloat {
         titleLabel.stringValue = column.title
-        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : column.accentColor
-        accountLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
-        refreshLabel.textColor = theme == .bk ? BKStyleTokens.mutedInk : .secondaryLabelColor
+        titleLabel.textColor = BKStyleTokens.charcoalInk
+        accountLabel.textColor = BKStyleTokens.secondaryInk
+        refreshLabel.textColor = BKStyleTokens.mutedInk
 
         titleMarkView.style = ProviderTitleMarkView.Style(providerTitle: column.title)
         titleMarkView.frame = NSRect(x: 2, y: 2, width: 14, height: 14)
@@ -1772,7 +1769,7 @@ private final class UsageColumnView: NSView {
                                              resetCreditRow.map { "초기화권 \($0.value)" },
                                              resetCreditRow?.detail]
                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
-                codexCreditsLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+                codexCreditsLabel.textColor = BKStyleTokens.secondaryInk
                 codexCreditsLabel.frame = NSRect(x: 0, y: y, width: width, height: 16)
                 y += 18
             }
@@ -2035,6 +2032,7 @@ final class PanelBackgroundView: NSVisualEffectView {
     /// enamel cards instead of inheriting the pale system popover material.
     /// It lives inside this view, so `setOpacity` fades it with the material.
     private let bkTintView = NSView()
+    let rimView = PanelRimView(frame: .zero)
 
     init(blendingMode: NSVisualEffectView.BlendingMode) {
         super.init(frame: .zero)
@@ -2053,21 +2051,15 @@ final class PanelBackgroundView: NSVisualEffectView {
     }
 
     func applyTheme(_ theme: UsagePanelTheme) {
-        if theme == .bk {
-            appearance = NSAppearance(named: .darkAqua)
-            material = .hudWindow
-            bkTintView.isHidden = false
-            let dark = NSAppearance(named: .darkAqua)
-            dark?.performAsCurrentDrawingAppearance {
-                bkTintView.layer?.backgroundColor = BKStyleTokens.panelBackground.withAlphaComponent(0.88).cgColor
-            }
-        } else {
-            appearance = NSAppearance(named: .aqua)
-            material = .popover
-            bkTintView.isHidden = false
-            // Pale ice blue background (#F0F9FD to #E9F6FE)
-            bkTintView.layer?.backgroundColor = NSColor(srgbRed: 0xF0 / 255.0, green: 0xF9 / 255.0, blue: 0xFD / 255.0, alpha: 0.96).cgColor
-        }
+        appearance = theme.isDark ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
+        material = theme.isDark ? .hudWindow : .popover
+        bkTintView.isHidden = false
+        let palette = theme.palette
+        bkTintView.layer?.backgroundColor = palette.bg.withAlphaComponent(theme.isDark ? 0.94 : 0.96).cgColor
+        // Window rim: cyan under Jarvis, crimson under Ultron; none for the light themes.
+        // Drawn by `rimView` so it stacks above the opaque dashboard body.
+        rimView.layer?.borderWidth = theme.isDark ? 1 : 0
+        rimView.layer?.borderColor = theme.isDark ? palette.border2.cgColor : nil
     }
 
     required init?(coder: NSCoder) {
@@ -2076,7 +2068,26 @@ final class PanelBackgroundView: NSVisualEffectView {
 
     func setOpacity(_ opacity: Double) {
         alphaValue = CGFloat(UsageCore.normalizedPanelOpacity(opacity))
+        rimView.alphaValue = alphaValue
     }
+}
+
+/// Transparent, click-through outline layered above all panel content.
+@MainActor
+final class PanelRimView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.masksToBounds = true
+        autoresizingMask = [.width, .height]
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// Narrow vertical summary — Codex, Claude, then Gemini, one full-width card
@@ -2098,7 +2109,7 @@ final class SplitUsagePanelView: NSView {
 
     /// Theme and card frames captured at apply time so `draw(_:)` can paint
     /// the cards behind the provider content.
-    private var appliedTheme: UsagePanelTheme = .classic
+    private var appliedTheme: UsagePanelTheme = .light
     private var cardRects: [NSRect] = []
 
     init() {
@@ -2117,16 +2128,7 @@ final class SplitUsagePanelView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         for rect in cardRects {
-            if appliedTheme == .bk {
-                BKStyleTokens.drawCard(in: rect, radius: 9)
-            } else {
-                let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
-                NSColor.labelColor.withAlphaComponent(0.045).setFill()
-                path.fill()
-                NSColor.separatorColor.setStroke()
-                path.lineWidth = 1
-                path.stroke()
-            }
+            BKStyleTokens.drawCard(in: rect, radius: 9)
         }
     }
 
@@ -2179,18 +2181,85 @@ final class SplitUsagePanelView: NSView {
 /// Compact theme selector for the panel header. Pops its own explicit menu
 /// the same way `IntervalControlButton` does, because popup buttons hosted
 /// inside a tracking `NSMenu` are unreliable.
+/// Accessible theme selector for the panel header conforming to Byungki-style interaction:
+/// short click cycles through the 4 requested themes (light -> friday -> jarvis -> ultron -> light),
+/// long-press (500ms) or secondary-click/ArrowDown/Shift+F10 opens the 4-theme selection menu.
 @MainActor
 final class ThemeControlButton: RolloverButton {
     var onSelect: ((UsagePanelTheme) -> Void)?
+    private var longPressTimer: Timer?
+    private var didTriggerLongPress = false
+    private var mouseDownLocation: NSPoint = .zero
 
     func updateDisplay() {
         let theme = UsagePanelThemeStore.current
         title = "테마 · \(theme.displayName)"
-        setAccessibilityLabel("패널 테마 선택")
+        if theme.isDark {
+            // Current-selection label carries the theme accent; same text, same width.
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+            attributedTitle = NSAttributedString(string: title, attributes: [
+                .font: font ?? NSFont.systemFont(ofSize: 11),
+                .foregroundColor: theme.palette.accentStrong,
+                .paragraphStyle: style
+            ])
+        }
+        let next = theme.nextTheme
+        let accessibleLabel = "병기스타일 테마: \(theme.displayName) (누르면 \(next.displayName), 길게 누르면 목록)"
+        setAccessibilityLabel(accessibleLabel)
         setAccessibilityValue(theme.displayName)
+        setAccessibilityHelp("누르면 \(next.displayName)(으)로 전환, 길게 누르면 테마 목록을 엽니다.")
     }
 
     override func mouseDown(with event: NSEvent) {
+        mouseDownLocation = event.locationInWindow
+        didTriggerLongPress = false
+        longPressTimer?.invalidate()
+
+        longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.didTriggerLongPress = true
+                self.presentThemeMenuFromButton()
+            }
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        super.mouseDragged(with: event)
+        let cur = event.locationInWindow
+        let dx = cur.x - mouseDownLocation.x
+        let dy = cur.y - mouseDownLocation.y
+        if sqrt(dx * dx + dy * dy) > 10 {
+            longPressTimer?.invalidate()
+            longPressTimer = nil
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        longPressTimer?.invalidate()
+        longPressTimer = nil
+
+        if didTriggerLongPress {
+            didTriggerLongPress = false
+            return
+        }
+
+        let localPoint = convert(event.locationInWindow, from: nil)
+        if bounds.contains(localPoint) {
+            cycleNextTheme()
+        }
+    }
+
+    func cycleNextTheme() {
+        let current = UsagePanelThemeStore.current
+        let next = current.nextTheme
+        UsagePanelThemeStore.current = next
+        onSelect?(next)
+        updateDisplay()
+    }
+
+    func presentThemeMenuFromButton() {
         guard let window else { return }
         let frameInWindow = convert(bounds, to: nil)
         let screenOrigin = window.convertToScreen(frameInWindow).origin
@@ -2205,7 +2274,7 @@ final class ThemeControlButton: RolloverButton {
         let menu = NSMenu()
         let current = UsagePanelThemeStore.current
         for theme in UsagePanelTheme.allCases {
-            let item = NSMenuItem(title: theme.displayName, action: #selector(selectTheme(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: theme.displayName, action: #selector(selectThemeMenuItem(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = theme.rawValue
             item.state = theme == current ? .on : .off
@@ -2214,12 +2283,27 @@ final class ThemeControlButton: RolloverButton {
         _ = menu.popUp(positioning: nil, at: screenOrigin, in: nil)
     }
 
-    @objc private func selectTheme(_ sender: NSMenuItem) {
+    @objc private func selectThemeMenuItem(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let theme = UsagePanelTheme(rawValue: raw)
         else { return }
+        UsagePanelThemeStore.current = theme
         onSelect?(theme)
         updateDisplay()
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        presentThemeMenuFromButton()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 49 /* Space */ || event.keyCode == 36 /* Return */ {
+            cycleNextTheme()
+        } else if event.keyCode == 125 /* ArrowDown */ || (event.modifierFlags.contains(.shift) && event.keyCode == 109 /* F10 */) {
+            presentThemeMenuFromButton()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }
 
@@ -2316,9 +2400,19 @@ final class UsagePanelHeaderView: NSView {
     func applyThemeState() {
         let theme = UsagePanelThemeStore.current
         wellView.theme = theme
-        titleLabel.textColor = theme == .bk ? BKStyleTokens.charcoalInk : .labelColor
-        updatedLabel.textColor = theme == .bk ? BKStyleTokens.secondaryInk : .secondaryLabelColor
+        titleLabel.textColor = BKStyleTokens.charcoalInk
+        updatedLabel.textColor = BKStyleTokens.secondaryInk
         themeButton.updateDisplay()
+        needsDisplay = true
+    }
+
+    /// Header rule in the theme accent (dark themes only).
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard BKStyleTokens.isAccentTheme else { return }
+        BKStyleTokens.structureHairline.setFill()
+        let inset = UsagePanelLayout.sidePadding
+        NSBezierPath(rect: NSRect(x: inset, y: bounds.maxY - 1, width: max(0, bounds.width - inset * 2), height: 1)).fill()
     }
 
     @objc private func refreshTapped() {
@@ -2332,7 +2426,7 @@ final class UsagePanelHeaderView: NSView {
     private func layoutContent() {
         let sidePadding = UsagePanelLayout.sidePadding
         let settingsWidth: CGFloat = 36
-        let themeWidth: CGFloat = 86
+        let themeWidth: CGFloat = 94
         let refreshWidth: CGFloat = 66
         let buttonHeight: CGFloat = 22
         let buttonY = (Self.viewHeight - buttonHeight) / 2
@@ -2493,12 +2587,17 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         panel.becomesKeyOnlyIfNeeded = true
 
         let rootView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+        rootView.wantsLayer = true
+        rootView.layer?.cornerRadius = 10
+        rootView.layer?.masksToBounds = true
         containerView.frame = rootView.bounds
         containerView.autoresizingMask = [.width, .height]
         contentContainer.frame = rootView.bounds
         contentContainer.autoresizingMask = [.width, .height]
         rootView.addSubview(containerView)
         rootView.addSubview(contentContainer)
+        containerView.rimView.frame = rootView.bounds
+        rootView.addSubview(containerView.rimView)
         panel.contentView = rootView
 
         super.init(window: panel)
@@ -2597,7 +2696,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         lastGrokRefreshInterval = grokRefreshInterval
 
         let theme = UsagePanelThemeStore.current
-        window?.appearance = theme == .bk ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
+        window?.appearance = theme.isDark ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
         containerView.applyTheme(theme)
         compactDashboardView.apply(
             model: model,
@@ -2629,7 +2728,10 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         headerView.applyThemeState()
         headerView.setSettingsExpanded(showsSettings)
         let headerHeight = UsagePanelHeaderView.viewHeight
-        let contentHeight = Self.topPadding + Self.bottomPadding
+        // The dashboard already carries its own bottom padding, so only the
+        // expanded settings stack needs the outer one.
+        let bottomInset = showsSettings ? Self.bottomPadding : 0
+        let contentHeight = Self.topPadding + bottomInset
             + headerHeight
             + compactDashboardView.frame.height
             + settingsGaps
@@ -2640,7 +2742,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
             + lifecycleHeight
         let contentWidth = CompactDashboardView.viewWidth + Self.horizontalPadding * 2
 
-        var y = Self.bottomPadding
+        var y = bottomInset
         if showsSettings {
             lifecycleActionsView.frame.origin = NSPoint(x: Self.horizontalPadding, y: y)
             y += lifecycleHeight + Self.sectionGap
@@ -2785,6 +2887,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     private func updateScaledContentLayout() {
         guard let rootView = window?.contentView else { return }
         containerView.frame = rootView.bounds
+        containerView.rimView.frame = rootView.bounds
         contentContainer.frame = rootView.bounds
         contentContainer.bounds = NSRect(origin: .zero, size: naturalContentSize)
     }

@@ -167,7 +167,7 @@ enum UsageTrendBucketing {
 final class UsageTrendPlotView: NSView {
     static let windowDuration: TimeInterval = 24 * 60 * 60
     static let plotHeight: CGFloat = 112
-    static let axisHeight: CGFloat = 16
+    static let axisHeight: CGFloat = 18
     private static let topInset: CGFloat = 8
     private static let yAxisWidth: CGFloat = 36
     private static let rightInset: CGFloat = 6
@@ -237,11 +237,45 @@ final class UsageTrendPlotView: NSView {
         customPlotHeight ?? Self.plotHeight
     }
 
-    private var plot: NSRect {
-        let axisH = showsAxisLabels ? Self.axisHeight : 10
-        let yAxisW = showsAxisLabels ? Self.yAxisWidth : 26
-        let topIn = showsAxisLabels ? Self.topInset : 4
-        let rightIn = showsAxisLabels ? Self.rightInset : 4
+    private func measuredYAxisWidth(for yMax: Double) -> CGFloat {
+        let fontSize: CGFloat = showsAxisLabels ? 10 : 8.5
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        let attr: [NSAttributedString.Key: Any] = [.font: font]
+        let candidateLabels = [
+            tickTitle(yMax),
+            tickTitle(yMax / 2),
+            tickTitle(0)
+        ]
+        let maxLabelWidth = candidateLabels.map { ($0 as NSString).size(withAttributes: attr).width }.max() ?? 0
+        let defaultWidth: CGFloat = showsAxisLabels ? Self.yAxisWidth : 26
+        return max(defaultWidth, ceil(maxLabelWidth + 7))
+    }
+
+    private var effectiveAxisHeight: CGFloat {
+        let fontSize: CGFloat = showsAxisLabels ? 10 : 9
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        let sample = ("24시간 전" as NSString).size(withAttributes: [.font: font])
+        let needed = ceil(sample.height) + 4
+        return max(showsAxisLabels ? Self.axisHeight : 16, needed)
+    }
+
+    private func currentYMax(data: Plotted) -> Double {
+        let positiveAmounts = data.buckets.flatMap { $0.map(\.amount) }.filter { $0.isFinite && $0 > 0 }
+        return positiveAmounts.max() ?? 1.0
+    }
+
+    private func effectivePlot(for yMax: Double? = nil) -> NSRect {
+        let effectiveYMax: Double
+        if let yMax {
+            effectiveYMax = yMax
+        } else {
+            let data = plotted(now: Date())
+            effectiveYMax = currentYMax(data: data)
+        }
+        let axisH = effectiveAxisHeight
+        let yAxisW = measuredYAxisWidth(for: effectiveYMax)
+        let topIn = showsAxisLabels ? Self.topInset : 6
+        let rightIn = showsAxisLabels ? Self.rightInset : 6
         return NSRect(
             x: yAxisW,
             y: topIn,
@@ -250,16 +284,27 @@ final class UsageTrendPlotView: NSView {
         )
     }
 
+    private var plot: NSRect {
+        effectivePlot()
+    }
+
     /// Newest at the left edge, 24 hours ago at the right edge.
-    private func x(for date: Date, now: Date) -> CGFloat {
+    private func x(for date: Date, now: Date, in rect: NSRect) -> CGFloat {
         let fraction = min(max(now.timeIntervalSince(date) / Self.windowDuration, 0), 1)
-        return plot.minX + CGFloat(fraction) * plot.width
+        return rect.minX + CGFloat(fraction) * rect.width
+    }
+
+    private func x(for date: Date, now: Date) -> CGFloat {
+        x(for: date, now: now, in: plot)
+    }
+
+    private func y(for amount: Double, yMax: Double, in rect: NSRect) -> CGFloat {
+        guard yMax > 0 else { return rect.maxY }
+        return rect.maxY - CGFloat(min(max(amount, 0) / yMax, 1)) * rect.height
     }
 
     private func y(for amount: Double, yMax: Double) -> CGFloat {
-        let rect = plot
-        guard yMax > 0 else { return rect.maxY }
-        return rect.maxY - CGFloat(min(max(amount, 0) / yMax, 1)) * rect.height
+        y(for: amount, yMax: yMax, in: plot)
     }
 
     /// Samples inside the trailing window, per series, newest first.
@@ -304,8 +349,12 @@ final class UsageTrendPlotView: NSView {
         return Plotted(now: now, earliest: earliest, gaps: gaps, buckets: buckets)
     }
 
+    private func x(for bucket: UsageTrendBucket, now: Date, in rect: NSRect) -> CGFloat {
+        x(for: bucket.midpoint, now: now, in: rect)
+    }
+
     private func x(for bucket: UsageTrendBucket, now: Date) -> CGFloat {
-        x(for: bucket.midpoint, now: now)
+        x(for: bucket.midpoint, now: now, in: plot)
     }
 
     /// A round axis maximum at or above the peak, so the three grid lines
@@ -326,11 +375,19 @@ final class UsageTrendPlotView: NSView {
         let text: String
         if value == 0 {
             text = "0"
-        } else if value >= 10 || value.rounded() == value {
+        } else if value.rounded() == value {
             text = String(format: "%.0f", value)
         } else {
-            text = String(format: "%.2f", value)
-                .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
+            var formatted = String(format: "%.2f", value)
+            if formatted.contains(".") {
+                while formatted.hasSuffix("0") {
+                    formatted.removeLast()
+                }
+                if formatted.hasSuffix(".") {
+                    formatted.removeLast()
+                }
+            }
+            text = formatted
         }
         return isPercent ? "\(text)%" : text
     }
@@ -340,16 +397,14 @@ final class UsageTrendPlotView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard bounds.width > 0, bounds.height > 0, let context = NSGraphicsContext.current?.cgContext else { return }
         let now = Date()
-        let rect = plot
-        let isBK = UsagePanelThemeStore.current == .bk
-        let labelColor = isBK ? BKStyleTokens.secondaryInk : NSColor.secondaryLabelColor
-        let mutedColor = isBK ? BKStyleTokens.mutedInk : NSColor.tertiaryLabelColor
+        let labelColor = BKStyleTokens.secondaryInk
+        let mutedColor = BKStyleTokens.mutedInk
         let axisAttributes: [NSAttributedString.Key: Any] = [.font: Self.axisFont, .foregroundColor: labelColor]
         let noteAttributes: [NSAttributedString.Key: Any] = [.font: Self.noteFont, .foregroundColor: mutedColor]
 
         let data = plotted(now: now)
-        let peak = data.buckets.flatMap { $0.map(\.amount) }.max() ?? 0
-        let yMax = Self.niceMaximum(for: peak)
+        let yMax = currentYMax(data: data)
+        let rect = effectivePlot(for: yMax)
 
         drawGrid(in: rect, yMax: yMax, attributes: axisAttributes)
         drawTimeAxis(in: rect, now: now, attributes: axisAttributes)
@@ -361,7 +416,7 @@ final class UsageTrendPlotView: NSView {
         }
 
         // Older than the first recorded sample: hatched and labelled, never zero.
-        let earliestX = x(for: earliest, now: now)
+        let earliestX = x(for: earliest, now: now, in: rect)
         if rect.maxX - earliestX > 6 {
             let blank = NSRect(x: earliestX, y: rect.minY, width: rect.maxX - earliestX, height: rect.height)
             drawHatch(in: blank, context: context)
@@ -388,7 +443,7 @@ final class UsageTrendPlotView: NSView {
             for run in UsageTrendBucketing.runs(data.buckets[index], gap: data.gaps[index]) {
                 let points = run.map {
                     TrendPoint(
-                        location: NSPoint(x: x(for: $0, now: now), y: y(for: $0.amount, yMax: yMax)),
+                        location: NSPoint(x: x(for: $0, now: now, in: rect), y: y(for: $0.amount, yMax: yMax, in: rect)),
                         isEdge: $0.isEdge
                     )
                 }
@@ -481,21 +536,22 @@ final class UsageTrendPlotView: NSView {
     }
 
     private func drawGrid(in rect: NSRect, yMax: Double, attributes: [NSAttributedString.Key: Any]) {
-        let isBK = UsagePanelThemeStore.current == .bk
+        let isBK = UsagePanelThemeStore.current.isDark
         let gridColor = (isBK ? NSColor.white : NSColor.labelColor).withAlphaComponent(isBK ? 0.10 : 0.12)
         let font = NSFont.systemFont(ofSize: showsAxisLabels ? 10 : 8.5, weight: .medium)
         var tickAttributes = attributes
         tickAttributes[.font] = font
         for step in 0...2 {
             let value = yMax * Double(step) / 2
-            let lineY = y(for: value, yMax: yMax)
+            let lineY = y(for: value, yMax: yMax, in: rect)
             gridColor.setFill()
             NSBezierPath(rect: NSRect(x: rect.minX, y: lineY - 0.5, width: rect.width, height: step == 0 ? 1 : 0.5)).fill()
             let label = tickTitle(value) as NSString
             let size = label.size(withAttributes: tickAttributes)
-            let axisH = showsAxisLabels ? Self.axisHeight : 10
+            let axisH = effectiveAxisHeight
             let labelY = min(max(lineY - size.height / 2, 0), bounds.height - axisH - size.height + 2)
-            label.draw(at: NSPoint(x: rect.minX - 4 - size.width, y: labelY), withAttributes: tickAttributes)
+            let labelX = max(2, rect.minX - 4 - size.width)
+            label.draw(at: NSPoint(x: labelX, y: labelY), withAttributes: tickAttributes)
         }
         // Faint vertical guides at every 6 hours.
         for hours in [6.0, 12.0, 18.0] {
@@ -507,7 +563,6 @@ final class UsageTrendPlotView: NSView {
 
     /// 현재/지금 (left) … 24시간 전 (right), at the real window positions.
     private func drawTimeAxis(in rect: NSRect, now: Date, attributes: [NSAttributedString.Key: Any]) {
-        let labelY = rect.maxY + 2
         let fontSize: CGFloat = showsAxisLabels ? 10 : 9
         let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
         var fontAttributes = attributes
@@ -518,8 +573,12 @@ final class UsageTrendPlotView: NSView {
             let leftText = "지금" as NSString
             let rightText = "24시간 전" as NSString
             let rightSize = rightText.size(withAttributes: fontAttributes)
+            let leftSize = leftText.size(withAttributes: fontAttributes)
+            let textH = max(leftSize.height, rightSize.height)
+            let labelY = min(rect.maxY + 2, bounds.height - ceil(textH) - 1)
             leftText.draw(at: NSPoint(x: rect.minX, y: labelY), withAttributes: fontAttributes)
-            rightText.draw(at: NSPoint(x: rect.maxX - rightSize.width, y: labelY), withAttributes: fontAttributes)
+            let rightX = min(rect.maxX - rightSize.width, bounds.width - rightSize.width - 2)
+            rightText.draw(at: NSPoint(x: max(rect.minX + leftSize.width + 4, rightX), y: labelY), withAttributes: fontAttributes)
             return
         }
 
@@ -533,14 +592,15 @@ final class UsageTrendPlotView: NSView {
             var originX = tickX - size.width / 2
             if stop.hours == 0 { originX = rect.minX }
             if stop.hours == 24 { originX = rect.maxX - size.width }
-            originX = min(max(originX, 0), bounds.width - size.width)
+            originX = min(max(originX, 0), bounds.width - size.width - 1)
+            let labelY = min(rect.maxY + 2, bounds.height - ceil(size.height) - 1)
             text.draw(at: NSPoint(x: originX, y: labelY), withAttributes: fontAttributes)
         }
     }
 
     private func drawHatch(in rect: NSRect, context: CGContext) {
         guard rect.width > 1, rect.height > 1 else { return }
-        let isBK = UsagePanelThemeStore.current == .bk
+        let isBK = UsagePanelThemeStore.current.isDark
         context.saveGState()
         context.clip(to: rect)
         (isBK ? NSColor.white : NSColor.labelColor).withAlphaComponent(isBK ? 0.045 : 0.05).setFill()
@@ -591,7 +651,7 @@ final class UsageTrendPlotView: NSView {
                 parts.append(entry.label.isEmpty ? "—" : "\(entry.label) —")
                 continue
             }
-            let point = NSPoint(x: x(for: bucket, now: now), y: y(for: bucket.amount, yMax: yMax))
+            let point = NSPoint(x: x(for: bucket, now: now, in: rect), y: y(for: bucket.amount, yMax: yMax, in: rect))
             hoverX = hoverX ?? point.x
             range = range ?? (bucket.from, bucket.to)
             inProgress = inProgress || bucket.isInProgress
@@ -634,7 +694,7 @@ final class UsageTrendPlotView: NSView {
         let data = plotted(now: Date())
         var best: (start: Date, distance: CGFloat)?
         for bucket in data.buckets.flatMap({ $0 }) {
-            let distance = abs(x(for: bucket, now: data.now) - point.x)
+            let distance = abs(x(for: bucket, now: data.now, in: rect) - point.x)
             if distance <= Self.hoverRadius, distance < (best?.distance ?? .greatestFiniteMagnitude) {
                 best = (bucket.start, distance)
             }
@@ -750,9 +810,8 @@ final class UsageHistoryChartView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let isBK = UsagePanelThemeStore.current == .bk
-        let primary = isBK ? BKStyleTokens.bodyInk : NSColor.labelColor
-        let secondary = isBK ? BKStyleTokens.secondaryInk : NSColor.secondaryLabelColor
+        let primary = BKStyleTokens.bodyInk
+        let secondary = BKStyleTokens.secondaryInk
 
         let card = NSRect(
             x: Self.cardInset,
@@ -760,16 +819,7 @@ final class UsageHistoryChartView: NSView {
             width: bounds.width - Self.cardInset * 2,
             height: Self.cardHeight
         )
-        if isBK {
-            BKStyleTokens.drawCard(in: card, radius: Self.cardCornerRadius)
-        } else {
-            let path = NSBezierPath(roundedRect: card, xRadius: Self.cardCornerRadius, yRadius: Self.cardCornerRadius)
-            NSColor.labelColor.withAlphaComponent(0.045).setFill()
-            path.fill()
-            NSColor.separatorColor.setStroke()
-            path.lineWidth = 1
-            path.stroke()
-        }
+        BKStyleTokens.drawCard(in: card, radius: Self.cardCornerRadius)
 
         let contentX = card.minX + Self.cardPadding
         let titleY = card.minY + Self.cardPadding
