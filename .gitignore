@@ -1,0 +1,11 @@
+.gradle/
+.gradle-home/
+.android-home/
+**/build/
+local.properties
+.handoff/
+.idea/
+*.iml
+.DS_Store
+.gemini-cmd-*/
+.cmd-trace-*.jsonl
