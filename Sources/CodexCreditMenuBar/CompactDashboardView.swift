@@ -195,11 +195,12 @@ final class CompactQuotaMetricColumnView: NSView {
     }()
     private let resetField: NSTextField = {
         let field = NSTextField(labelWithString: "")
-        field.font = .monospacedDigitSystemFont(ofSize: 9.5, weight: .regular)
+        field.font = .monospacedDigitSystemFont(ofSize: 9, weight: .regular)
         field.textColor = CCMBDashPalette.muted
         field.alignment = .center
-        field.maximumNumberOfLines = 1
-        field.lineBreakMode = .byTruncatingTail
+        field.maximumNumberOfLines = 2
+        field.lineBreakMode = .byWordWrapping
+        field.usesSingleLineMode = false
         return field
     }()
 
@@ -216,11 +217,24 @@ final class CompactQuotaMetricColumnView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    static func formatResetDisplay(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.contains("\n") { return trimmed }
+        guard trimmed.contains(":") else { return trimmed }
+        let parts = trimmed.components(separatedBy: " ").filter { !$0.isEmpty }
+        if parts.count >= 2 {
+            let datePart = parts.dropLast().joined(separator: " ")
+            let timePart = parts.last!
+            return "\(datePart)\n\(timePart)"
+        }
+        return trimmed
+    }
+
     func apply(label: String, value: String, color: NSColor, reset: String) {
         labelField.stringValue = label
         valueField.stringValue = value
         valueField.textColor = color
-        resetField.stringValue = reset
+        resetField.stringValue = Self.formatResetDisplay(reset)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -232,9 +246,9 @@ final class CompactQuotaMetricColumnView: NSView {
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
         let w = bounds.width
-        labelField.frame = NSRect(x: 0, y: 0, width: w, height: 15)
-        valueField.frame = NSRect(x: 0, y: 15, width: w, height: 28)
-        resetField.frame = NSRect(x: 0, y: 43, width: w, height: 14)
+        labelField.frame = NSRect(x: 0, y: 0, width: w, height: 13)
+        valueField.frame = NSRect(x: 0, y: 13, width: w, height: 25)
+        resetField.frame = NSRect(x: 0, y: 38, width: w, height: 23)
     }
 }
 
@@ -494,15 +508,15 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
 
         voucherLabel.frame = NSRect(x: blockX, y: 6, width: colW, height: 15)
         expiryValue.frame = NSRect(x: blockX, y: 23, width: colW, height: 32)
-        statDivider1.frame = NSRect(x: blockX + colW, y: 10, width: 1, height: 48)
+        statDivider1.frame = NSRect(x: blockX + colW, y: 10, width: 1, height: 50)
 
-        quotaColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 57)
-        statDivider2.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 48)
+        quotaColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 61)
+        statDivider2.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 50)
 
         tokenLabel.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 15)
         tokenValue.frame = NSRect(x: blockX + colW * 2 + 2, y: 23, width: colW, height: 28)
 
-        quotaBar.frame = NSRect(x: w - pad - quotaW, y: 66, width: quotaW, height: 7)
+        quotaBar.frame = NSRect(x: w - pad - quotaW, y: 69, width: quotaW, height: 7)
 
         var plotY: CGFloat = 78
         if !noticeLabel.isHidden {
@@ -601,16 +615,16 @@ final class CompactClaudeCardView: CompactAccountCardBaseView {
         titleLabel.frame = NSRect(x: pad + 44, y: 8, width: headerTextW, height: 22)
         accountLabel.frame = NSRect(x: pad + 44, y: 31, width: headerTextW, height: 16)
 
-        fableColumn.frame = NSRect(x: blockX, y: 6, width: colW, height: 57)
-        divider1.frame = NSRect(x: blockX + colW, y: 10, width: 1, height: 48)
+        fableColumn.frame = NSRect(x: blockX, y: 6, width: colW, height: 61)
+        divider1.frame = NSRect(x: blockX + colW, y: 10, width: 1, height: 50)
 
-        sessionColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 57)
-        divider2.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 48)
+        sessionColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 61)
+        divider2.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 50)
 
-        weekColumn.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 57)
+        weekColumn.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 61)
 
         let barW: CGFloat = 176
-        quotaBar.frame = NSRect(x: w - pad - barW, y: 66, width: barW, height: 7)
+        quotaBar.frame = NSRect(x: w - pad - barW, y: 69, width: barW, height: 7)
 
         var plotY: CGFloat = 78
         if !noticeLabel.isHidden {
@@ -700,12 +714,12 @@ final class CompactGeminiCardView: CompactAccountCardBaseView {
         titleLabel.frame = NSRect(x: pad + 44, y: 8, width: headerTextW, height: 22)
         accountLabel.frame = NSRect(x: pad + 44, y: 31, width: headerTextW, height: 16)
 
-        sessionColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 57)
-        divider.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 48)
-        weekColumn.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 57)
+        sessionColumn.frame = NSRect(x: blockX + colW + 1, y: 6, width: colW, height: 61)
+        divider.frame = NSRect(x: blockX + colW * 2 + 1, y: 10, width: 1, height: 50)
+        weekColumn.frame = NSRect(x: blockX + colW * 2 + 2, y: 6, width: colW, height: 61)
 
         let barW: CGFloat = 176
-        quotaBar.frame = NSRect(x: w - pad - barW, y: 66, width: barW, height: 7)
+        quotaBar.frame = NSRect(x: w - pad - barW, y: 69, width: barW, height: 7)
 
         var plotY: CGFloat = 78
         if !noticeLabel.isHidden {
