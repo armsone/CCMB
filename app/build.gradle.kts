@@ -11,10 +11,10 @@ android {
         applicationId = "com.armsone.ccmb"
         minSdk = 26
         targetSdk = 37
-        versionCode = 428909
-        versionName = "0.8.2"
+        versionCode = 428911
+        versionName = "0.8.4"
 
-        buildConfigField("String", "BUILD_STAMP", "\"202610252029\"")
+        buildConfigField("String", "BUILD_STAMP", "\"202610260958\"")
     }
 
     compileOptions {

@@ -99,6 +99,7 @@ fun DashboardScreen(
     val palette = LocalCCMBPalette.current
     val weatherReading by weatherStore.reading.collectAsState()
     val refreshProblem by store.refreshProblem.collectAsState()
+    val nasNeedsLogin by store.nasNeedsLogin.collectAsState()
     val nasBusy by store.nasRefreshBusy.collectAsState()
     val currentSource by store.displayedSource.collectAsState()
     val isTV = LocalIsTV.current
@@ -214,8 +215,15 @@ fun DashboardScreen(
                     )
                 }
 
-                // Error banner
-                if (refreshProblem != null) {
+                // Auth error or regular error banner
+                if (nasNeedsLogin && currentSource == PreferredSource.NAS) {
+                    val loginMsg = refreshProblem ?: "NAS에 다시 로그인해 주세요."
+                    BannerCard(
+                        text = "$loginMsg · 탭하여 NAS 로그인",
+                        isWarning = true,
+                        onClick = { store.requestNASLogin() }
+                    )
+                } else if (refreshProblem != null) {
                     BannerCard(
                         text = refreshProblem!!,
                         isWarning = true
@@ -223,10 +231,11 @@ fun DashboardScreen(
                 }
 
                 // Calculate card heights
+                val hasErrorBanner = (nasNeedsLogin && currentSource == PreferredSource.NAS) || (refreshProblem != null)
                 val bannerCount = (if (isCatalogMode) 1 else 0) +
                         (if (currentSource == PreferredSource.FILE) 1 else 0) +
                         (if (nasBusy || snapshot.collectionBusy) 1 else 0) +
-                        (if (refreshProblem != null) 1 else 0)
+                        (if (hasErrorBanner) 1 else 0)
 
                 val heights = calculateCardHeights(
                     services = cardServices,
@@ -527,6 +536,15 @@ private fun DashboardHeader(
                             store.useNAS()
                         }
                     )
+                    if (store.displayedSource.value == PreferredSource.NAS) {
+                        DropdownMenuItem(
+                            text = { Text("NAS 로그인") },
+                            onClick = {
+                                showSourceMenu = false
+                                store.requestNASLogin()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("로컬 파일(JSON) 가져오기") },
                         onClick = {

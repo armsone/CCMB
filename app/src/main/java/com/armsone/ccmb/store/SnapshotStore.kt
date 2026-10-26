@@ -53,6 +53,11 @@ class SnapshotStore(
     private val _isNASLoginPresented = MutableStateFlow(false)
     val isNASLoginPresented: StateFlow<Boolean> = _isNASLoginPresented.asStateFlow()
 
+    private val _nasNeedsLogin = MutableStateFlow(false)
+    val nasNeedsLogin: StateFlow<Boolean> = _nasNeedsLogin.asStateFlow()
+
+    private var hasAutoPromptedForEpisode = false
+
     private val _nasConnecting = MutableStateFlow(false)
     val nasConnecting: StateFlow<Boolean> = _nasConnecting.asStateFlow()
 
@@ -100,6 +105,9 @@ class SnapshotStore(
         val prefSource = prefs.getString(PREFS_PREFERRED_SOURCE, "nas")
 
         if (prefSource == "file") {
+            _nasNeedsLogin.value = false
+            _isNASLoginPresented.value = false
+            hasAutoPromptedForEpisode = false
             _displayedSource.value = PreferredSource.FILE
             _sourceFileName.value = prefs.getString(PREFS_PICKED_FILE_NAME, null)
 
@@ -139,16 +147,23 @@ class SnapshotStore(
 
     fun connectNAS() {
         _isNASLoginPresented.value = false
+        _nasNeedsLogin.value = false
+        hasAutoPromptedForEpisode = false
+        _nasConnectError.value = null
+        _refreshProblem.value = null
         generation++
         _displayedSource.value = PreferredSource.NAS
         _origin.value = SnapshotOrigin.NAS
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(PREFS_PREFERRED_SOURCE, "nas").apply()
-        refresh(isAutomatic = false)
+        // Fast read of stored snapshot on login without triggering collection wait
+        refresh(isAutomatic = true)
     }
 
     fun useNAS() {
         generation++
+        _nasNeedsLogin.value = false
+        hasAutoPromptedForEpisode = false
         _displayedSource.value = PreferredSource.NAS
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(PREFS_PREFERRED_SOURCE, "nas").apply()
@@ -259,6 +274,17 @@ class SnapshotStore(
                     serverStillCollecting = true
                 }
 
+                if (currentGen != generation || myToken != nasRefreshToken) return@launch
+
+                _state.value = LoadState.Loaded(snapshot)
+                _origin.value = SnapshotOrigin.NAS
+                _refreshProblem.value = describeRefreshOutcome(
+                    fetchResult.refreshOutcome,
+                    fetchResult.retryAfterSeconds
+                )
+                _nasNeedsLogin.value = false
+                hasAutoPromptedForEpisode = false
+
                 // Try fetching Gemini online relay and NAS consumption history asynchronously
                 val onlineRelayData = withContext(Dispatchers.IO) { NASClient.fetchStoredOnlineRelay() }
                 if (onlineRelayData != null) {
@@ -275,18 +301,19 @@ class SnapshotStore(
                 if (currentGen != generation || myToken != nasRefreshToken) return@launch
 
                 _state.value = LoadState.Loaded(snapshot)
-                _origin.value = SnapshotOrigin.NAS
-                // The snapshot GET succeeded (real NAS data), but a manual job that
-                // failed/deferred/vanished must still be reported, not silently dropped.
-                _refreshProblem.value = describeRefreshOutcome(
-                    fetchResult.refreshOutcome,
-                    fetchResult.retryAfterSeconds
-                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 if (currentGen != generation || myToken != nasRefreshToken) return@launch
                 val errMsg = e.message ?: "데이터를 불러오지 못했습니다."
+
+                if (e is NASFetchException.NotAuthenticated) {
+                    _nasNeedsLogin.value = true
+                    if (!hasAutoPromptedForEpisode) {
+                        hasAutoPromptedForEpisode = true
+                        _isNASLoginPresented.value = true
+                    }
+                }
 
                 if (hasExistingSnapshot) {
                     _refreshProblem.value = errMsg
@@ -389,6 +416,9 @@ class SnapshotStore(
 
                 generation++
                 _displayedSource.value = PreferredSource.FILE
+                _nasNeedsLogin.value = false
+                _isNASLoginPresented.value = false
+                hasAutoPromptedForEpisode = false
                 _origin.value = SnapshotOrigin.PICKED_FILE
                 _sourceFileName.value = fileName
                 _state.value = LoadState.Loaded(snapshot)

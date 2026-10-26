@@ -111,6 +111,7 @@ fun TabletDashboard(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val refreshProblem by store.refreshProblem.collectAsState()
+    val nasNeedsLogin by store.nasNeedsLogin.collectAsState()
     val nasBusy by store.nasRefreshBusy.collectAsState()
     val currentSource by store.displayedSource.collectAsState()
     val palette = LocalCCMBPalette.current
@@ -150,7 +151,15 @@ fun TabletDashboard(
                 isWarning = false
             )
         }
-        if (refreshProblem != null) {
+        if (nasNeedsLogin && currentSource == PreferredSource.NAS) {
+            Spacer(modifier = Modifier.height(4.dp))
+            val loginMsg = refreshProblem ?: "NAS에 다시 로그인해 주세요."
+            BannerCard(
+                text = "$loginMsg · 탭하여 NAS 로그인",
+                isWarning = true,
+                onClick = { store.requestNASLogin() }
+            )
+        } else if (refreshProblem != null) {
             Spacer(modifier = Modifier.height(4.dp))
             BannerCard(
                 text = refreshProblem!!,
@@ -256,6 +265,15 @@ private fun TabletTopHeader(
                         store.useNAS()
                     }
                 )
+                if (store.displayedSource.value == PreferredSource.NAS) {
+                    DropdownMenuItem(
+                        text = { Text("NAS 로그인") },
+                        onClick = {
+                            showSourceMenu = false
+                            store.requestNASLogin()
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("로컬 파일(JSON) 가져오기") },
                     onClick = {

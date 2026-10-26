@@ -5,8 +5,11 @@ import com.armsone.ccmb.model.NASConsumptionHistory
 import com.armsone.ccmb.model.Service
 import com.armsone.ccmb.model.UsageConsumptionPoint
 import com.armsone.ccmb.model.UsageSnapshot
+import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -88,25 +91,80 @@ object NASClient {
 
     fun hasSessionCookie(): Boolean = getSessionCookie() != null
 
+    fun flushCookies() {
+        try {
+            CookieManager.getInstance().flush()
+        } catch (_: Exception) {}
+    }
+
+    private fun extractSetCookies(conn: HttpURLConnection): List<String> {
+        val results = mutableListOf<String>()
+        for ((key, values) in conn.headerFields) {
+            if (key != null && key.equals("Set-Cookie", ignoreCase = true)) {
+                for (v in values) {
+                    if (!v.isNullOrBlank()) {
+                        results.add(v)
+                    }
+                }
+            }
+        }
+        return results
+    }
+
+    private suspend fun applySetCookies(urlString: String, cookies: List<String>) {
+        if (cookies.isEmpty()) return
+        withContext(Dispatchers.Main) {
+            val cookieManager = CookieManager.getInstance()
+            for (cookie in cookies) {
+                suspendCancellableCoroutine<Boolean> { cont ->
+                    cookieManager.setCookie(urlString, cookie) { success ->
+                        if (cont.isActive) {
+                            cont.resume(success)
+                        }
+                    }
+                }
+            }
+            cookieManager.flush()
+        }
+    }
+
     suspend fun checkSession(): Boolean = withContext(Dispatchers.IO) {
         val cookie = getSessionCookie() ?: return@withContext false
+        var conn: HttpURLConnection? = null
         try {
             val url = URL("${NASConfig.baseURLString}/api/session")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            if (!isSameOrigin(url)) {
+                return@withContext false
+            }
+            conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 instanceFollowRedirects = false
                 connectTimeout = 10_000
                 readTimeout = 10_000
                 setRequestProperty("Cookie", "$SESSION_COOKIE_NAME=$cookie")
             }
-            if (conn.responseCode in 200..299) {
-                val text = conn.inputStream.bufferedReader().use { it.readText() }
+            val setCookies = extractSetCookies(conn)
+            val code = conn.responseCode
+            val text = if (code in 200..299) {
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                conn.errorStream?.bufferedReader()?.use { it.readText() }
+                null
+            }
+            if (setCookies.isNotEmpty()) {
+                applySetCookies(NASConfig.baseURLString, setCookies)
+            }
+            if (code in 200..299 && text != null) {
                 val json = JSONObject(text)
                 return@withContext json.optBoolean("authenticated", false)
             }
             false
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             false
+        } finally {
+            conn?.disconnect()
         }
     }
 
@@ -128,8 +186,9 @@ object NASClient {
         }
         val cookie = getSessionCookie() ?: throw NASFetchException.NotAuthenticated
 
+        var conn: HttpURLConnection? = null
         try {
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            conn = (url.openConnection() as HttpURLConnection).apply {
                 this.requestMethod = method
                 instanceFollowRedirects = false
                 connectTimeout = timeoutSeconds * 1000
@@ -149,15 +208,25 @@ object NASClient {
             }
 
             val code = conn.responseCode
+            val setCookies = extractSetCookies(conn)
             val stream: InputStream? = if (code in 200..299) conn.inputStream else conn.errorStream
             val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
+
+            if (setCookies.isNotEmpty()) {
+                applySetCookies(NASConfig.baseURLString, setCookies)
+            }
+
             Pair(code, bytes)
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: SocketTimeoutException) {
             // Raw IO failures surfaced as "timeout"/"Unable to resolve host" before;
             // map them so the visible refreshProblem is a real, readable message.
             throw NASFetchException.Timeout
         } catch (_: IOException) {
             throw NASFetchException.Network
+        } finally {
+            conn?.disconnect()
         }
     }
 
