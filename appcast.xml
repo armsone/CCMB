@@ -3,6 +3,23 @@
     <channel>
         <title>CCMB</title>
         <item>
+            <title>2.4.8</title>
+            <pubDate>Mon, 26 Oct 2026 20:26:05 +0900</pubDate>
+            <link>https://github.com/armsone/CCMB/releases/tag/v2.4.8</link>
+            <sparkle:version>202610262006</sparkle:version>
+            <sparkle:shortVersionString>2.4.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# CCMB 2.4.8
+
+- 제목 오른쪽에 playground 실행·준비·대기 개수를 표시합니다.
+- 갱신이 오래되었거나 실패해도 마지막 성공 값을 유지하고, 경고를 눈에 보이게 표시합니다.
+- 간략 보기의 새로고침 아이콘이 기존 동작을 그대로 유지합니다.
+
+Build-Number: 202610262006
+]]></description>
+            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.4.8/CCMB-2.4.8.zip" length="3565885" type="application/octet-stream" sparkle:edSignature="0twAGgrtENh25kCSgj2uriYxhcakDopsKDUPjPQEpDCg5bl3lv26Kig76RaZEAAE0tkmQ5bO+Ai75ghrxU+7Bw=="/>
+        </item>
+        <item>
             <title>2.4.6</title>
             <pubDate>Sun, 25 Oct 2026 21:01:07 +0900</pubDate>
             <link>https://github.com/armsone/CCMB/releases/tag/v2.4.6</link>
@@ -37,22 +54,6 @@ Build-Number: 202610252029
 확인 범위: Developer ID 서명·공증(staple)·Gatekeeper 검사와 이 Mac의 데이터 유지 교체 설치·실행을 확인했습니다.
 ]]></description>
             <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.4.0/CCMB-2.4.0.zip" length="3509596" type="application/octet-stream" sparkle:edSignature="oj6nuAYkPePXeDI+WahCuC0QOIF92HLLLZuOU5oz3H0q6PHLsVFmfHPeorq55qJr+T8w/om+fHPX3NJDWQPyCw=="/>
-        </item>
-        <item>
-            <title>2.1.15</title>
-            <pubDate>Fri, 16 Oct 2026 20:15:56 +0900</pubDate>
-            <link>https://github.com/armsone/CCMB/releases/tag/v2.1.15</link>
-            <sparkle:version>202610162004</sparkle:version>
-            <sparkle:shortVersionString>2.1.15</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <description sparkle:format="markdown"><![CDATA[# CCMB 2.1.15
-
-- NAS에서 받은 계정·요금제·초기화 정보를 기존 세 서비스 화면에 표시합니다.
-- Gemini 본계정과 부계정의 세션·주간 한도를 한 카드에서 비교하고 계정명을 간결하게 표시합니다.
-- Codex와 Claude의 초기화 개수·만료시간을 표시하고, 만료시간은 작은 글씨로 오른쪽 정렬합니다.
-- NAS 조회 주기와 소비 이력 표시를 정리하고, 오류가 발생해도 마지막 정상 정보를 유지합니다.
-]]></description>
-            <enclosure url="https://github.com/armsone/CCMB/releases/download/v2.1.15/CCMB-2.1.15.zip" length="3185946" type="application/octet-stream" sparkle:edSignature="g2Lmeld5NOgS/KKKVJWNaeileXcKJb4AKsXK7+XQHnyG6Kxq8kEsaGaEyxSZjt5/bvDTcCSGtIr/iQuJWhDbBA=="/>
         </item>
         <item>
             <title>2.0.34</title>
