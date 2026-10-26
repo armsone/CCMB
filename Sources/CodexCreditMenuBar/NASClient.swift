@@ -13,6 +13,7 @@ enum NASConfig {
     static let sshExecutablePath = "/usr/bin/ssh"
     static let sshAlias = "hanstree-dev"
     static let remoteCommand = "python3 /workspace/web-app/usage.py --snapshot-json"
+    static let remoteTaskStatusCommand = "python3 /workspace/web-app/usage.py --task-status-json"
     static let remoteHistoryCommand = "python3 /workspace/web-app/usage.py --history-json"
     /// 24-hour history (schemaVersion 3). A separate fixed command so the
     /// strict 40-point v2 command above keeps working for older apps.

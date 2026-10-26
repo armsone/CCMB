@@ -2307,6 +2307,107 @@ final class ThemeControlButton: RolloverButton {
     }
 }
 
+/// Compact rounded pill next to the CCMB title: 실행 N 준비 N 대기 N.
+@MainActor
+final class TaskStatusPillView: NSView {
+    private let label: NSTextField = {
+        let field = NSTextField(labelWithString: "")
+        field.lineBreakMode = .byTruncatingTail
+        field.alignment = .center
+        return field
+    }()
+
+    override var isFlipped: Bool { true }
+
+    private(set) var display: NASTaskStatusDisplay = .hidden
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(label)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    func apply(_ newDisplay: NASTaskStatusDisplay) {
+        display = newDisplay
+        isHidden = newDisplay == .hidden
+        let font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        let digits = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+        let ink = BKStyleTokens.secondaryInk
+        let result = NSMutableAttributedString()
+        func plain(_ text: String, _ color: NSColor) {
+            result.append(NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color]))
+        }
+        func segment(_ name: String, _ value: Int, _ color: NSColor, last: Bool = false) {
+            plain("\(name) ", ink)
+            result.append(NSAttributedString(string: "\(value)", attributes: [.font: digits, .foregroundColor: color]))
+            if !last { plain("  ", ink) }
+        }
+        var tip = ""
+        switch newDisplay {
+        case .hidden:
+            tip = ""
+        case .checking:
+            plain("확인 중", ink)
+            tip = "NAS 작업 상태 확인 중"
+        case .unavailable:
+            plain("연결 확인 필요", NSColor.systemOrange.withAlphaComponent(0.9))
+            tip = "NAS 작업 상태를 가져오지 못했습니다. 연결 확인 필요"
+        case .counts(let counts, let fetchedAt, let stale, let failed):
+            let dim: CGFloat = stale || failed ? 0.55 : 1
+            segment("실행", counts.running, NSColor.systemGreen.withAlphaComponent(0.9 * dim))
+            segment("준비", counts.preparing, NSColor.systemBlue.withAlphaComponent(0.9 * dim))
+            segment("대기", counts.waiting, NSColor.systemOrange.withAlphaComponent(0.9 * dim), last: true)
+            if stale || failed {
+                result.append(NSAttributedString(string: " !", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                    .foregroundColor: NSColor.systemOrange
+                ]))
+            }
+            tip = "NAS 작업 상태 · 실행 \(counts.running) · 준비 \(counts.preparing) · 대기 \(counts.waiting)"
+                + " · 가져온 시각 \(Self.timeFormatter.string(from: fetchedAt))"
+            if failed { tip += " · 최근 갱신 실패(이전 값)" } else if stale { tip += " · 오래된 정보" }
+        }
+        label.attributedStringValue = result
+        toolTip = tip.isEmpty ? nil : tip
+        setAccessibilityLabel(tip.isEmpty ? nil : tip)
+        needsDisplay = true
+    }
+
+    /// Natural width of the current text including pill padding.
+    var preferredWidth: CGFloat {
+        guard !isHidden else { return 0 }
+        return ceil(label.attributedStringValue.size().width) + 16
+    }
+
+    override func layout() {
+        super.layout()
+        label.frame = NSRect(x: 6, y: (bounds.height - 14) / 2, width: max(0, bounds.width - 12), height: 14)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !isHidden else { return }
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+        BKStyleTokens.charcoalInk.withAlphaComponent(0.07).setFill()
+        path.fill()
+        BKStyleTokens.charcoalInk.withAlphaComponent(0.12).setStroke()
+        path.lineWidth = 0.5
+        path.stroke()
+    }
+}
+
 /// Panel header shared by the status dropdown, the pinned panel, and the
 /// native fallback menu: CCMB identity with its icon well, the last global
 /// refresh, a compact refresh action, and unobtrusive theme access.
@@ -2328,11 +2429,14 @@ final class UsagePanelHeaderView: NSView {
         field.lineBreakMode = .byClipping
         return field
     }()
+    private let taskStatusPill = TaskStatusPillView(frame: .zero)
     private let refreshButton: RolloverButton = {
-        let button = RolloverButton(title: "새로고침", target: nil, action: nil)
+        let button = RolloverButton(title: "", target: nil, action: nil)
         button.bezelStyle = .rounded
         button.controlSize = .small
-        button.font = .systemFont(ofSize: 11)
+        button.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "새로고침")
+        button.imagePosition = .imageOnly
+        button.toolTip = "새로고침"
         button.setAccessibilityLabel("모든 제공자 사용량 새로 고침")
         return button
     }()
@@ -2364,6 +2468,7 @@ final class UsagePanelHeaderView: NSView {
         addSubview(wellView)
         addSubview(titleLabel)
         addSubview(updatedLabel)
+        addSubview(taskStatusPill)
         addSubview(refreshButton)
         addSubview(themeButton)
         addSubview(settingsButton)
@@ -2391,6 +2496,16 @@ final class UsagePanelHeaderView: NSView {
         titleLabel.toolTip = text.isEmpty ? nil : text
     }
 
+    func setTaskStatus(_ display: NASTaskStatusDisplay) {
+        taskStatusPill.apply(display)
+        layoutContent()
+    }
+
+    override func layout() {
+        super.layout()
+        layoutContent()
+    }
+
     func setSettingsExpanded(_ expanded: Bool) {
         settingsButton.title = expanded ? "•••" : "•••"
     }
@@ -2403,6 +2518,8 @@ final class UsagePanelHeaderView: NSView {
         titleLabel.textColor = BKStyleTokens.charcoalInk
         updatedLabel.textColor = BKStyleTokens.secondaryInk
         themeButton.updateDisplay()
+        taskStatusPill.apply(taskStatusPill.display)
+        layoutContent()
         needsDisplay = true
     }
 
@@ -2427,24 +2544,25 @@ final class UsagePanelHeaderView: NSView {
         let sidePadding = UsagePanelLayout.sidePadding
         let settingsWidth: CGFloat = 36
         let themeWidth: CGFloat = 94
-        let refreshWidth: CGFloat = 66
+        let refreshWidth: CGFloat = 32
+        let titleWidth: CGFloat = 42
         let buttonHeight: CGFloat = 22
         let buttonY = (Self.viewHeight - buttonHeight) / 2
         wellView.frame = NSRect(x: sidePadding, y: (Self.viewHeight - 18) / 2, width: 18, height: 18)
-        titleLabel.frame = NSRect(x: sidePadding + 24, y: (Self.viewHeight - 16) / 2, width: 50, height: 16)
+        titleLabel.frame = NSRect(x: sidePadding + 24, y: (Self.viewHeight - 16) / 2, width: titleWidth, height: 16)
         let settingsX = bounds.width - sidePadding - settingsWidth
         settingsButton.frame = NSRect(x: settingsX, y: buttonY, width: settingsWidth, height: buttonHeight)
         let themeX = settingsX - 6 - themeWidth
         themeButton.frame = NSRect(x: themeX, y: buttonY, width: themeWidth, height: buttonHeight)
         let refreshX = themeX - 6 - refreshWidth
         refreshButton.frame = NSRect(x: refreshX, y: buttonY, width: refreshWidth, height: buttonHeight)
-        let updatedX = sidePadding + 24 + 50 + 6
-        updatedLabel.frame = NSRect(
-            x: updatedX,
-            y: (Self.viewHeight - 14) / 2,
-            width: max(0, refreshX - 8 - updatedX),
-            height: 14
-        )
+        let pillX = sidePadding + 24 + titleWidth + 2
+        let pillHeight: CGFloat = 18
+        let pillWidth = min(taskStatusPill.preferredWidth, max(0, refreshX - 8 - pillX))
+        taskStatusPill.frame = NSRect(x: pillX, y: (Self.viewHeight - pillHeight) / 2, width: pillWidth, height: pillHeight)
+        // The "updated" caption is intentionally empty (see setLastUpdatedText);
+        // it takes no width so it can never overlap the pill or the buttons.
+        updatedLabel.frame = NSRect(x: pillX + pillWidth, y: (Self.viewHeight - 14) / 2, width: 0, height: 14)
     }
 }
 
@@ -2810,8 +2928,9 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 
     /// Header state that changes independently of the dashboard model:
     /// the last-refresh caption and the stored theme selection.
-    func applyHeaderState(lastUpdatedText: String) {
+    func applyHeaderState(lastUpdatedText: String, taskStatus: NASTaskStatusDisplay = .hidden) {
         headerView.setLastUpdatedText(lastUpdatedText)
+        headerView.setTaskStatus(taskStatus)
         headerView.applyThemeState()
         headerView.setSettingsExpanded(isSettingsExpanded)
     }

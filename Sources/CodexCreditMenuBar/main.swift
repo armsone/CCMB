@@ -1503,6 +1503,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// When the last NAS snapshot response (of any per-service outcome)
     /// arrived, for the panel header.
     private var lastNASSnapshotReceivedAt: Date?
+    private let nasTaskStatusStore = NASTaskStatusStore()
     /// Last successfully parsed NAS consumption-history v2 envelope. A
     /// transport error, a helper `{ok:false}` result or an unknown schema
     /// never clears this — it only stops updating it — and local history is
@@ -2862,6 +2863,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             self.updateSplitPanel()
         }
         refreshNASHistory(force: force)
+        refreshNASTaskStatus(force: force)
+    }
+
+    /// Aggregate task counts for the header pill, on the same trigger and
+    /// throttle as the NAS snapshot. Results from a previous data source are
+    /// dropped by the generation guard.
+    private func refreshNASTaskStatus(force: Bool) {
+        guard isNASMode else { return }
+        let requestedGeneration = dataSourceGeneration
+        let minimumInterval: TimeInterval = force ? 0 : Self.nasRefreshInterval
+        nasTaskStatusStore.fetchIfDue(minimumInterval: minimumInterval) { [weak self] in
+            guard let self, self.isNASMode, self.dataSourceGeneration == requestedGeneration else { return }
+            self.updatePanelHeaders()
+        }
+    }
+
+    private func currentTaskStatusDisplay() -> NASTaskStatusDisplay {
+        isNASMode ? nasTaskStatusStore.display() : .hidden
     }
 
     /// NAS mode never calls the OAuth/API clients directly, so the three
@@ -3572,8 +3591,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         menuHeaderView.setLastUpdatedText(text)
         menuHeaderView.applyThemeState()
-        statusDropdownController.applyHeaderState(lastUpdatedText: text)
-        pinnedUsageWindowController?.applyHeaderState(lastUpdatedText: text)
+        let taskStatus = currentTaskStatusDisplay()
+        menuHeaderView.setTaskStatus(taskStatus)
+        statusDropdownController.applyHeaderState(lastUpdatedText: text, taskStatus: taskStatus)
+        pinnedUsageWindowController?.applyHeaderState(lastUpdatedText: text, taskStatus: taskStatus)
     }
 
     /// Shared status band for NAS-sourced cards: the latest failure (if
@@ -4829,6 +4850,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             grokAuthRecoveryInProgress = false
             NASFourServiceClient.cancelInFlight()
             NASHistoryClient.cancelInFlight()
+            nasTaskStatusStore.cancelInFlight()
             if !isOffline {
                 client.start()
                 refreshClaudeUsage(force: true)
@@ -4921,6 +4943,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             controller.onThemeChange = { [weak self] in self?.applyPanelTheme($0) }
             controller.setShareMenu(makeShareMenu())
             controller.onCheckForUpdates = { [weak self] in self?.updaterController.checkForUpdates(nil) }
+            controller.applyHeaderState(lastUpdatedText: "", taskStatus: currentTaskStatusDisplay())
             controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
             controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
             controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
