@@ -2,6 +2,8 @@ package com.armsone.ccmb.store
 
 import android.webkit.CookieManager
 import com.armsone.ccmb.model.NASConsumptionHistory
+import com.armsone.ccmb.model.NASTaskStatus
+import com.armsone.ccmb.model.NASTaskStatusState
 import com.armsone.ccmb.model.Service
 import com.armsone.ccmb.model.UsageConsumptionPoint
 import com.armsone.ccmb.model.UsageSnapshot
@@ -360,6 +362,39 @@ object NASClient {
                 }
                 else -> return NASRefreshOutcome.STILL_RUNNING
             }
+        }
+    }
+
+    suspend fun fetchTaskStatus(): NASTaskStatus {
+        val (code, data) = requestHttp("GET", "${NASConfig.baseURLString}/api/ccmb/task-status", timeoutSeconds = 10)
+        classifyCode(code)?.let { throw it }
+        if (data.size > 4096) throw NASFetchException.UnreadableResponse
+        return try {
+            val root = JSONObject(String(data, Charsets.UTF_8))
+            fun count(key: String): Int {
+                val v = root.get(key)
+                if (v !is Int && v !is Long) throw IllegalArgumentException(key)
+                val n = (v as Number).toLong()
+                if (n < 0 || n > Int.MAX_VALUE) throw IllegalArgumentException(key)
+                return n.toInt()
+            }
+            val schema = root.get("schemaVersion")
+            if ((schema !is Int && schema !is Long) || (schema as Number).toLong() != 1L) {
+                throw IllegalArgumentException("schemaVersion")
+            }
+            val capturedAtMs = Instant.parse(root.getString("capturedAt")).toEpochMilli()
+            val ageMs = System.currentTimeMillis() - capturedAtMs
+            if (ageMs > NASTaskStatusState.STALE_AFTER_MS || ageMs < -300_000L) {
+                throw IllegalArgumentException("capturedAt")
+            }
+            NASTaskStatus(
+                running = count("running"),
+                preparing = count("preparing"),
+                waiting = count("waiting"),
+                capturedAtMs = capturedAtMs
+            )
+        } catch (_: Exception) {
+            throw NASFetchException.UnreadableResponse
         }
     }
 

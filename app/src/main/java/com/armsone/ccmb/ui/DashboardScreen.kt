@@ -2,6 +2,7 @@ package com.armsone.ccmb.ui
 
 import android.app.Activity
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -38,9 +39,11 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -55,14 +58,18 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -80,6 +87,7 @@ import com.armsone.ccmb.store.WeatherStore
 import com.armsone.ccmb.theme.CCMBAppearance
 import com.armsone.ccmb.theme.CCMBTheme
 import com.armsone.ccmb.theme.LocalCCMBPalette
+import kotlinx.coroutines.delay
 import kotlin.math.max
 import kotlin.math.min
 
@@ -329,6 +337,66 @@ private fun referenceHeight(service: Service): Dp = when (service) {
 // 5카드+배너가 한 화면에 못 들어가면 짧게 스크롤되는 쪽을 택한다(그래프 가독성 우선).
 private fun minimumHeight(service: Service): Dp = 160.dp
 
+/** CCMB 제목 바로 오른쪽의 플레이그라운드 실행/준비/대기 카운트. NAS 소스일 때만 표시. */
+@Composable
+internal fun TaskStatusPill(store: SnapshotStore, modifier: Modifier = Modifier) {
+    val source by store.displayedSource.collectAsState()
+    if (source != PreferredSource.NAS) return
+    val status by store.taskStatus.collectAsState()
+    val palette = LocalCCMBPalette.current
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(status) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(15_000)
+        }
+    }
+    val counts = status.counts
+    val warn = status.failed || status.isStale(nowMs)
+    val digitSpanStyle = { color: Color ->
+        SpanStyle(color = color, fontFamily = FontFamily.Monospace, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+    }
+    Row(
+        modifier = modifier
+            .padding(start = 8.dp)
+            .clip(RoundedCornerShape(50))
+            .border(1.dp, palette.muted.copy(alpha = 0.4f), RoundedCornerShape(50))
+            .padding(horizontal = 7.dp, vertical = 2.dp)
+            .clearAndSetSemantics { contentDescription = status.accessibilityLabel(nowMs) },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (counts == null) {
+            Text(
+                text = if (status.failed) "! 연결 확인 필요" else "확인 중",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (status.failed) CCMBTheme.signalRed else palette.muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        } else {
+            Text(
+                text = buildAnnotatedString {
+                    if (warn) {
+                        withStyle(SpanStyle(color = CCMBTheme.signalRed, fontWeight = FontWeight.Bold)) { append("!") }
+                        append(" ")
+                    }
+                    withStyle(SpanStyle(color = palette.muted)) { append("실행 ") }
+                    withStyle(digitSpanStyle(Color(0xFF12BD8C))) { append("${counts.running}") }
+                    withStyle(SpanStyle(color = palette.muted)) { append(" 준비 ") }
+                    withStyle(digitSpanStyle(Color(0xFF3B82F6))) { append("${counts.preparing}") }
+                    withStyle(SpanStyle(color = palette.muted)) { append(" 대기 ") }
+                    withStyle(digitSpanStyle(Color(0xFFF59E0B))) { append("${counts.waiting}") }
+                },
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
 @Composable
 private fun DashboardHeader(
     snapshot: UsageSnapshot,
@@ -363,12 +431,19 @@ private fun DashboardHeader(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(
-                text = "CCMB",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.text
-            )
+            Row(
+                modifier = Modifier.weight(1f, fill = false),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "CCMB",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.text,
+                    maxLines = 1
+                )
+                TaskStatusPill(store = store, modifier = Modifier.weight(1f, fill = false))
+            }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CompactRefreshControl(store = store)

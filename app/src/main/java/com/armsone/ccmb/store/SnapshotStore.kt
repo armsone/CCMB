@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.AtomicFile
 import com.armsone.ccmb.model.ModelWeeklyLimit
 import com.armsone.ccmb.model.NASConsumptionHistory
+import com.armsone.ccmb.model.NASTaskStatusState
 import com.armsone.ccmb.model.PreferredSource
 import com.armsone.ccmb.model.Service
 import com.armsone.ccmb.model.ServiceUsage
@@ -76,8 +77,14 @@ class SnapshotStore(
     private val _sourceFileName = MutableStateFlow<String?>(null)
     val sourceFileName: StateFlow<String?> = _sourceFileName.asStateFlow()
 
+    private val _taskStatus = MutableStateFlow(NASTaskStatusState())
+    val taskStatus: StateFlow<NASTaskStatusState> = _taskStatus.asStateFlow()
+
     var generation = 0
         private set
+
+    private var taskStatusJob: Job? = null
+    private var taskStatusJobGeneration = -1
 
     private var autoRefreshJob: Job? = null
     private var nasRefreshJob: Job? = null
@@ -223,8 +230,27 @@ class SnapshotStore(
         }
     }
 
+    // 플레이그라운드 카운트: 사용량 조회와 독립. 실패해도 마지막 성공값은 유지하고 failed 만 표시한다.
+    private fun refreshTaskStatus(currentGen: Int) {
+        if (taskStatusJob?.isActive == true && taskStatusJobGeneration == currentGen) return
+        taskStatusJobGeneration = currentGen
+        taskStatusJob = scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { NASClient.fetchTaskStatus() }
+                if (currentGen != generation) return@launch
+                _taskStatus.value = NASTaskStatusState(counts = result, failed = false)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                if (currentGen != generation) return@launch
+                _taskStatus.value = _taskStatus.value.copy(failed = true)
+            }
+        }
+    }
+
     private fun refreshFromNAS(isAutomatic: Boolean) {
         val currentGen = generation
+        refreshTaskStatus(currentGen)
         // One NAS request per generation at a time: an automatic tick must not race a
         // manual job, otherwise the first finisher would clear the other's busy flags.
         if (nasRefreshJob?.isActive == true && nasRefreshJobGeneration == currentGen) return

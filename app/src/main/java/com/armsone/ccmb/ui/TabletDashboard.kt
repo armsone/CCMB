@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -218,12 +219,16 @@ private fun TabletTopHeader(
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         // App Title
-        Text(
-            text = "CCMB",
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            color = palette.text
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "CCMB",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.text,
+                maxLines = 1
+            )
+            TaskStatusPill(store = store, modifier = Modifier.widthIn(max = 220.dp))
+        }
 
         // Center: Sync info & Source switch
         Box(contentAlignment = Alignment.Center) {
@@ -442,7 +447,7 @@ private fun TabletLandscapeDashboard(
  * Tablet Portrait:
  * Six EXACT equal-size cells in 2 columns, 3 rows:
  * Row 1: Weather+Clock / Codex
- * Row 2: Claude / Gemini 1
+ * Row 2: Gemini 1 / Claude
  * Row 3: Gemini 2 / Gemini 3
  */
 @Composable
@@ -481,7 +486,7 @@ private fun TabletPortraitDashboard(
             }
         }
 
-        // Row 2: Claude / Gemini 1
+        // Row 2: Gemini 1 / Claude (Claude directly beneath Codex)
         Row(
             modifier = Modifier
                 .weight(1f)
@@ -490,14 +495,14 @@ private fun TabletPortraitDashboard(
         ) {
             Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                 TabletServiceCardItem(
-                    service = Service.CLAUDE,
+                    service = Service.GEMINI,
                     snapshot = snapshot,
                     onSelect = onSelectService
                 )
             }
             Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                 TabletServiceCardItem(
-                    service = Service.GEMINI,
+                    service = Service.CLAUDE,
                     snapshot = snapshot,
                     onSelect = onSelectService
                 )
