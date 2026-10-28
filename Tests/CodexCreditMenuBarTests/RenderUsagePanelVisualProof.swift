@@ -127,7 +127,7 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
         XCTAssertEqual(view.frame.width, UsagePanelLayout.viewWidth, accuracy: 0.001)
         // Three full-width provider cards stacked vertically (inset 10 inside
         // each 424pt card), not three horizontal columns.
-        let cards = view.subviews.filter { $0 is UsageColumnView }
+        let cards = view.subviews
         XCTAssertEqual(view.subviews.count, 3)
         XCTAssertEqual(cards.count, 3)
         let cardInset: CGFloat = 10

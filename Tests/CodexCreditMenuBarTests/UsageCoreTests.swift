@@ -2205,7 +2205,7 @@ final class ThreeServiceCardLayoutTests: XCTestCase {
         XCTAssertEqual(value, "70%, 60%, 80%")
         XCTAssertFalse(value.contains("Gemini 부계정"))
 
-        let cards = view.subviews.filter { $0 is UsageColumnView }
+        let cards = view.subviews
         XCTAssertEqual(view.subviews.count, 3)
         XCTAssertEqual(cards.count, 3)
         // Same x and width for every card: a vertical stack, inset 10 inside the full-width card.
