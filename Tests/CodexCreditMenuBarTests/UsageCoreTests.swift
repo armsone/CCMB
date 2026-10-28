@@ -10,42 +10,54 @@ final class LowerControlsLayoutTests: XCTestCase {
             versionTitle: "현재 버전 2.0.9"
         )
 
-        XCTAssertEqual(view.frame.height, 48, accuracy: 0.001)
+        // Two stacked 28pt rows: the buttons share the first, the opacity
+        // slider takes the second.
+        XCTAssertEqual(UsagePanelLayout.controlRowHeight, 28, accuracy: 0.001)
+        XCTAssertEqual(view.frame.height, UsagePanelLayout.controlRowHeight * 2, accuracy: 0.001)
+        XCTAssertEqual(view.frame.height, 56, accuracy: 0.001)
         XCTAssertEqual(view.alwaysViewButton.frame.minY, view.updateButton.frame.minY, accuracy: 0.001)
-        XCTAssertEqual(view.updateButton.frame.height, 42, accuracy: 0.001)
+        XCTAssertEqual(view.alwaysViewButton.frame.height, view.updateButton.frame.height, accuracy: 0.001)
+        XCTAssertEqual(view.updateButton.frame.height, 24, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(view.updateButton.frame.maxY, UsagePanelLayout.controlRowHeight)
+        XCTAssertGreaterThanOrEqual(view.opacitySlider.frame.minY, UsagePanelLayout.controlRowHeight)
+        XCTAssertLessThanOrEqual(view.opacitySlider.frame.maxY, view.frame.height)
         XCTAssertEqual(view.updateButton.title, "업데이트 확인 · 2.0.9")
     }
 
-    func testHistoryCaptionsFitOnOneLineWithoutRepeatingProviderName() throws {
+    func testHistoryChartDrawsProviderTabsInsteadOfRepeatingCaptionLabels() throws {
         let view = UsageHistoryChartView()
         let strip = UsageHistoryStrip(
             caption: "갱신당 주간 0% · Spark 0%",
             series: [],
             slotCount: 3,
             unitSuffix: "%",
-            accessibilityValue: "최근 갱신 소비 기록"
+            accessibilityValue: "최근 갱신 소비 기록",
+            sourceNote: "NAS 기록 18:53 기준"
         )
 
+        // The caption is no longer a standalone text field: the chart draws
+        // its own title, tabs and legend, so no subview may be a caption label.
         XCTAssertTrue(view.apply(codex: strip, claude: nil, gemini: nil, grok: nil))
-        let caption = try XCTUnwrap(view.subviews.compactMap { $0 as? NSTextField }.first { !$0.isHidden })
-        XCTAssertEqual(caption.stringValue, strip.caption)
-        XCTAssertFalse(caption.stringValue.contains("Codex"))
-        XCTAssertEqual(caption.maximumNumberOfLines, 1)
-        XCTAssertEqual(caption.lineBreakMode, .byClipping)
-        XCTAssertEqual(caption.cell?.truncatesLastVisibleLine, false)
-        XCTAssertEqual(caption.frame.height, 13, accuracy: 0.001)
-        XCTAssertLessThanOrEqual(caption.intrinsicContentSize.width, caption.frame.width)
+        XCTAssertTrue(view.subviews.compactMap { $0 as? NSTextField }.isEmpty)
+        XCTAssertEqual(view.subviews.count, 1)
+        XCTAssertEqual(view.frame.height, UsageHistoryChartView.viewHeight, accuracy: 0.001)
+        // The source note is delivered through the tooltip.
+        XCTAssertTrue(view.toolTip?.contains("NAS 기록 18:53 기준") ?? false)
+
+        XCTAssertFalse(view.apply(codex: nil, claude: nil, gemini: nil, grok: nil))
+        XCTAssertNil(view.toolTip)
     }
 
     func testHistoryHoverTimeUsesTwentyFourHourMinutesOnly() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
-            .appendingPathComponent("../../Sources/CodexCreditMenuBar/ClaudeUsagePanel.swift")
+            .appendingPathComponent("../../Sources/CodexCreditMenuBar/UsageTrendChart.swift")
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
 
         XCTAssertTrue(source.contains("formatter.dateFormat = \"HH:mm\""))
         XCTAssertFalse(source.contains("formatter.dateFormat = \"a h:mm:ss\""))
+        XCTAssertFalse(source.contains("formatter.dateFormat = \"HH:mm:ss\""))
     }
 
     func testAllDisplayedDatesIncludeWeekdayAndUseTwentyFourHourTime() throws {
@@ -92,10 +104,12 @@ final class UsageCoreTests: XCTestCase {
 
     @MainActor
     func testPinnedPanelContentScaleIsCompactAndClamped() {
-        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(0.2), 0.4)
-        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(0.4), 0.4)
+        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(0.2), 0.7)
+        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(0.7), 0.7)
         XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(0.8), 0.8)
-        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(1.4), 1.0)
+        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(1.4), 1.4)
+        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(1.6), 1.6)
+        XCTAssertEqual(PinnedUsageWindowController.normalizedContentScale(3.0), 1.6)
     }
 
     func testClaudePlanReadsOnlyAccountMetadataAndUsesRateLimitTier() {
@@ -896,6 +910,10 @@ enum NASSnapshotFixtures {
         service("gemini2", provider: "gemini", accountRef: "account2", ok: ok, items: items, error: error)
     }
 
+    static func gemini3(ok: Bool = true, items: String = gemini2Items, error: String = "null") -> String {
+        service("gemini3", provider: "gemini", accountRef: "account3", ok: ok, items: items, error: error)
+    }
+
     static let notCollected = #"{"code": "not_collected", "message": "아직 수집된 값이 없습니다."}"#
 
     /// `executionHosts`/`autoSwitch` are raw JSON fragments; `nil` omits
@@ -952,6 +970,7 @@ enum NASSnapshotFixtures {
     static let withHosts = envelope(services: [codex(), claude(), gemini(), gemini2()], executionHosts: twoHosts, autoSwitch: "true")
 
     static let valid = envelope(services: [codex(), claude(), gemini(), gemini2()])
+    static let validWithAccount3 = envelope(services: [codex(), claude(), gemini(), gemini2(), gemini3()])
 
     static func data(_ json: String) -> Data { Data(json.utf8) }
 
@@ -1332,11 +1351,42 @@ final class NASSnapshotV2CoreTests: XCTestCase {
     func testRejectsMissingDuplicateExtraOrReorderedServices() {
         XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini()])))
         XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.codex(), F.gemini(), F.gemini2()])))
-        XCTAssertNil(F.parse(F.envelope(services: [
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini2(), F.gemini()])))
+        // The required four are positional; an optional account3 cannot stand in for a missing one.
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(), F.gemini3()])))
+    }
+
+    func testLegacyFourServiceEnvelopeHasNoAccount3() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.valid))
+        XCTAssertEqual(snapshot.entries.map(\.service), ["codex", "claude", "gemini", "gemini2"])
+        XCTAssertFalse(snapshot.entries.contains { $0.id == .gemini3 })
+    }
+
+    func testOptionalAccount3IsParsedAfterTheFourRequiredServices() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.validWithAccount3))
+        XCTAssertEqual(snapshot.entries.map(\.service), ["codex", "claude", "gemini", "gemini2", "gemini3"])
+        XCTAssertEqual(snapshot.gemini3.accountRef, "account3")
+        XCTAssertEqual(snapshot.gemini3.provider, "gemini")
+        XCTAssertTrue(snapshot.gemini3.ok)
+    }
+
+    func testUnknownExtraServiceIsIgnoredWithoutRejectingKnownServices() throws {
+        // Only account3 is an accepted optional extension; any other trailing
+        // service (here a truly unknown account) is dropped, not trusted.
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(services: [
             F.codex(), F.claude(), F.gemini(), F.gemini2(),
             F.service("grok", provider: "grok", accountRef: nil),
+            F.service("gemini4", provider: "gemini", accountRef: "account4", items: F.gemini2Items),
         ])))
-        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini2(), F.gemini()])))
+        XCTAssertEqual(snapshot.entries.map(\.service), ["codex", "claude", "gemini", "gemini2"])
+        XCTAssertFalse(snapshot.entries.contains { $0.id == .gemini3 })
+    }
+
+    func testRejectsAccount3WithWrongIdentity() {
+        let wrongRef = F.service("gemini3", provider: "gemini", accountRef: "account2", items: F.gemini2Items)
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(), F.gemini2(), wrongRef])))
+        let wrongProvider = F.service("gemini3", provider: "claude", accountRef: "account3", items: F.gemini2Items)
+        XCTAssertNil(F.parse(F.envelope(services: [F.codex(), F.claude(), F.gemini(), F.gemini2(), wrongProvider])))
     }
 
     func testRejectsWrongIdentityPairing() {
@@ -1359,10 +1409,32 @@ final class NASFourServiceStateTests: XCTestCase {
         XCTAssertNotNil(state.claudeSnapshot)
         XCTAssertEqual(state.geminiSnapshot?.fiveHourRemainingFraction ?? -1, 0.8, accuracy: 0.0001)
         XCTAssertEqual(state.gemini2Snapshot?.fiveHourRemainingFraction ?? -1, 0.6, accuracy: 0.0001)
+        for id in NASServiceID.allCases where id != .gemini3 {
+            XCTAssertNil(state.slot(id).issue)
+            XCTAssertFalse(state.slot(id).isStale)
+        }
+        // A legacy four-service payload never conjures an account3 card.
+        XCTAssertNil(state.gemini3Snapshot)
+        XCTAssertNil(state.slot(.gemini3).lastGood)
+        XCTAssertNil(state.slot(.gemini3).issue)
+        XCTAssertFalse(state.hasGemini3)
+    }
+
+    func testFreshSnapshotWithAccount3FillsFifthSlotIndependently() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.validWithAccount3)))
         for id in NASServiceID.allCases {
             XCTAssertNil(state.slot(id).issue)
             XCTAssertFalse(state.slot(id).isStale)
         }
+        XCTAssertTrue(state.hasGemini3)
+        XCTAssertEqual(state.gemini3Snapshot?.fiveHourRemainingFraction ?? -1, 0.6, accuracy: 0.0001)
+
+        // A later legacy payload keeps account3's last value, only marked stale.
+        state.apply(try XCTUnwrap(F.parse(F.valid)))
+        XCTAssertNotNil(state.gemini3Snapshot)
+        XCTAssertTrue(state.slot(.gemini3).isStale)
+        XCTAssertFalse(state.slot(.gemini).isStale)
     }
 
     func testServiceFailureKeepsThatSlotsLastGoodValueAndUpdatesOthers() throws {
@@ -1400,10 +1472,22 @@ final class NASFourServiceStateTests: XCTestCase {
         state.applyFailure(label: NASFetchError.timeout.label)
         XCTAssertEqual(state.codexSnapshot?.usedPercent, before)
         XCTAssertNotNil(state.gemini2Snapshot)
-        for id in NASServiceID.allCases {
+        for id in NASServiceID.allCases where id != .gemini3 {
             XCTAssertTrue(state.slot(id).isStale)
             XCTAssertEqual(state.slot(id).issue, "NAS 응답 시간 초과")
         }
+        // The never-reported optional slot gets no invented failure card.
+        XCTAssertNil(state.slot(.gemini3).issue)
+        XCTAssertFalse(state.hasGemini3)
+    }
+
+    func testTransportFailureAlsoMarksReportedAccount3Stale() throws {
+        var state = NASFourServiceState()
+        state.apply(try XCTUnwrap(F.parse(F.validWithAccount3)))
+        state.applyFailure(label: NASFetchError.timeout.label)
+        XCTAssertNotNil(state.gemini3Snapshot)
+        XCTAssertTrue(state.slot(.gemini3).isStale)
+        XCTAssertEqual(state.slot(.gemini3).issue, "NAS 응답 시간 초과")
     }
 
     func testCacheRoundTripRestoresValuesAsStale() throws {
@@ -1533,7 +1617,7 @@ final class NASHostStatusTests: XCTestCase {
     func testMalformedHostsAreDroppedWithoutRejectingQuotaCards() throws {
         let malformed = [
             "\"tm-mini\"",                                              // string, not object
-            F.host(account: "\"account3\""),                             // unknown account
+            F.host(account: "\"account4\""),                             // truly unknown account
             F.host(account: "null"),                                     // missing account
             F.host(id: "user@example.com"),                              // email-like id
             F.host(id: "/volume1/worker"),                               // path-like id
@@ -1555,6 +1639,16 @@ final class NASHostStatusTests: XCTestCase {
         )))
         XCTAssertEqual(snapshot.hostStatus.hosts.map(\.hostID), ["ok-host"])
         XCTAssertEqual(snapshot.entries.filter(\.ok).count, 4)
+    }
+
+    func testHostRunningOptionalAccount3IsAccepted() throws {
+        let snapshot = try XCTUnwrap(F.parse(F.envelope(
+            services: [F.codex(), F.claude(), F.gemini(), F.gemini2()],
+            executionHosts: "[" + F.host(account: "\"account3\"") + "]",
+            autoSwitch: "true"
+        )))
+        XCTAssertEqual(snapshot.hostStatus.hosts.map(\.hostID), ["tm-mini"])
+        XCTAssertEqual(snapshot.hostStatus.hosts.first?.executionAccount, .gemini3)
     }
 
     func testNonArrayHostsAndNonBoolAutoSwitchDoNotRejectEnvelope() throws {
@@ -1921,6 +2015,7 @@ final class NASTransportTests: XCTestCase {
         XCTAssertEqual(NASConfig.sshExecutablePath, "/usr/bin/ssh")
         XCTAssertEqual(NASConfig.remoteCommand, "python3 /workspace/web-app/usage.py --snapshot-json")
         XCTAssertEqual(NASConfig.remoteHistoryCommand, "python3 /workspace/web-app/usage.py --history-json")
+        XCTAssertEqual(NASConfig.remoteHistory24hCommand, "python3 /workspace/web-app/ccmb-history-24h.py")
         XCTAssertEqual(NASConfig.sshArguments(remoteCommand: NASConfig.remoteHistoryCommand), [
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=yes",
@@ -2014,11 +2109,14 @@ final class NASTransportTests: XCTestCase {
 
     func testHistoryClientSurfacesHelperErrorAndSSHFailure() async throws {
         let body = Data(#"{"ok": false, "error": {"code": "not_collected", "message": "아직 수집된 기록이 없습니다."}}"#.utf8)
+        var askedCommands: [String] = []
         let helperClient = NASSnapshotClient { command in
-            XCTAssertEqual(command, NASConfig.remoteHistoryCommand)
+            askedCommands.append(command)
             return NASProcessOutput(exitStatus: 1, terminatedBySignal: false, stdout: body, stderrByteCount: 0)
         }
         let result = try await helperClient.fetchHistory()
+        // The 24-hour helper is asked first; its non-history answer falls back to the v2 helper.
+        XCTAssertEqual(askedCommands, [NASConfig.remoteHistory24hCommand, NASConfig.remoteHistoryCommand])
         XCTAssertEqual(result, .helperError(NASServiceError(code: "not_collected", message: "아직 수집된 기록이 없습니다.")))
 
         let sshFailure = NASSnapshotClient { _ in
@@ -2081,29 +2179,46 @@ final class ThreeServiceCardLayoutTests: XCTestCase {
         XCTAssertEqual([m.codex, m.claude, m.gemini].map(\.title), ["Codex", "Claude", "Gemini · 주"])
     }
 
-    func testCardGridHasThreeColumnsSpanningFullWidth() {
+    func testControlGridHasThreeCellsSpanningFullWidth() {
         XCTAssertEqual(UsagePanelLayout.columnCount, 3)
         XCTAssertEqual(UsagePanelLayout.columnX.count, 3)
-        let lastCardEdge = UsagePanelLayout.columnX[2] + UsagePanelLayout.columnWidth + UsagePanelLayout.sidePadding
-        XCTAssertEqual(lastCardEdge, UsagePanelLayout.viewWidth, accuracy: 0.001)
+        XCTAssertEqual(UsagePanelLayout.columnWidths, [124, 124, 160])
+        // Each cell uses its own width: the last one is wider than the first.
+        for index in 0..<3 {
+            XCTAssertEqual(UsagePanelLayout.columnWidth(for: index), UsagePanelLayout.columnWidths[index], accuracy: 0.001)
+        }
+        let lastCellEdge = UsagePanelLayout.columnX[2] + UsagePanelLayout.columnWidth(for: 2) + UsagePanelLayout.sidePadding
+        XCTAssertEqual(lastCellEdge, UsagePanelLayout.viewWidth, accuracy: 0.001)
+        XCTAssertEqual(UsagePanelLayout.viewWidth, 440, accuracy: 0.001)
         for index in 0..<2 {
-            XCTAssertGreaterThan(UsagePanelLayout.dividerX(after: index), UsagePanelLayout.columnX[index] + UsagePanelLayout.columnWidth)
+            XCTAssertGreaterThan(UsagePanelLayout.dividerX(after: index), UsagePanelLayout.columnX[index] + UsagePanelLayout.columnWidth(for: index))
             XCTAssertLessThan(UsagePanelLayout.dividerX(after: index), UsagePanelLayout.columnX[index + 1])
         }
     }
 
-    func testSplitPanelRendersExactlyThreeCardsAtFullWidth() {
+    func testSplitPanelRendersThreeVerticallyStackedFullWidthCards() throws {
         let view = SplitUsagePanelView()
         view.apply(model())
         XCTAssertEqual(view.frame.width, UsagePanelLayout.viewWidth, accuracy: 0.001)
+        XCTAssertEqual(view.accessibilityRole(), .group)
         let value = view.accessibilityValue() as? String ?? ""
-        XCTAssertTrue(value.contains("80%"))
+        XCTAssertEqual(value, "70%, 60%, 80%")
         XCTAssertFalse(value.contains("Gemini 부계정"))
-        let cardFrames = view.subviews
-            .filter { $0.frame.width == UsagePanelLayout.columnWidth }
-            .map(\.frame.minX)
-            .sorted()
-        XCTAssertEqual(cardFrames, UsagePanelLayout.columnX)
+
+        let cards = view.subviews.filter { $0 is UsageColumnView }
+        XCTAssertEqual(view.subviews.count, 3)
+        XCTAssertEqual(cards.count, 3)
+        // Same x and width for every card: a vertical stack, inset 10 inside the full-width card.
+        let expectedWidth = UsagePanelLayout.contentWidth - 20
+        for card in cards {
+            XCTAssertEqual(card.frame.minX, UsagePanelLayout.sidePadding + 10, accuracy: 0.001)
+            XCTAssertEqual(card.frame.width, expectedWidth, accuracy: 0.001)
+            XCTAssertEqual(card.frame.maxX, UsagePanelLayout.viewWidth - UsagePanelLayout.sidePadding - 10, accuracy: 0.001)
+        }
+        for (upper, lower) in zip(cards, cards.dropFirst()) {
+            XCTAssertGreaterThan(lower.frame.minY, upper.frame.maxY)
+        }
+        XCTAssertLessThanOrEqual(try XCTUnwrap(cards.last).frame.maxY, view.frame.height)
     }
 
     func testAppNeverWiresASecondGeminiCardOrHistoryStrip() throws {

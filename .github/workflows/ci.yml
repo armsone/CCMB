@@ -24,10 +24,10 @@ jobs:
           git checkout --detach FETCH_HEAD
       - name: Unit tests
         run: ./Scripts/swiftpm.sh test
-      - name: arm64 release build
-        run: ./Scripts/swiftpm.sh build --scratch-path .build/ci-arm64 --triple arm64-apple-macosx11.0 -c release
-      - name: x86_64 Catalina release build
-        run: ./Scripts/swiftpm.sh build --scratch-path .build/ci-x86_64 --triple x86_64-apple-macosx10.15 -c release
+      - name: arm64 macOS 12 release build
+        run: ./Scripts/swiftpm.sh build --scratch-path .build/ci-arm64 --triple arm64-apple-macosx12.0 -c release
+      - name: x86_64 macOS 12 release build
+        run: ./Scripts/swiftpm.sh build --scratch-path .build/ci-x86_64 --triple x86_64-apple-macosx12.0 -c release
       - name: Script syntax
         run: |
           bash -n Scripts/package-macos.sh

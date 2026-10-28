@@ -125,12 +125,22 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
         view.apply(sanitizedModel(selected: .gemini))
 
         XCTAssertEqual(view.frame.width, UsagePanelLayout.viewWidth, accuracy: 0.001)
-        let cardFrames = view.subviews
-            .filter { $0.frame.width == UsagePanelLayout.columnWidth }
-            .map(\.frame.minX)
-            .sorted()
-        XCTAssertEqual(cardFrames, UsagePanelLayout.columnX)
-        XCTAssertEqual(cardFrames.count, 3)
+        // Three full-width provider cards stacked vertically (inset 10 inside
+        // each 424pt card), not three horizontal columns.
+        let cards = view.subviews.filter { $0 is UsageColumnView }
+        XCTAssertEqual(view.subviews.count, 3)
+        XCTAssertEqual(cards.count, 3)
+        let cardInset: CGFloat = 10
+        let expectedWidth = UsagePanelLayout.contentWidth - cardInset * 2
+        for card in cards {
+            XCTAssertEqual(card.frame.minX, UsagePanelLayout.sidePadding + cardInset, accuracy: 0.001)
+            XCTAssertEqual(card.frame.width, expectedWidth, accuracy: 0.001)
+        }
+        for (upper, lower) in zip(cards, cards.dropFirst()) {
+            XCTAssertGreaterThan(lower.frame.minY, upper.frame.maxY, "cards must stack without overlapping")
+        }
+        XCTAssertEqual(cards.map(\.frame.minY), cards.map(\.frame.minY).sorted())
+        XCTAssertLessThanOrEqual(try XCTUnwrap(cards.last).frame.maxY, view.frame.height)
 
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             XCTFail("could not allocate offscreen bitmap")
@@ -239,7 +249,7 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(oldLines.count, 4, "fixture must reproduce the old multi-line chatter")
 
         let newLines = NASHostStatusPresentation.footerLines(for: .gemini, state: state, source: .nas)
-        XCTAssertLessThanOrEqual(newLines.count, 1, "restored footer must be at most one compact line")
+        XCTAssertLessThanOrEqual(newLines.count, 1, "footer must be at most one compact line")
         XCTAssertEqual(newLines, [])
 
         func model(extraGeminiLines: [String]) -> UsagePanelModel {
@@ -275,6 +285,33 @@ final class RenderUsagePanelVisualProofTests: XCTestCase {
             path: outputDir.map { "\($0)/gemini-host-footer-new.png" }
         )
 
-        XCTAssertLessThan(newHeight, oldHeight, "restored layout must be shorter than the chatter-filled layout")
+        // The card footer deliberately shows no account chatter any more (it
+        // is normalized away), so the old and new fixtures lay out equally tall...
+        XCTAssertEqual(newHeight, oldHeight, accuracy: 0.001, "host chatter must not grow the card")
+
+        // ...while the measurement still reacts to real footer content: a
+        // status line does make the same panel taller.
+        var withStatus = model(extraGeminiLines: newLines)
+        let gemini = withStatus.gemini
+        withStatus = UsagePanelModel(
+            codex: withStatus.codex,
+            claude: withStatus.claude,
+            gemini: UsagePanelColumn(
+                title: gemini.title,
+                accentColor: gemini.accentColor,
+                quota: gemini.quota,
+                secondaryQuota: gemini.secondaryQuota,
+                tertiaryQuota: gemini.tertiaryQuota,
+                quaternaryQuota: gemini.quaternaryQuota,
+                rowGroups: gemini.rowGroups,
+                accountLines: gemini.accountLines,
+                refreshLine: gemini.refreshLine,
+                statusLines: ["NAS 응답 시간 초과"],
+                statusColor: gemini.statusColor
+            ),
+            grok: withStatus.grok
+        )
+        let statusHeight = try renderAndMeasure(withStatus, path: nil)
+        XCTAssertGreaterThan(statusHeight, newHeight)
     }
 }
