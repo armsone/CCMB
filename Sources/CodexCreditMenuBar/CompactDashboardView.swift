@@ -431,16 +431,17 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
         let email = column.accountLines.first ?? ""
         accountLabel.stringValue = CompactDashboardView.formatAccountDisplay(email, defaultName: "본계정")
 
-        let remainingText = column.quota?.percentText ?? "—"
-        let fraction = column.quota?.fraction ?? 0
+        let weeklyQuota = column.secondaryQuota ?? (column.quota?.caption == "남은 크레딧" ? nil : column.quota)
+        let remainingText = weeklyQuota?.percentText ?? "—"
         let resetText = column.allRows.first(where: { $0.label.contains("주간 초기화") })?.value ?? ""
         quotaColumn.apply(label: "주간", value: remainingText, color: CCMBDashPalette.codex, reset: resetText)
 
         if let num = Double(remainingText.replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespaces)) {
             quotaBar.remainingPercent = num
         } else {
-            quotaBar.remainingPercent = fraction > 0 ? fraction * 100 : nil
+            quotaBar.remainingPercent = nil
         }
+        quotaBar.isHidden = (weeklyQuota?.fraction ?? 1) <= 0
 
         // Credit token balance
         if let creditRow = column.allRows.first(where: { $0.label.contains("남은 크레딧") }) {

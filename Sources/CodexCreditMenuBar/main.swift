@@ -3747,8 +3747,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             summaryRows.append(UsagePanelRow(label: "요금제", value: "NAS 미수집"))
         }
 
+        let weeklyQuota: UsagePanelQuota?
         if let usedPercent = snapshot.usedPercent {
             let remaining = remainingUsagePercent(from: usedPercent)
+            let actualWeeklyQuota = UsagePanelQuota(
+                caption: "주간 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Codex 주간 사용량 \(percentTitle(from: remaining))"
+            )
+            weeklyQuota = actualWeeklyQuota
             if UsageCore.codexQuotaDisplaysCredits(
                 usedPercent: snapshot.usedPercent,
                 creditBalance: snapshot.creditBalance
@@ -3763,15 +3772,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                     displayStyle: .prominentValue
                 )
             } else {
-                quota = UsagePanelQuota(
-                    caption: "주간 남음",
-                    percentText: percentTitle(from: remaining),
-                    fraction: remaining / 100,
-                    color: accent,
-                    accessibilityValue: "남은 Codex 주간 사용량 \(percentTitle(from: remaining))"
-                )
+                quota = actualWeeklyQuota
             }
         } else {
+            weeklyQuota = nil
             summaryRows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
         }
 
@@ -3826,7 +3830,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             title: "Codex",
             accentColor: accent,
             quota: quota,
-            secondaryQuota: nil,
+            secondaryQuota: weeklyQuota,
             rowGroups: rowGroups,
             accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
             refreshLine: "업데이트 \(relativeUpdate)",
@@ -5210,25 +5214,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     /// The percent sign is dropped from the menu bar readout and the number
-    /// carries the provider accent instead.
+    /// carries the provider accent instead. Numeric token counts without a
+    /// percent sign also carry the provider accent; nonnumeric placeholders
+    /// (e.g. "—", "!") keep the adaptive text color.
     private func appendStatusPart(
         _ text: String,
         providerColor: NSColor,
         font: NSFont,
         to title: NSMutableAttributedString
     ) {
-        guard let percentIndex = text.lastIndex(of: "%") else {
+        if let percentIndex = text.lastIndex(of: "%") {
+            let number = String(text[..<percentIndex])
             title.append(NSAttributedString(
-                string: text,
-                attributes: statusTitleAttributes(font: font, color: statusAdaptiveTextColor())
+                string: number,
+                attributes: statusTitleAttributes(font: font, color: providerColor)
             ))
             return
         }
 
-        let number = String(text[..<percentIndex])
+        let isNumeric = Double(text.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)) != nil
+        let color = isNumeric ? providerColor : statusAdaptiveTextColor()
         title.append(NSAttributedString(
-            string: number,
-            attributes: statusTitleAttributes(font: font, color: providerColor)
+            string: text,
+            attributes: statusTitleAttributes(font: font, color: color)
         ))
     }
 
